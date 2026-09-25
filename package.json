@@ -1,0 +1,76 @@
+{
+  "name": "@jiangliuhong/orchard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "orchard": "./dist/cli/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "pnpm build && node --test tests/*.test.mjs",
+    "test:e2e": "pnpm build && node --test tests/e2e/*.test.mjs",
+    "test:package": "pnpm build && npm pack --dry-run",
+    "dev": "pnpm build && node dist/cli/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/server/app.d.ts",
+      "import": "./dist/server/app.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow-sdk/index.d.ts",
+      "import": "./dist/workflow-sdk/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage/database.d.ts",
+      "import": "./dist/storage/database.js"
+    },
+    "./authoring": {
+      "types": "./dist/authoring/compiler.d.ts",
+      "import": "./dist/authoring/compiler.js"
+    },
+    "./artifacts": {
+      "types": "./dist/artifacts/store.d.ts",
+      "import": "./dist/artifacts/store.js"
+    },
+    "./scheduler": {
+      "types": "./dist/scheduler/run-queue.d.ts",
+      "import": "./dist/scheduler/run-queue.js"
+    },
+    "./core-cli": {
+      "types": "./dist/integrations/cli/index.d.ts",
+      "import": "./dist/integrations/cli/index.js"
+    },
+    "./pi": {
+      "types": "./dist/integrations/pi/index.d.ts",
+      "import": "./dist/integrations/pi/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "devDependencies": {
+    "@types/node": "^24.13.6",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "~0.34.52",
+    "ajv": "^8.20.0",
+    "commander": "^14.0.3",
+    "drizzle-orm": "~0.44.7",
+    "esbuild": "~0.25.12",
+    "fastify": "^5.12.5",
+    "uuid": "^11.1.1"
+  }
+}

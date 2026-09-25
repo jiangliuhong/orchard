@@ -384,49 +384,96 @@ request_publish
 
 ## 9. SQLite 模型与持久化
 
-### 9.1 最小数据模型
+### 9.1 数据库约定
 
-| 表 | 用途与关键字段 |
-| --- | --- |
-| workflows | id、名称、描述、当前发布版本、归档状态 |
-| workflow_versions | workflowId、versionId、contentHash、artifactPath、manifest、createdAt |
-| workflow_drafts | 草稿路径、基准版本、状态、revision/contentHash、检查结果 |
-| runs | workflowVersionId、trigger来源、inputRef、outputRef、status、时间、retryOfRunId、cancel信息 |
-| step_runs | runId、stepId、nodeType、配置快照、状态、输入输出引用、开始结束时间 |
-| step_attempts | stepRunId、attemptNo、错误、输入输出引用、超时、执行者generation、开始结束时间 |
-| tool_invocations | attemptId、toolId、输入输出引用、副作用类别、幂等键、外部关联ID、结果确定性 |
-| run_events | 单调序号、runId、stepId、attemptId、事件类型、脱敏payload、时间 |
-| triggers | workflowId、版本策略、类型、配置、enabled、timezone、nextFireAt、misfire策略 |
-| trigger_occurrences | triggerId、occurrenceKey、scheduledFor、runId、处理状态；负责触发去重 |
-| incoming_events | source、eventId、name、payload、接收与分发状态 |
-| authoring_sessions | workspaceId、draftId、状态、模型配置引用 |
-| authoring_messages | sessionId、消息序号、消息内容、工具调用与结果引用 |
-| tool_configs | 工具定义、配置、权限、版本、secretRef；不存裸密钥 |
-| agent_profiles | 模型与资源配置、允许工具、secretRef；不存裸密钥 |
-| artifacts | id、关联run/step、受管路径、大小、hash、mime、保留策略 |
-| audit_actions | 发布、停用、取消、风险确认、重新运行、人工确认的操作记录 |
+本任务确定以下 v0.1 数据库约定：
 
-不强制为队列另建表；初版可以直接对 runs 中的 queued 状态进行原子认领。迁移表由所选迁移方案提供。
+- 主键和外部引用 ID 使用 UUIDv7，均以 SQLite `TEXT` 保存；
+- 时间统一保存为 UTC Unix milliseconds；
+- JSON 使用 SQLite `TEXT` 保存，写入 Repository 前完成运行时校验；
+- 大型输入、输出、日志和消息保存为 Artifact 文件，数据库只保存引用；
+- 密钥只保存 `secretRef`，不保存裸凭据；
+- 历史记录不使用级联删除；
+- 初版创建一个 `default` Workspace；
+- 初版不建立认证会话表，认证/授权延期实现；
+- 初版不单独建立队列表，使用 `runs` 的 queued 状态和认领字段。
 
-### 9.2 约束
+`config.json` 继续保存本机配置，不建立 `settings` 表。认证功能延期后，如需持久化会话，再单独增加 `sessions`、令牌撤销和相关迁移。
 
-必须有明确唯一约束：Workflow 版本键、(runId, stepId)、(stepRunId, attemptNo)、Cron 的 (triggerId, scheduledFor)、事件来源的 (source, eventId) 及触发分发唯一键。
+### 9.2 确定的表设计
 
-数据库启用 WAL、外键和合理 busy_timeout。事务保持短小；执行 CLI 或调用模型时不得持有数据库事务。单实例锁加状态条件更新防止重复认领，不依赖纯内存 Map 维护队列真相。
+| 表 | 主键与关键字段 | 约束/用途 |
+| --- | --- | --- |
+| `workspaces` | `id`、`name`、`root_path`、时间 | 初始创建 `default`；`root_path` 必须位于 data-dir 允许范围内 |
+| `workflows` | `id`、`workspace_id`、`name`、`description`、`current_version_id`、`status`、时间 | 归档不删除历史；当前版本可为空 |
+| `workflow_versions` | `id`、`workflow_id`、`version_no`、`content_hash`、`source_path`、`bundle_path`、`manifest_json`、`sdk_version`、`dependency_lock_hash`、时间 | `UNIQUE(workflow_id, version_no)`；`UNIQUE(workflow_id, content_hash)`；发布后不可变 |
+| `workflow_drafts` | `id`、`workspace_id`、`workflow_id NULL`、`base_version_id NULL`、`root_path`、`revision`、`content_hash`、`status`、`check_result_json`、时间 | 新建草稿可没有 Workflow 或基准版本；草稿 revision 更新必须防止覆盖并发修改；发布确认绑定 content hash |
+| `runs` | `id`、`workflow_version_id`、`trigger_id`、`retry_of_run_id`、`status`、`input_ref`、`output_ref`、`cancel_requested_at`、`cancel_reason`、`claim_owner`、`claim_until`、`worker_generation`、时间 | 保存 Worker 认领租约；Run 创建时绑定不可变版本 |
+| `step_runs` | `id`、`run_id`、`step_id`、`step_instance_key`、`iteration_key`、`node_type`、`node_version`、`config_snapshot_ref`、`status`、输入输出引用、时间 | `UNIQUE(run_id, step_instance_key)`；循环实例必须有稳定 iteration key |
+| `step_attempts` | `id`、`step_run_id`、`attempt_no`、`status`、`input_ref`、`output_ref`、`error_json`、`timed_out`、`worker_generation`、时间 | `UNIQUE(step_run_id, attempt_no)`；attempt 只新增，不覆盖历史 |
+| `tool_invocations` | `id`、`attempt_id`、`sequence_no`、`tool_id`、`tool_version`、输入输出引用、`side_effect_class`、`idempotency_key`、`external_id`、`result_certainty`、状态、时间 | `UNIQUE(attempt_id, sequence_no)`；记录每次外部工具调用 |
+| `run_events` | `id`、`run_id`、`sequence_no`、`step_id`、`attempt_id`、`event_type`、`payload_ref/json`、时间 | `UNIQUE(run_id, sequence_no)`；用于 SSE 断点续传 |
+| `triggers` | `id`、`workflow_id`、`type`、`version_policy`、`config_json`、`timezone`、`enabled`、`next_fire_at`、`misfire_policy`、时间 | 配置修改不影响已创建 Run |
+| `trigger_occurrences` | `id`、`trigger_id`、`occurrence_key`、`scheduled_for`、`run_id`、`status`、时间 | `UNIQUE(trigger_id, occurrence_key)`；负责 Cron 去重 |
+| `incoming_events` | `id`、`source`、`event_id`、`event_name`、`payload_ref`、`payload_hash`、`status`、时间 | `UNIQUE(source, event_id)`；同键不同 hash 必须冲突 |
+| `incoming_event_deliveries` | `id`、`incoming_event_id`、`trigger_id`、`run_id`、`status`、错误与时间 | `UNIQUE(incoming_event_id, trigger_id)`；负责事件向多个 Trigger 分发去重 |
+| `authoring_sessions` | `id`、`workspace_id`、`draft_id`、`status`、`model_config_ref`、时间 | 与业务 Run 分离 |
+| `authoring_messages` | `id`、`session_id`、`sequence_no`、`role`、`content_ref`、`tool_call_json`、时间 | `UNIQUE(session_id, sequence_no)` |
+| `tool_configs` | `id`、`tool_id`、`version`、`config_json`、`permission_json`、`secret_ref`、`enabled`、时间 | 不保存裸密钥；工具版本必须可追踪 |
+| `agent_profiles` | `id`、`name`、`provider`、`model`、`config_json`、`allowed_tools_json`、`secret_ref`、时间 | 不保存裸密钥；保存运行时配置引用 |
+| `artifacts` | `id`、`run_id`、`step_id`、`attempt_id`、`path`、`size`、`hash`、`mime`、`retention_policy`、时间 | 路径必须受管；默认永久保留，手动清理前不得删除被引用产物 |
+| `audit_actions` | `id`、`action_type`、`actor`、`resource_type`、`resource_id`、`metadata_json`、时间 | 记录发布、停用、取消、重试、风险确认和人工确认 |
+| `idempotency_keys` | `key PK`、`operation`、`request_hash`、`resource_id`、`response_ref`、时间 | 防止手动运行、取消、重试和事件请求重复执行 |
+
+### 9.3 主键、外键、索引与事务约束
+
+所有引用数据库实体的 `*_id` 字段必须有对应外键；历史记录相关外键默认 `RESTRICT`，允许为空的 Trigger、Attempt 和 Artifact 关联使用 `SET NULL`，不得级联删除 Run 历史。工具 ID、节点类型和 Step ID 若来自代码注册表，不强制建立数据库外键。
+
+必须建立以下唯一约束：
+
+```text
+UNIQUE(workflow_id, version_no)
+UNIQUE(workflow_id, content_hash)
+UNIQUE(run_id, step_instance_key)
+UNIQUE(step_run_id, attempt_no)
+UNIQUE(attempt_id, sequence_no)
+UNIQUE(run_id, sequence_no)
+UNIQUE(trigger_id, occurrence_key)
+UNIQUE(source, event_id)
+UNIQUE(incoming_event_id, trigger_id)
+UNIQUE(session_id, sequence_no)
+UNIQUE(tool_id, version)
+```
+
+必须为以下字段建立查询索引：
+
+```text
+runs(status, created_at)
+runs(claim_until)
+runs(workflow_version_id, created_at)
+step_runs(run_id, status)
+step_attempts(step_run_id, attempt_no)
+run_events(run_id, sequence_no)
+triggers(enabled, next_fire_at)
+artifacts(run_id)
+audit_actions(resource_type, resource_id, created_at)
+```
+
+数据库启用 WAL、外键和合理 `busy_timeout`。事务保持短小；执行 CLI 或调用模型时不得持有数据库事务。认领 Run 使用带状态条件的原子更新和 `claim_until` 租约，不依赖纯内存 Map 维护队列真相。
 
 工作台数据库使用本机文件系统，不把 WAL 数据库直接当作多机器共享数据库。日志批量写入，避免每个模型 token 都进行一次同步数据库写入。大型查询分页。
 
-先提交状态和对应事件，再对外通过 SSE 通知。事件序号应可用于断线续传；状态快照可纠正漏失或过期增量。
+状态变更和对应 `run_events` 必须在同一事务提交，然后再通过 SSE 通知。事件序号用于断线续传；状态快照可纠正漏失或过期增量。
 
 所有迁移随 npm 包发布。首次启动自动建库，升级执行兼容迁移；破坏性变更提供备份指引，失败不能继续以半升级状态启动。
 
-### 9.3 输入输出与产物
+### 9.4 输入输出与产物
 
 每步、每次 Attempt 都保存实际输入、输出或其产物引用，失败时保存已有部分输出和错误。UI 中的大对象展示预览并提供受认证的下载，不只显示一个不可访问的本地路径。
 
 建议初始阈值：单个 JSON 值 64 KiB 以内内联，超过后保存到产物文件；阈值可配置。达到硬上限必须明确失败或说明截断，不能静默丢弃数据。
 
-日志、消息、错误和可查看输入输出统一脱敏；凭据只使用 secretRef。不要把脱敏显示内容误当成将来可恢复执行的完整输入。业务敏感数据的本地保存范围与保留期限在设置和文档中说明。
+日志、消息、错误和可查看输入输出统一脱敏；凭据只使用 secretRef。不要把脱敏显示内容误当成将来可恢复执行的完整输入。运行记录、日志和产物默认永久保留，不执行自动清理；磁盘空间不足时必须明确报告并拒绝可能造成数据损坏的写入。
 
 ## 10. 运行、停止和重试语义
 
