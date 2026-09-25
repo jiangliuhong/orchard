@@ -36,16 +36,16 @@
       "import": "./dist/storage/database.js"
     },
     "./authoring": {
-      "types": "./dist/authoring/compiler.d.ts",
-      "import": "./dist/authoring/compiler.js"
+      "types": "./dist/authoring/index.d.ts",
+      "import": "./dist/authoring/index.js"
     },
     "./artifacts": {
       "types": "./dist/artifacts/store.d.ts",
       "import": "./dist/artifacts/store.js"
     },
     "./scheduler": {
-      "types": "./dist/scheduler/run-queue.d.ts",
-      "import": "./dist/scheduler/run-queue.js"
+      "types": "./dist/scheduler/index.d.ts",
+      "import": "./dist/scheduler/index.js"
     },
     "./core-cli": {
       "types": "./dist/integrations/cli/index.d.ts",
@@ -54,6 +54,14 @@
     "./pi": {
       "types": "./dist/integrations/pi/index.d.ts",
       "import": "./dist/integrations/pi/index.js"
+    },
+    "./tenancy": {
+      "types": "./dist/tenancy/context.d.ts",
+      "import": "./dist/tenancy/context.js"
+    },
+    "./remote-worker": {
+      "types": "./dist/runtime/remote-worker.d.ts",
+      "import": "./dist/runtime/remote-worker.js"
     }
   },
   "files": [

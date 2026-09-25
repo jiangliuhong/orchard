@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { Command } from "commander";
 import { createServer } from "../server/app.js";
 import { createDefaultWorkspace, EventRepository, initializeDatabase, RunRepository, WorkflowRepository } from "../storage/database.js";
+import { publishWorkflow } from "../authoring/publish.js";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 7331;
@@ -46,6 +47,14 @@ async function start(options: { host: string; port: string; open?: boolean; data
     listWorkflows: (limit, offset) => workflows.listWorkflows(workspaceId, limit, offset),
     listRuns: (limit, offset) => runs.listRuns(limit, offset),
     getRun: (id) => runs.getRun(id),
+    createWorkflow: (input) => workflows.createWorkflow({ workspaceId, ...input }),
+    publishWorkflow: (workflowId, entry) => publishWorkflow({ workflows, workflowId, rootDir: `${storage.dataDir}/workspaces/default`, entry, outputDir: `${storage.dataDir}/versions/${workflowId}` }),
+    createRun: (workflowId, input, idempotencyKey) => {
+      const workflowVersionId = workflows.getCurrentVersionId(workflowId);
+      if (!workflowVersionId) throw new Error("WORKFLOW_NOT_FOUND");
+      const inputRef = JSON.stringify(input === undefined ? null : input);
+      return runs.createRun({ workflowVersionId, inputRef, ...(idempotencyKey === undefined ? {} : { idempotencyKey }) });
+    },
     cancelRun: (id, reason) => runs.requestCancel(id, reason),
     receiveEvent: (input) => events.receive(input),
   });

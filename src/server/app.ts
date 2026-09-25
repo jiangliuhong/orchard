@@ -9,6 +9,9 @@ export interface ServerOptions {
   readonly listWorkflows?: (limit: number, offset: number) => readonly WorkflowRecord[];
   readonly listRuns?: (limit: number, offset: number) => readonly { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number }[];
   readonly getRun?: (id: string) => { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number } | undefined;
+  readonly createWorkflow?: (input: { name: string; description?: string }) => WorkflowRecord;
+  readonly publishWorkflow?: (workflowId: string, entry: string) => Promise<{ workflowId: string; versionId: string; contentHash: string; bundlePath: string }>;
+  readonly createRun?: (workflowId: string, input: unknown, idempotencyKey?: string) => { id: string; workflowVersionId: string; status: string; inputRef?: string };
   readonly cancelRun?: (id: string, reason: string) => boolean;
   readonly receiveEvent?: (input: { source: string; eventId: string; name: string; data: unknown }) => { id: string; duplicate: boolean };
 }
@@ -59,6 +62,34 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
   app.get("/api/health", async () => ({ status: "ok", service: "orchard", version: "0.1.0" }));
   app.get("/", async (_request, reply) => reply.type("text/html; charset=utf-8").send(WORKBENCH_HTML));
   app.get("/workbench.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(WORKBENCH_JS));
+  app.post<{ Body: { name: string; description?: string } }>("/api/workflows", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 200 }, description: { type: "string", maxLength: 2_000 } } } },
+  }, async (request, reply) => {
+    if (!options.createWorkflow) return reply.code(503).send({ code: "AUTHORING_UNAVAILABLE", message: "Workflow authoring is not connected", requestId: request.id });
+    return reply.code(201).send(options.createWorkflow(request.body));
+  });
+  app.post<{ Params: { workflowId: string }; Body: { entry: string } }>("/api/workflows/:workflowId/publish", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["entry"], properties: { entry: { type: "string", minLength: 1, maxLength: 500 } } } },
+  }, async (request, reply) => {
+    if (!options.publishWorkflow) return reply.code(503).send({ code: "AUTHORING_UNAVAILABLE", message: "Workflow publishing is not connected", requestId: request.id });
+    try { return reply.code(201).send(await options.publishWorkflow(request.params.workflowId, request.body.entry)); }
+    catch (error) { const message = error instanceof Error ? error.message : "Unable to publish workflow"; return reply.code(400).send({ code: "PUBLISH_FAILED", message, requestId: request.id }); }
+  });
+  app.post<{ Params: { workflowId: string }; Headers: { "idempotency-key"?: string }; Body: { input?: unknown } }>("/api/workflows/:workflowId/runs", {
+    schema: { body: { type: "object", additionalProperties: false, properties: { input: {} } } },
+  }, async (request, reply) => {
+    if (!options.createRun) return reply.code(503).send({ code: "RUNTIME_UNAVAILABLE", message: "Run creation is not connected", requestId: request.id });
+    try {
+      const result = options.createRun(request.params.workflowId, request.body?.input, request.headers["idempotency-key"]);
+      return reply.code(202).send(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to create run";
+      if (message === "WORKFLOW_NOT_FOUND") return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND", message: "Workflow has no published version", requestId: request.id });
+      if (message === "IDEMPOTENCY_CONFLICT") return reply.code(409).send({ code: "IDEMPOTENCY_CONFLICT", message: "Idempotency key was used with a different request", requestId: request.id });
+      throw error;
+    }
+  });
+
   app.get<{ Params: { runId: string } }>("/api/runs/:runId", async (request, reply) => {
     if (!options.getRun) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Storage is not connected", requestId: request.id });
     const run = options.getRun(request.params.runId);
@@ -97,8 +128,13 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
       return reply.code(400).send({ code: "INVALID_REQUEST", message: "Invalid event body", requestId: request.id });
     }
     if (!options.receiveEvent) return reply.code(503).send({ code: "EVENTS_UNAVAILABLE", message: "Event intake is not connected", requestId: request.id });
-    const result = options.receiveEvent({ source: body.source, eventId: body.id, name: body.name, data: body.data });
-    return reply.code(result.duplicate ? 200 : 202).send({ eventId: result.id, duplicate: result.duplicate });
+    try {
+      const result = options.receiveEvent({ source: body.source, eventId: body.id, name: body.name, data: body.data });
+      return reply.code(result.duplicate ? 200 : 202).send({ eventId: result.id, duplicate: result.duplicate });
+    } catch (error) {
+      if (error instanceof Error && error.name === "EVENT_CONFLICT") return reply.code(409).send({ code: "EVENT_CONFLICT", message: error.message, requestId: request.id });
+      throw error;
+    }
   });
 
   app.get<{ Querystring: { limit?: number; offset?: number } }>("/api/workflows", {

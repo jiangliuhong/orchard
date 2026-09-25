@@ -1,0 +1,4 @@
+export interface TenantContext { readonly tenantId: string; readonly userId: string; readonly roles: readonly string[]; }
+export function assertTenantAccess(context: TenantContext, tenantId: string): void { if (context.tenantId !== tenantId) throw new Error("TENANT_ACCESS_DENIED"); }
+export function requireRole(context: TenantContext, role: string): void { if (!context.roles.includes(role)) throw new Error("ROLE_REQUIRED"); }
+export function tenantFromHeaders(headers: Record<string, string | string[] | undefined>): TenantContext { const tenantId = typeof headers["x-tenant-id"] === "string" ? headers["x-tenant-id"] : undefined; const userId = typeof headers["x-user-id"] === "string" ? headers["x-user-id"] : undefined; if (!tenantId || !userId) throw new Error("TENANT_CONTEXT_REQUIRED"); const roles = typeof headers["x-user-roles"] === "string" ? headers["x-user-roles"].split(",").map((role) => role.trim()).filter(Boolean) : []; return { tenantId, userId, roles }; }

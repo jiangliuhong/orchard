@@ -45,6 +45,11 @@ export class WorkflowRepository {
     return id;
   }
 
+  getCurrentVersionId(workflowId: string): string | undefined {
+    const row = this.db.database.prepare("SELECT current_version_id AS currentVersionId FROM workflows WHERE id = ? AND status = 'active'").get(workflowId) as { currentVersionId?: string | null } | undefined;
+    return row?.currentVersionId ?? undefined;
+  }
+
   listWorkflows(workspaceId: string, limit = 50, offset = 0): readonly WorkflowRecord[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) {
       throw new Error("Invalid pagination");
@@ -63,7 +68,11 @@ export class EventRepository {
     const hash = createHash("sha256").update(payload).digest("hex");
     const existing = this.db.database.prepare("SELECT id, payload_hash AS payloadHash FROM incoming_events WHERE source = ? AND event_id = ?").get(input.source, input.eventId) as { id: string; payloadHash: string } | undefined;
     if (existing) {
-      if (existing.payloadHash !== hash) throw new Error("Incoming event id conflicts with a different payload");
+      if (existing.payloadHash !== hash) {
+        const error = new Error("Incoming event id conflicts with a different payload");
+        error.name = "EVENT_CONFLICT";
+        throw error;
+      }
       return { id: existing.id, duplicate: true };
     }
     const id = uuidv7();
@@ -103,12 +112,23 @@ export class StepRepository {
 export class RunRepository {
   constructor(private readonly db: OrchardDatabase) {}
 
-  createRun(input: { workflowVersionId: string; inputRef?: string; retryOfRunId?: string; triggerId?: string }): RunRecord {
+  createRun(input: { workflowVersionId: string; inputRef?: string; retryOfRunId?: string; triggerId?: string; idempotencyKey?: string }): RunRecord {
+    const requestHash = createHash("sha256").update(JSON.stringify({ workflowVersionId: input.workflowVersionId, inputRef: input.inputRef ?? null, retryOfRunId: input.retryOfRunId ?? null, triggerId: input.triggerId ?? null })).digest("hex");
+    if (input.idempotencyKey) {
+      const existing = this.db.database.prepare("SELECT request_hash AS requestHash, resource_id AS resourceId FROM idempotency_keys WHERE key = ? AND operation = 'create-run'").get(input.idempotencyKey) as { requestHash: string; resourceId: string } | undefined;
+      if (existing) {
+        if (existing.requestHash !== requestHash) { const error = new Error("IDEMPOTENCY_CONFLICT"); error.name = "IDEMPOTENCY_CONFLICT"; throw error; }
+        const prior = this.getRun(existing.resourceId);
+        if (prior) return prior;
+      }
+    }
     const id = uuidv7();
+    const inputRef = input.inputRef;
     this.db.database.prepare("INSERT INTO runs (id, workflow_version_id, trigger_id, retry_of_run_id, status, input_ref, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?)").run(
-      id, input.workflowVersionId, input.triggerId ?? null, input.retryOfRunId ?? null, input.inputRef ?? null, now(),
+      id, input.workflowVersionId, input.triggerId ?? null, input.retryOfRunId ?? null, inputRef ?? null, now(),
     );
-    return { id, workflowVersionId: input.workflowVersionId, status: "queued", ...(input.inputRef === undefined ? {} : { inputRef: input.inputRef }) };
+    if (input.idempotencyKey) this.db.database.prepare("INSERT INTO idempotency_keys (key, operation, request_hash, resource_id, created_at) VALUES (?, 'create-run', ?, ?, ?)").run(input.idempotencyKey, requestHash, id, now());
+    return { id, workflowVersionId: input.workflowVersionId, status: "queued", ...(inputRef === undefined ? {} : { inputRef }) };
   }
 
   claimRun(id: string, owner: string, leaseMs: number, generation: number): RunRecord | undefined {
