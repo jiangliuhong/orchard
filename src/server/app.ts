@@ -1,10 +1,9 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { WorkflowRecord } from "../storage/repository.js";
-import { WORKBENCH_HTML, WORKBENCH_JS } from "./workbench.js";
+import { WORKBENCH_HTML } from "./workbench.js";
 
 export interface ServerOptions {
-  readonly accessToken?: string;
   readonly authority?: string;
   readonly listWorkflows?: (limit: number, offset: number) => readonly WorkflowRecord[];
   readonly listRuns?: (limit: number, offset: number) => readonly { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number }[];
@@ -17,18 +16,16 @@ export interface ServerOptions {
 }
 
 export function createServer(options: ServerOptions = {}): FastifyInstance {
-  if (options.listWorkflows && (!options.accessToken || options.accessToken.length < 32)) {
-    throw new Error("Workflow access requires an access token of at least 32 characters");
-  }
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, ajv: { customOptions: { removeAdditional: false } } });
   const authority = options.authority ?? "localhost:80";
-  const expectedToken = createHash("sha256").update(options.accessToken ?? "").digest();
+  const workbenchJs = readFileSync(new URL("./client.js", import.meta.url), "utf8");
+  const workbenchCss = readFileSync(new URL("./workbench.css", import.meta.url), "utf8");
 
   app.addHook("onRequest", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
-    reply.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
+    reply.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
     const fail = (code: string, message: string, status: number) => reply.code(status).send({ code, message, requestId: request.id });
     // Exact authority matching also blocks DNS rebinding. No forwarded headers are trusted.
     const host = request.headers.host;
@@ -41,12 +38,11 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
         return fail("INVALID_ORIGIN", "Origin is not allowed", 403);
       }
     }
-    const pathname = request.url.split("?")[0];
-    if (pathname === "/" || pathname === "/workbench.js" || pathname === "/api/health") return;
-    const authorization = request.headers.authorization;
-    if (!options.accessToken || !authorization?.startsWith("Bearer ")) return fail("UNAUTHORIZED", "Access token required", 401);
-    const supplied = createHash("sha256").update(authorization.slice(7)).digest();
-    if (!timingSafeEqual(expectedToken, supplied)) return fail("UNAUTHORIZED", "Invalid access token", 401);
+    // Also reject browser cross-site requests that omit Origin (for example image GETs).
+    const fetchSite = request.headers["sec-fetch-site"];
+    if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+      return fail("CROSS_SITE_REQUEST", "Cross-site requests are not allowed", 403);
+    }
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -61,7 +57,8 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
 
   app.get("/api/health", async () => ({ status: "ok", service: "orchard", version: "0.1.0" }));
   app.get("/", async (_request, reply) => reply.type("text/html; charset=utf-8").send(WORKBENCH_HTML));
-  app.get("/workbench.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(WORKBENCH_JS));
+  app.get("/workbench.css", async (_request, reply) => reply.type("text/css; charset=utf-8").send(workbenchCss));
+  app.get("/workbench.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(workbenchJs));
   app.post<{ Body: { name: string; description?: string } }>("/api/workflows", {
     schema: { body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 200 }, description: { type: "string", maxLength: 2_000 } } } },
   }, async (request, reply) => {

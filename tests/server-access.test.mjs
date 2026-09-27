@@ -5,30 +5,29 @@ import { createServer } from "../dist/server/app.js";
 const token = "test-only-token-".repeat(4);
 const headers = { host: "127.0.0.1:7331", authorization: `Bearer ${token}` };
 function setup(t, listWorkflows = () => []) {
-  const app = createServer({ accessToken: token, authority: headers.host, listWorkflows });
+  const app = createServer({ authority: headers.host, listWorkflows });
   t.after(() => app.close());
   return app;
 }
 
-test("workflow reads require authentication, exact Host and same Origin", async (t) => {
+test("workflow reads are local-only and enforce exact Host and same Origin", async (t) => {
   let calls = 0;
   const app = setup(t, () => { calls++; return []; });
   for (const [requestHeaders, status] of [
-    [{ host: headers.host }, 401],
-    [{ ...headers, authorization: "Bearer wrong" }, 401],
+    [{ host: headers.host }, 200],
     [{ ...headers, host: "evil.example:7331" }, 403],
     [{ ...headers, origin: "https://evil.example" }, 403],
     [{ ...headers, origin: "null" }, 403],
   ]) {
     const response = await app.inject({ url: "/api/workflows", headers: requestHeaders });
     assert.equal(response.statusCode, status);
-    assert.ok(response.json().requestId);
+    if (status !== 200) assert.ok(response.json().requestId);
   }
-  assert.equal(calls, 0);
+  assert.equal(calls, 1);
   const response = await app.inject({ url: "/api/workflows", headers: { ...headers, origin: "http://127.0.0.1:7331" } });
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.json(), { items: [], limit: 50, offset: 0 });
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(response.headers["access-control-allow-origin"], undefined);
 });
 
@@ -57,5 +56,5 @@ test("public assets contain no credentials; errors hide internal details", async
   const error = await app.inject({ url: "/api/workflows", headers });
   assert.equal(error.statusCode, 500);
   assert.ok(!error.body.includes("private-db-path"));
-  assert.throws(() => createServer({ listWorkflows: () => [] }), /access token/);
+  assert.doesNotThrow(() => createServer({ listWorkflows: () => [] }));
 });

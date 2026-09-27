@@ -10,7 +10,7 @@
     "orchard": "./dist/cli/main.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && node --test tests/*.test.mjs",
@@ -70,15 +70,21 @@
   ],
   "devDependencies": {
     "@types/node": "^24.13.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "typescript": "^5.9.0"
   },
   "dependencies": {
+    "@ant-design/icons": "^6.3.4",
     "@sinclair/typebox": "~0.34.52",
     "ajv": "^8.20.0",
+    "antd": "^5.29.3",
     "commander": "^14.0.3",
     "drizzle-orm": "~0.44.7",
     "esbuild": "~0.25.12",
     "fastify": "^5.12.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "uuid": "^11.1.1"
   }
 }

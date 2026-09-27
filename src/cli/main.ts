@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
 import process from "node:process";
 import { homedir } from "node:os";
 import { Command } from "commander";
@@ -36,13 +35,11 @@ async function start(options: { host: string; port: string; open?: boolean; data
     storage.close();
     throw error;
   }
-  const accessToken = randomBytes(32).toString("hex");
   const authority = `${options.host === "::1" ? "[::1]" : options.host}:${port}`;
   const workflows = new WorkflowRepository(storage);
   const runs = new RunRepository(storage);
   const events = new EventRepository(storage);
   const app = createServer({
-    accessToken,
     authority,
     listWorkflows: (limit, offset) => workflows.listWorkflows(workspaceId, limit, offset),
     listRuns: (limit, offset) => runs.listRuns(limit, offset),
@@ -62,7 +59,6 @@ async function start(options: { host: string; port: string; open?: boolean; data
     const address = await app.listen({ host: options.host, port });
     process.stdout.write(`Orchard listening at ${address}\n`);
     process.stdout.write(`Data directory: ${storage.dataDir}\n`);
-    process.stdout.write(`Access token (valid for this process only): ${accessToken}\n`);
     if (options.open) openBrowser(address);
   } catch (error) {
     storage.close();

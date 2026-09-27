@@ -6,7 +6,7 @@ Orchard 是一个**本地优先、面向单个使用者**的个人 AI 工作流�
 - **SQLite 持久化**:Run / Step / Attempt 全量记录,UUIDv7 主键,无外部数据库依赖
 - **本机 CLI 集成**:`core.cli` 节点以 `shell: false` 调用受信任注册的 CLI 工具,支持超时、输出上限、取消与进程组终止
 - **Pi 集成边界**:`ai.pi` 节点契约与适配层已就位,未配置时明确报错,不伪造输出
-- **安全的本地服务**:仅监听回环地址,一次性访问令牌 + Host/Origin 校验,防 DNS rebinding
+- **安全的本地服务**:仅监听回环地址 + Host/Origin 校验,防 DNS rebinding;本地工作台无需复制访问令牌
 
 ## 当前状态
 
@@ -40,15 +40,7 @@ pnpm build
 node dist/cli/main.js
 ```
 
-启动后终端会输出:
-
-```text
-Orchard listening at http://127.0.0.1:7331
-Data directory: /Users/you/.orchard
-Access token (valid for this process only): 3f9a...
-```
-
-每次启动生成新的随机访问令牌,仅当前进程有效。打开 `--open` 可自动唤起浏览器。
+启动后终端会输出监听地址和数据目录。打开 `--open` 可自动唤起浏览器。工作台仅绑定回环地址，并通过 Host/Origin 校验防止跨站访问。
 
 ## CLI
 
@@ -70,11 +62,11 @@ orchard doctor
 
 ## 工作台(浏览器)
 
-访问 `http://127.0.0.1:7331`,输入终端显示的访问令牌即可查看工作区。当前版本为**只读预览**:可浏览工作流列表与运行记录;创建、发布和运行功能尚未开放。
+访问 `http://127.0.0.1:7331` 即可打开工作区。当前版本支持浏览工作流、创建工作流和发起运行。
 
 ## HTTP API
 
-所有接口(除 `/`、`/workbench.js`、`/api/health` 外)需要 `Authorization: Bearer <token>`:
+服务接口仅接受来自本地工作台的请求，并使用 Host/Origin 校验:
 
 ```text
 GET  /api/health                健康检查(无需认证)
@@ -89,7 +81,7 @@ POST /api/events                接收外部事件
 
 ```bash
 curl -X POST http://127.0.0.1:7331/api/events \
-  -H "Authorization: Bearer <token>" \
+  -H "Host: 127.0.0.1:7331" \
   -H "Content-Type: application/json" \
   -d '{
     "source": "local-script",
