@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -29,6 +30,20 @@ test("one data directory permits only one live Orchard instance", async () => {
     assert.throws(() => initializeDatabase(dir), /Another Orchard instance/);
   } finally {
     first.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a lock left by an exited process is reclaimed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orchard-stale-lock-"));
+  const runtimeDir = join(dir, "runtime");
+  mkdirSync(runtimeDir, { recursive: true });
+  await writeFile(join(runtimeDir, "orchard.lock"), "999999\n");
+  const storage = initializeDatabase(dir);
+  try {
+    assert.equal(storage.database.prepare("PRAGMA user_version").get().user_version, 1);
+  } finally {
+    storage.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

@@ -5,6 +5,44 @@ import { v7 as uuidv7 } from "uuid";
 
 const MIGRATION = readFileSync(new URL("../../migrations/001-initial.sql", import.meta.url), "utf8");
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH means the process no longer exists. Treat every other result,
+    // including EPERM, as alive so we never remove another user's lock.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function acquireLock(lockPath: string): number {
+  try {
+    const lockFd = openSync(lockPath, "wx", 0o600);
+    writeSync(lockFd, `${process.pid}\n`);
+    return lockFd;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+
+    let ownerPid: number | undefined;
+    try {
+      const contents = readFileSync(lockPath, "utf8").trim();
+      if (/^\d+$/.test(contents)) ownerPid = Number(contents);
+    } catch {
+      // The lock may have been replaced or removed while it was inspected.
+    }
+
+    if (ownerPid === undefined || isProcessAlive(ownerPid)) throw error;
+
+    // The recorded owner has exited, so this is a lock left by a crashed
+    // instance. Unlink it and race safely with any process acquiring it.
+    unlinkSync(lockPath);
+    const lockFd = openSync(lockPath, "wx", 0o600);
+    writeSync(lockFd, `${process.pid}\n`);
+    return lockFd;
+  }
+}
+
 export interface OrchardDatabase {
   readonly dataDir: string;
   readonly database: DatabaseSync;
@@ -19,8 +57,7 @@ export function initializeDatabase(dataDir: string): OrchardDatabase {
   const lockPath = join(runtimeDir, "orchard.lock");
   let lockFd: number;
   try {
-    lockFd = openSync(lockPath, "wx", 0o600);
-    writeSync(lockFd, `${process.pid}\n`);
+    lockFd = acquireLock(lockPath);
   } catch (error) {
     throw new Error(`Another Orchard instance is using data directory ${root}`, { cause: error });
   }
