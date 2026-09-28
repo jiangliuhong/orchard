@@ -62,6 +62,10 @@
     "./remote-worker": {
       "types": "./dist/runtime/remote-worker.d.ts",
       "import": "./dist/runtime/remote-worker.js"
+    },
+    "./import-export": {
+      "types": "./dist/import-export/index.d.ts",
+      "import": "./dist/import-export/index.js"
     }
   },
   "files": [

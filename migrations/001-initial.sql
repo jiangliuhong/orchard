@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL, root_path TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS apps (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE(workspace_id, name));
 CREATE TABLE IF NOT EXISTS workflows (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', current_version_id TEXT, status TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS workflow_versions (id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE RESTRICT, version_no INTEGER NOT NULL, content_hash TEXT NOT NULL, source_path TEXT NOT NULL, bundle_path TEXT NOT NULL, manifest_json TEXT NOT NULL, sdk_version TEXT NOT NULL, dependency_lock_hash TEXT, created_at INTEGER NOT NULL, UNIQUE(workflow_id, version_no), UNIQUE(workflow_id, content_hash));
 CREATE TABLE IF NOT EXISTS workflow_drafts (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT, workflow_id TEXT REFERENCES workflows(id) ON DELETE SET NULL, base_version_id TEXT REFERENCES workflow_versions(id) ON DELETE SET NULL, root_path TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, content_hash TEXT, status TEXT NOT NULL DEFAULT 'draft', check_result_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -28,4 +29,72 @@ CREATE INDEX IF NOT EXISTS idx_events_run_sequence ON run_events(run_id, sequenc
 CREATE INDEX IF NOT EXISTS idx_triggers_enabled_fire ON triggers(enabled, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_audit_resource_created ON audit_actions(resource_type, resource_id, created_at);
+
+-- Durable server/worker protocol tables. The legacy trigger tables above remain
+-- supported for compatibility with existing installations.
+CREATE TABLE IF NOT EXISTS workflow_tasks (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  workflow_version_id TEXT NOT NULL REFERENCES workflow_versions(id) ON DELETE RESTRICT,
+  step_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  input_json TEXT,
+  output_json TEXT,
+  error_json TEXT,
+  max_attempts INTEGER NOT NULL DEFAULT 1,
+  next_attempt_at INTEGER,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(run_id, step_key)
+);
+CREATE TABLE IF NOT EXISTS task_attempts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES workflow_tasks(id) ON DELETE RESTRICT,
+  attempt_no INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  worker_id TEXT,
+  lease_id TEXT,
+  error_json TEXT,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  ended_at INTEGER,
+  UNIQUE(task_id, attempt_no)
+);
+CREATE TABLE IF NOT EXISTS task_leases (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES workflow_tasks(id) ON DELETE RESTRICT,
+  attempt_id TEXT NOT NULL REFERENCES task_attempts(id) ON DELETE RESTRICT,
+  worker_id TEXT NOT NULL,
+  lease_version INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  heartbeat_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE(task_id)
+);
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE RESTRICT,
+  workflow_version_id TEXT REFERENCES workflow_versions(id) ON DELETE RESTRICT,
+  expression TEXT NOT NULL,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  enabled INTEGER NOT NULL DEFAULT 0,
+  misfire_policy TEXT NOT NULL DEFAULT 'skip',
+  cursor TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schedule_occurrences (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE RESTRICT,
+  occurrence_key TEXT NOT NULL,
+  scheduled_for INTEGER NOT NULL,
+  delivered_at INTEGER,
+  run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'planned',
+  UNIQUE(schedule_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_tasks_status_due ON workflow_tasks(status, next_attempt_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_leases_expiry ON task_leases(expires_at);
+CREATE INDEX IF NOT EXISTS idx_schedule_occurrences_due ON schedule_occurrences(schedule_id, scheduled_for);
 PRAGMA user_version = 1;

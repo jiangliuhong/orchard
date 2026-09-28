@@ -44,6 +44,7 @@ async function start(options: { host: string; port: string; open?: boolean; data
     listWorkflows: (limit, offset) => workflows.listWorkflows(workspaceId, limit, offset),
     listRuns: (limit, offset) => runs.listRuns(limit, offset),
     getRun: (id) => runs.getRun(id),
+    listRunEvents: (id) => runs.listEvents(id),
     createWorkflow: (input) => workflows.createWorkflow({ workspaceId, ...input }),
     publishWorkflow: (workflowId, entry) => publishWorkflow({ workflows, workflowId, rootDir: `${storage.dataDir}/workspaces/default`, entry, outputDir: `${storage.dataDir}/versions/${workflowId}` }),
     createRun: (workflowId, input, idempotencyKey) => {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { v7 as uuidv7 } from "uuid";
 import type { OrchardDatabase } from "./database.js";
 import { assertRunTransition, type RunStatus } from "../core/contracts.js";
+import { parseCron } from "../scheduler/cron.js";
 
 export interface WorkflowRecord {
   readonly id: string;
@@ -19,6 +20,25 @@ export interface RunRecord {
   readonly createdAt?: number;
 }
 
+export interface WorkflowTaskRecord {
+  readonly id: string;
+  readonly runId: string;
+  readonly workflowVersionId: string;
+  readonly stepKey: string;
+  readonly status: string;
+  readonly maxAttempts: number;
+  readonly nextAttemptAt?: number;
+}
+
+export interface TaskLeaseRecord {
+  readonly id: string;
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly workerId: string;
+  readonly leaseVersion: number;
+  readonly expiresAt: number;
+}
+
 function now(): number { return Date.now(); }
 function json(value: unknown): string { return JSON.stringify(value); }
 
@@ -34,15 +54,35 @@ export class WorkflowRepository {
     return { id, workspaceId: input.workspaceId, name: input.name, description: input.description ?? "", status: "active" };
   }
 
-  createVersion(input: { workflowId: string; contentHash: string; sourcePath: string; bundlePath: string; manifest: unknown; sdkVersion: string; dependencyLockHash?: string }): string {
+  createVersion(input: { id?: string; workflowId: string; contentHash: string; sourcePath: string; bundlePath: string; manifest: unknown; sdkVersion: string; dependencyLockHash?: string }): string {
+    const id = input.id ?? uuidv7();
+    const timestamp = now();
+    this.db.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const next = this.db.database.prepare("SELECT COALESCE(MAX(version_no), 0) + 1 AS version_no FROM workflow_versions WHERE workflow_id = ?").get(input.workflowId) as { version_no: number };
+      this.db.database.prepare("INSERT INTO workflow_versions (id, workflow_id, version_no, content_hash, source_path, bundle_path, manifest_json, sdk_version, dependency_lock_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+        id, input.workflowId, next.version_no, input.contentHash, input.sourcePath, input.bundlePath, json(input.manifest), input.sdkVersion, input.dependencyLockHash ?? null, timestamp,
+      );
+      const activated = this.db.database.prepare("UPDATE workflows SET current_version_id = ?, updated_at = ? WHERE id = ?").run(id, timestamp, input.workflowId);
+      if (Number(activated.changes) !== 1) throw new Error(`Workflow not found: ${input.workflowId}`);
+      this.db.database.exec("COMMIT;");
+      return id;
+    } catch (error) {
+      this.db.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  createDraft(input: { workspaceId: string; workflowId?: string; baseVersionId?: string; rootPath: string }): string {
     const id = uuidv7();
     const timestamp = now();
-    const next = this.db.database.prepare("SELECT COALESCE(MAX(version_no), 0) + 1 AS version_no FROM workflow_versions WHERE workflow_id = ?").get(input.workflowId) as { version_no: number };
-    this.db.database.prepare("INSERT INTO workflow_versions (id, workflow_id, version_no, content_hash, source_path, bundle_path, manifest_json, sdk_version, dependency_lock_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
-      id, input.workflowId, next.version_no, input.contentHash, input.sourcePath, input.bundlePath, json(input.manifest), input.sdkVersion, input.dependencyLockHash ?? null, timestamp,
-    );
-    this.db.database.prepare("UPDATE workflows SET current_version_id = ?, updated_at = ? WHERE id = ?").run(id, timestamp, input.workflowId);
+    this.db.database.prepare("INSERT INTO workflow_drafts (id, workspace_id, workflow_id, base_version_id, root_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(id, input.workspaceId, input.workflowId ?? null, input.baseVersionId ?? null, input.rootPath, timestamp, timestamp);
     return id;
+  }
+
+  updateDraft(draftId: string, input: { contentHash?: string; checkResult?: unknown; status?: string; revision: number }): boolean {
+    const result = this.db.database.prepare("UPDATE workflow_drafts SET content_hash = ?, check_result_json = ?, status = COALESCE(?, status), revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?").run(input.contentHash ?? null, input.checkResult === undefined ? null : json(input.checkResult), input.status ?? null, now(), draftId, input.revision);
+    return result.changes === 1;
   }
 
   getCurrentVersionId(workflowId: string): string | undefined {
@@ -59,6 +99,110 @@ export class WorkflowRepository {
 }
 
 export interface IncomingEventResult { readonly id: string; readonly duplicate: boolean; }
+
+export class WorkflowTaskRepository {
+  constructor(private readonly db: OrchardDatabase) {}
+
+  create(input: { runId: string; workflowVersionId: string; stepKey: string; input?: unknown; maxAttempts?: number }): WorkflowTaskRecord {
+    const id = uuidv7();
+    const timestamp = now();
+    this.db.database.prepare("INSERT INTO workflow_tasks (id, run_id, workflow_version_id, step_key, status, input_json, max_attempts, created_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)").run(id, input.runId, input.workflowVersionId, input.stepKey, input.input === undefined ? null : json(input.input), input.maxAttempts ?? 1, timestamp);
+    return { id, runId: input.runId, workflowVersionId: input.workflowVersionId, stepKey: input.stepKey, status: "queued", maxAttempts: input.maxAttempts ?? 1 };
+  }
+
+  claim(workerId: string, leaseMs: number, nowMs = now()): { task: WorkflowTaskRecord; lease: TaskLeaseRecord } | undefined {
+    this.db.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const row = this.db.database.prepare("SELECT id, run_id AS runId, workflow_version_id AS workflowVersionId, step_key AS stepKey, status, max_attempts AS maxAttempts, next_attempt_at AS nextAttemptAt FROM workflow_tasks WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY created_at LIMIT 1").get(nowMs) as WorkflowTaskRecord | undefined;
+      if (!row) { this.db.database.exec("COMMIT;"); return undefined; }
+      const attempt = uuidv7();
+      const lease = uuidv7();
+      const version = 1;
+      this.db.database.prepare("INSERT INTO task_attempts (id, task_id, attempt_no, status, worker_id, lease_id, created_at, started_at) VALUES (?, ?, (SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM task_attempts WHERE task_id = ?), 'running', ?, ?, ?, ?)").run(attempt, row.id, row.id, workerId, lease, nowMs, nowMs);
+      this.db.database.prepare("INSERT INTO task_leases (id, task_id, attempt_id, worker_id, lease_version, expires_at, heartbeat_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(lease, row.id, attempt, workerId, version, nowMs + leaseMs, nowMs, nowMs);
+      this.db.database.prepare("UPDATE workflow_tasks SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'").run(nowMs, row.id);
+      this.db.database.exec("COMMIT;");
+      return { task: { ...row, status: "running" }, lease: { id: lease, taskId: row.id, attemptId: attempt, workerId, leaseVersion: version, expiresAt: nowMs + leaseMs } };
+    } catch (error) { this.db.database.exec("ROLLBACK;"); throw error; }
+  }
+
+  heartbeat(leaseId: string, workerId: string, leaseVersion: number, leaseMs: number, nowMs = now()): boolean {
+    const result = this.db.database.prepare("UPDATE task_leases SET expires_at = ?, heartbeat_at = ?, lease_version = lease_version + 1 WHERE id = ? AND worker_id = ? AND lease_version = ? AND expires_at > ?").run(nowMs + leaseMs, nowMs, leaseId, workerId, leaseVersion, nowMs);
+    return result.changes === 1;
+  }
+
+  complete(leaseId: string, workerId: string, leaseVersion: number, status: "succeeded" | "failed" | "cancelled", output?: unknown, error?: unknown, nowMs = now()): boolean {
+    this.db.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const lease = this.db.database.prepare("SELECT task_id AS taskId, attempt_id AS attemptId FROM task_leases WHERE id = ? AND worker_id = ? AND lease_version = ? AND expires_at > ?").get(leaseId, workerId, leaseVersion, nowMs) as { taskId: string; attemptId: string } | undefined;
+      if (!lease) { this.db.database.exec("ROLLBACK;"); return false; }
+      this.db.database.prepare("UPDATE workflow_tasks SET status = ?, output_json = ?, error_json = ?, ended_at = ? WHERE id = ? AND status = 'running'").run(status, output === undefined ? null : json(output), error === undefined ? null : json(error), nowMs, lease.taskId);
+      this.db.database.prepare("UPDATE task_attempts SET status = ?, ended_at = ?, error_json = ? WHERE id = ? AND status = 'running'").run(status, nowMs, error === undefined ? null : json(error), lease.attemptId);
+      this.db.database.prepare("DELETE FROM task_leases WHERE id = ?").run(leaseId);
+      this.db.database.exec("COMMIT;");
+      return true;
+    } catch (error) { this.db.database.exec("ROLLBACK;"); throw error; }
+  }
+
+  recoverExpired(nowMs = now()): number {
+    const result = this.db.database.prepare("UPDATE workflow_tasks SET status = 'queued' WHERE status = 'running' AND id IN (SELECT task_id FROM task_leases WHERE expires_at <= ?)").run(nowMs);
+    this.db.database.prepare("DELETE FROM task_leases WHERE expires_at <= ?").run(nowMs);
+    return Number(result.changes);
+  }
+}
+
+export interface ScheduleRecord { readonly id: string; readonly workflowId: string; readonly expression: string; readonly timezone: string; readonly enabled: boolean; readonly misfirePolicy: string; }
+export interface AuthoringSessionRecord { readonly id: string; readonly draftId: string; readonly status: string; }
+
+export class ScheduleRepository {
+  constructor(private readonly db: OrchardDatabase) {}
+  create(input: { workflowId: string; workflowVersionId?: string; expression: string; timezone?: string; misfirePolicy?: string }): ScheduleRecord {
+    const id = uuidv7(); const timestamp = now();
+    this.db.database.prepare("INSERT INTO schedules (id, workflow_id, workflow_version_id, expression, timezone, enabled, misfire_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)").run(id, input.workflowId, input.workflowVersionId ?? null, input.expression, input.timezone ?? "UTC", input.misfirePolicy ?? "skip", timestamp, timestamp);
+    return { id, workflowId: input.workflowId, expression: input.expression, timezone: input.timezone ?? "UTC", enabled: false, misfirePolicy: input.misfirePolicy ?? "skip" };
+  }
+  setEnabled(id: string, enabled: boolean): boolean { return Number(this.db.database.prepare("UPDATE schedules SET enabled = ?, updated_at = ? WHERE id = ?").run(enabled ? 1 : 0, now(), id).changes) === 1; }
+  listEnabled(): readonly ScheduleRecord[] { return this.db.database.prepare("SELECT id, workflow_id AS workflowId, expression, timezone, enabled, misfire_policy AS misfirePolicy FROM schedules WHERE enabled = 1 ORDER BY id").all().map((row) => { const value = row as { id: string; workflowId: string; expression: string; timezone: string; enabled: number; misfirePolicy: string }; return { id: value.id, workflowId: value.workflowId, expression: value.expression, timezone: value.timezone, enabled: true, misfirePolicy: value.misfirePolicy }; }); }
+  updateCursor(id: string, cursor: string): boolean { return Number(this.db.database.prepare("UPDATE schedules SET cursor = ?, updated_at = ? WHERE id = ?").run(cursor, now(), id).changes) === 1; }
+  planDue(id: string, until: Date, from = new Date()): readonly { occurrenceKey: string; scheduledFor: number; occurrenceId: string }[] {
+    const schedule = this.get(id);
+    if (!schedule || !schedule.enabled) return [];
+    const cron = parseCron(schedule.expression);
+    const planned: { occurrenceKey: string; scheduledFor: number; occurrenceId: string }[] = [];
+    let cursor = from;
+    while (true) {
+      const next = cron.next(cursor);
+      if (next > until) break;
+      const occurrenceKey = next.toISOString();
+      const occurrenceId = uuidv7();
+      const result = this.db.database.prepare("INSERT OR IGNORE INTO schedule_occurrences (id, schedule_id, occurrence_key, scheduled_for, status) VALUES (?, ?, ?, ?, 'planned')").run(occurrenceId, id, occurrenceKey, next.getTime());
+      if (Number(result.changes) === 1) planned.push({ occurrenceKey, scheduledFor: next.getTime(), occurrenceId });
+      cursor = next;
+    }
+    this.updateCursor(id, until.toISOString());
+    return planned;
+  }
+  deliverOccurrence(scheduleId: string, occurrenceKey: string, runId: string): boolean { return Number(this.db.database.prepare("UPDATE schedule_occurrences SET run_id = ?, delivered_at = ?, status = 'delivered' WHERE schedule_id = ? AND occurrence_key = ? AND run_id IS NULL").run(runId, now(), scheduleId, occurrenceKey).changes) === 1; }
+  get(id: string): ScheduleRecord | undefined { const row = this.db.database.prepare("SELECT id, workflow_id AS workflowId, expression, timezone, enabled, misfire_policy AS misfirePolicy FROM schedules WHERE id = ?").get(id) as { id: string; workflowId: string; expression: string; timezone: string; enabled: number; misfirePolicy: string } | undefined; return row && { id: row.id, workflowId: row.workflowId, expression: row.expression, timezone: row.timezone, enabled: row.enabled === 1, misfirePolicy: row.misfirePolicy }; }
+}
+
+export class AuthoringSessionRepository {
+  constructor(private readonly db: OrchardDatabase) {}
+  create(input: { workspaceId: string; draftId: string; modelConfigRef?: string }): AuthoringSessionRecord { const id = uuidv7(); const timestamp = now(); this.db.database.prepare("INSERT INTO authoring_sessions (id, workspace_id, draft_id, status, model_config_ref, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)").run(id, input.workspaceId, input.draftId, input.modelConfigRef ?? null, timestamp, timestamp); return { id, draftId: input.draftId, status: "pending" }; }
+  appendMessage(input: { sessionId: string; role: "user" | "assistant" | "error"; content: unknown }): string {
+    const id = uuidv7();
+    const sequence = this.db.database.prepare("SELECT COALESCE(MAX(sequence_no), 0) + 1 AS sequence FROM authoring_messages WHERE session_id = ?").get(input.sessionId) as { sequence: number };
+    this.db.database.prepare("INSERT INTO authoring_messages (id, session_id, sequence_no, role, content_ref, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(id, input.sessionId, sequence.sequence, input.role, json(input.content), now());
+    return id;
+  }
+  transition(id: string, status: "running" | "succeeded" | "failed" | "cancelled"): boolean {
+    const current = this.db.database.prepare("SELECT status FROM authoring_sessions WHERE id = ?").get(id) as { status: string } | undefined;
+    if (!current) return false;
+    const allowed: Record<string, readonly string[]> = { pending: ["running", "cancelled"], running: ["succeeded", "failed", "cancelled"], succeeded: [], failed: [], cancelled: [] };
+    if (!allowed[current.status]?.includes(status)) throw new Error(`Invalid authoring session transition: ${current.status} -> ${status}`);
+    return Number(this.db.database.prepare("UPDATE authoring_sessions SET status = ?, updated_at = ? WHERE id = ? AND status = ?").run(status, now(), id, current.status).changes) === 1;
+  }
+}
 
 export class EventRepository {
   constructor(private readonly db: OrchardDatabase) {}
@@ -78,6 +222,14 @@ export class EventRepository {
     const id = uuidv7();
     this.db.database.prepare("INSERT INTO incoming_events (id, source, event_id, event_name, payload_ref, payload_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'received', ?)").run(id, input.source, input.eventId, input.name, payload, hash, now());
     return { id, duplicate: false };
+  }
+
+  deliver(input: { eventId: string; triggerId: string; runId?: string }): boolean {
+    const event = this.db.database.prepare("SELECT id FROM incoming_events WHERE id = ?").get(input.eventId) as { id: string } | undefined;
+    if (!event) throw new Error("Incoming event not found");
+    const id = uuidv7();
+    const result = this.db.database.prepare("INSERT OR IGNORE INTO incoming_event_deliveries (id, incoming_event_id, trigger_id, run_id, status, created_at) VALUES (?, ?, ?, ?, 'delivered', ?)").run(id, input.eventId, input.triggerId, input.runId ?? null, now());
+    return Number(result.changes) === 1;
   }
 }
 
@@ -156,6 +308,11 @@ export class RunRepository {
     }
   }
 
+  recoverExpiredClaims(nowMs = now()): number {
+    const result = this.db.database.prepare("UPDATE runs SET status = 'queued', claim_owner = NULL, claim_until = NULL WHERE status = 'running' AND claim_until IS NOT NULL AND claim_until <= ?").run(nowMs);
+    return Number(result.changes);
+  }
+
   getRun(id: string): RunRecord | undefined {
     return this.db.database.prepare("SELECT id, workflow_version_id AS workflowVersionId, status, input_ref AS inputRef, created_at AS createdAt FROM runs WHERE id = ?").get(id) as unknown as RunRecord | undefined;
   }
@@ -183,6 +340,10 @@ export class RunRepository {
   listRuns(limit = 50, offset = 0): readonly RunRecord[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isInteger(offset) || offset < 0) throw new Error("Invalid pagination");
     return this.db.database.prepare("SELECT id, workflow_version_id AS workflowVersionId, status, input_ref AS inputRef, created_at AS createdAt FROM runs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?").all(limit, offset) as unknown as RunRecord[];
+  }
+
+  listEvents(runId: string): readonly { id: string; sequenceNo: number; type: string; stepId?: string; attemptId?: string; payload?: unknown; createdAt: number }[] {
+    return this.db.database.prepare("SELECT id, sequence_no AS sequenceNo, event_type AS type, step_id AS stepId, attempt_id AS attemptId, payload_json AS payload, created_at AS createdAt FROM run_events WHERE run_id = ? ORDER BY sequence_no").all(runId).map((row) => { const value = row as { id: string; sequenceNo: number; type: string; stepId?: string | null; attemptId?: string | null; payload?: string | null; createdAt: number }; return { id: value.id, sequenceNo: value.sequenceNo, type: value.type, ...(value.stepId ? { stepId: value.stepId } : {}), ...(value.attemptId ? { attemptId: value.attemptId } : {}), ...(value.payload === null || value.payload === undefined ? {} : { payload: JSON.parse(value.payload) }), createdAt: value.createdAt }; });
   }
 
   appendEvent(input: { runId: string; type: string; stepId?: string; attemptId?: string; payload?: unknown }): number {

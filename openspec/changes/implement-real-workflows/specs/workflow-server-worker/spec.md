@@ -4,6 +4,17 @@
 
 ## ADDED Requirements
 
+### Requirement: Worker 必须从受控 Node.js/TypeScript 文件执行
+系统 SHALL 仅从 `~/.orchard/` 受控目录加载数据库已登记的 Node.js/TypeScript Worker 文件，并在执行前校验版本、规范化相对路径和 SHA-256 摘要；不得加载任务请求提供的任意路径。
+
+#### Scenario: artifact 校验成功
+- **WHEN** Worker 领取任务且对应 artifact 文件存在、版本匹配且摘要校验通过
+- **THEN** Worker 加载该 Node.js/TypeScript 文件并开始执行
+
+#### Scenario: artifact 缺失或摘要不匹配
+- **WHEN** Worker 找不到登记文件或文件摘要与 SQLite 记录不一致
+- **THEN** Worker 拒绝执行、记录可识别错误并使任务进入失败或可恢复状态
+
 ### Requirement: Worker 必须通过租约领取任务
 系统 SHALL 以可见的租约状态分配待执行任务；Worker 必须能够领取、续租并确认完成或失败。
 
@@ -24,4 +35,4 @@
 
 #### Scenario: Worker 异常退出
 - **WHEN** Worker 在执行任务时异常退出
-- **THEN** 任务在租约过期后可被接管，并保留原尝试的失败或超时记录
+- **THEN** 任务在租约过期后可被接管，并保留原尝试的失败或超时记录；重启后的 Worker 依据 SQLite 状态重新加载登记的 Node.js/TypeScript 文件

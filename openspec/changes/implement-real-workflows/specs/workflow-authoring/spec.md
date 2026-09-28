@@ -8,8 +8,8 @@
 系统 SHALL 在工作流代码被保存或发布前验证其定义、输入输出契约、依赖和可执行入口；校验失败时 SHALL 返回可定位的错误且不得生成可发布版本。
 
 #### Scenario: 有效代码编译成功
-- **WHEN** 用户提交符合 SDK 契约的工作流代码
-- **THEN** 系统生成包含工作流元数据和可执行入口的不可变编译产物
+- **WHEN** 用户提交符合 SDK 契约的 Workflow 源码目录，其中以 `worker.ts` 为入口并可包含其他受控相对导入文件
+- **THEN** 系统生成包含 App/Workflow 元数据和可执行入口的不可变 Node.js/TypeScript Worker 产物，将源码目录与编译后的 `worker.mjs` 写入受控的 `~/.orchard/` artifact 目录，并记录 manifest、逐文件摘要及源码树/bundle 摘要
 
 #### Scenario: 无效代码被拒绝
 - **WHEN** 代码存在语法、契约或不受支持的依赖错误
@@ -20,7 +20,7 @@
 
 #### Scenario: 发布新版本
 - **WHEN** 用户发布通过校验的工作流
-- **THEN** 系统创建新版本并记录源码摘要、编译产物和发布时间
+- **THEN** 系统在 `~/.orchard/` 下原子写入源码/Worker 文件，创建新版本并在 SQLite 中记录相对路径、源码摘要、编译产物、artifact 摘要和发布时间
 
 #### Scenario: 发布失败不影响线上版本
 - **WHEN** 新版本编译或发布校验失败

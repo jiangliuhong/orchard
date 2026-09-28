@@ -4,3 +4,5 @@ export { CronScheduler, parseCron } from "./cron.js";
 export type { CronJob, CronSchedule } from "./cron.js";
 export { EventDispatcher } from "./event-dispatcher.js";
 export type { TriggerMatcher } from "./event-dispatcher.js";
+export { PersistentScheduler } from "./persistent-scheduler.js";
+export type { ScheduledDelivery } from "./persistent-scheduler.js";

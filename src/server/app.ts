@@ -8,6 +8,7 @@ export interface ServerOptions {
   readonly listWorkflows?: (limit: number, offset: number) => readonly WorkflowRecord[];
   readonly listRuns?: (limit: number, offset: number) => readonly { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number }[];
   readonly getRun?: (id: string) => { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number } | undefined;
+  readonly listRunEvents?: (id: string) => readonly { id: string; sequenceNo: number; type: string; stepId?: string; attemptId?: string; payload?: unknown; createdAt: number }[];
   readonly createWorkflow?: (input: { name: string; description?: string }) => WorkflowRecord;
   readonly publishWorkflow?: (workflowId: string, entry: string) => Promise<{ workflowId: string; versionId: string; contentHash: string; bundlePath: string }>;
   readonly createRun?: (workflowId: string, input: unknown, idempotencyKey?: string) => { id: string; workflowVersionId: string; status: string; inputRef?: string };
@@ -92,6 +93,11 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     const run = options.getRun(request.params.runId);
     if (!run) return reply.code(404).send({ code: "RUN_NOT_FOUND", message: "Run not found", requestId: request.id });
     return run;
+  });
+
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/events", async (request, reply) => {
+    if (!options.listRunEvents) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Run history is not connected", requestId: request.id });
+    return { runId: request.params.runId, items: options.listRunEvents(request.params.runId) };
   });
 
   app.post<{ Params: { runId: string }; Body: { reason?: string } }>("/api/runs/:runId/cancel", {

@@ -10,7 +10,7 @@ test("database initialization applies schema, WAL, foreign keys and default work
   const dir = await mkdtemp(join(tmpdir(), "orchard-storage-"));
   const storage = initializeDatabase(dir);
   try {
-    assert.equal(storage.database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(storage.database.prepare("PRAGMA user_version").get().user_version, 2);
     assert.equal(storage.database.prepare("PRAGMA foreign_keys").get().foreign_keys, 1);
     assert.equal(storage.database.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
     const workspaceId = createDefaultWorkspace(storage);
@@ -41,7 +41,7 @@ test("a lock left by an exited process is reclaimed", async () => {
   await writeFile(join(runtimeDir, "orchard.lock"), "999999\n");
   const storage = initializeDatabase(dir);
   try {
-    assert.equal(storage.database.prepare("PRAGMA user_version").get().user_version, 1);
+    assert.equal(storage.database.prepare("PRAGMA user_version").get().user_version, 2);
   } finally {
     storage.close();
     await rm(dir, { recursive: true, force: true });

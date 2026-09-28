@@ -30,5 +30,6 @@
 ## Impact
 
 - 影响 `src/authoring`、`src/runtime`、`src/scheduler`、`src/storage`、`src/server`、`src/web` 和 `src/workflow-sdk`，并需要补充数据库迁移、API 契约和端到端测试。
+- 本地运行时数据默认由 `~/.orchard/orchard.sqlite` 与 `~/.orchard/artifacts/` 管理：SQLite 保存状态和 artifact 元数据，Node.js/TypeScript Worker 文件保存于受控 artifact 目录并通过摘要关联。
 - 可能增加 Pi 适配及代码沙箱/权限校验相关依赖；工作流执行仍需遵守本地服务安全边界和可信 CLI 工具注册机制。
 - 现有仅内存或只读行为将被替换为持久化、可恢复的运行时行为，部分内部 API 和数据模型可能发生不兼容变化。
