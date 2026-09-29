@@ -51,5 +51,8 @@ export class RunCoordinator {
     return true;
   }
 
+  /** Requeue expired claims during startup before any user code is invoked. */
+  recover(): number { return this.runs.recoverExpiredClaims(); }
+
   close(): void { this.queue.close(); }
 }

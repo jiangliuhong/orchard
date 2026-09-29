@@ -19,7 +19,7 @@ export class WorkerLoop {
   constructor(
     private readonly tasks: WorkflowTaskRepository,
     private readonly handler: WorkerTaskHandler,
-    private readonly options: { workerId: string; concurrency?: number; leaseMs?: number; pollMs?: number } ,
+    private readonly options: { workerId: string; concurrency?: number; leaseMs?: number; pollMs?: number; maxPerWorkflow?: number; maxPerRun?: number } ,
   ) {}
 
   start(): void {
@@ -35,9 +35,16 @@ export class WorkerLoop {
 
   private async poll(): Promise<void> {
     if (this.closed) return;
+    // Recovery is deliberately performed outside user-code execution and on
+    // every poll, so a restarted worker can reclaim expired leases without a
+    // separate coordinator process.
+    this.tasks.recoverExpired();
     const limit = this.options.concurrency ?? 1;
     while (!this.closed && this.running < limit) {
-      const claimed = this.tasks.claim(this.options.workerId, this.options.leaseMs ?? 30_000);
+      const claimed = this.tasks.claim(this.options.workerId, this.options.leaseMs ?? 30_000, Date.now(), {
+        ...(this.options.maxPerWorkflow === undefined ? {} : { maxPerWorkflow: this.options.maxPerWorkflow }),
+        ...(this.options.maxPerRun === undefined ? {} : { maxPerRun: this.options.maxPerRun }),
+      });
       if (!claimed) break;
       this.running += 1;
       void this.execute(claimed.task, claimed.lease).finally(() => { this.running -= 1; });

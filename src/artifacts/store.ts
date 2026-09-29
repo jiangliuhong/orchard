@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { v7 as uuidv7 } from "uuid";
 
 export interface ArtifactRef {
@@ -26,6 +26,14 @@ export interface ArtifactReconciliation {
 
 function digest(content: Buffer): string { return createHash("sha256").update(content).digest("hex"); }
 function safeSegment(value: string): void { if (!/^[A-Za-z0-9._-]+$/.test(value) || value === "." || value === "..") throw new Error(`Unsafe artifact path segment: ${value}`); }
+
+/** Normalize a path supplied by an artifact/package and reject traversal. */
+export function normalizeArtifactPath(value: string): string {
+  if (typeof value !== "string" || !value || isAbsolute(value) || value.includes("\0") || value.includes("\\") ) throw new Error(`Unsafe artifact path: ${value}`);
+  const parts = value.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error(`Unsafe artifact path: ${value}`);
+  return parts.join("/");
+}
 
 export class ArtifactStore {
   readonly root: string;
@@ -61,9 +69,11 @@ export class ArtifactStore {
       await cp(input.bundlePath, join(operation, "bundle", "worker.mjs"), { force: false });
       const bundle = await readFile(join(operation, "bundle", "worker.mjs"));
       const files = await this.fileManifest(join(operation, "source"));
+      for (const file of files) normalizeArtifactPath(file.path);
       const sourceTreeHash = digest(Buffer.from(JSON.stringify(files)));
       const bundleHash = digest(bundle);
-      const manifest = { ...input.manifest, entry: "source/worker.ts", files: files.map((file) => `source/${file.path}`), sourceTreeHash, bundleHash };
+      const sourceEntry = typeof input.manifest.entry === "string" ? input.manifest.entry : "worker.ts";
+      const manifest = { ...input.manifest, appId: input.appId, workflowId: input.workflowId, versionId: input.versionId, entry: `source/${sourceEntry}`, files: files.map((file) => ({ path: `source/${file.path}`, hash: file.hash, size: file.size })), sourceTreeHash, bundleHash };
       await writeFile(join(operation, "manifest.json"), JSON.stringify(manifest, null, 2), { flag: "wx", mode: 0o600 });
       await mkdir(resolve(destination, ".."), { recursive: true, mode: 0o700 });
       await rename(operation, destination);
@@ -121,7 +131,7 @@ export class ArtifactStore {
         const path = join(directory, entry.name);
         if (entry.isSymbolicLink()) throw new Error(`Symlink is not allowed in artifact source: ${entry.name}`);
         if (entry.isDirectory()) await visit(path);
-        else if (entry.isFile()) { const content = await readFile(path); result.push({ path: relative(root, path), hash: digest(content), size: content.byteLength }); }
+        else if (entry.isFile()) { const content = await readFile(path); result.push({ path: normalizeArtifactPath(relative(root, path)), hash: digest(content), size: content.byteLength }); }
         else throw new Error(`Unsupported artifact entry: ${entry.name}`);
       }
     };

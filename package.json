@@ -16,7 +16,7 @@
     "test": "pnpm build && node --test tests/*.test.mjs",
     "test:e2e": "pnpm build && node --test tests/e2e/*.test.mjs",
     "test:package": "pnpm build && npm pack --dry-run",
-    "dev": "pnpm build && node dist/cli/main.js"
+    "dev": "node scripts/dev.mjs"
   },
   "exports": {
     ".": {

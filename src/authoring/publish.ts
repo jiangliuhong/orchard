@@ -27,7 +27,7 @@ export async function publishWorkflow(input: {
     rootDir: input.rootDir,
     entry: input.entry,
     outputDir: input.outputDir,
-    ...(input.artifactStore === undefined ? {} : { requireWorkerEntry: input.entry === "worker.ts" }),
+    ...(input.artifactStore === undefined ? {} : { requireWorkerEntry: input.entry === "worker.ts", requireWorkflowContract: input.entry === "worker.ts" }),
   });
   const manifest = { ...build.manifest, ...(input.manifest ?? {}) };
   if (!input.artifactStore || !input.appId) {

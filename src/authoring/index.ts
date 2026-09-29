@@ -6,3 +6,5 @@ export { PiAuthoringService, InvalidAuthoringOutputError } from "./pi-session.js
 export type { AuthoringPatch, AuthoringResponse } from "./pi-session.js";
 export { WorkflowDraftService } from "./draft-service.js";
 export type { DraftServiceInput } from "./draft-service.js";
+export { discoverWorkflows, relativeWorkflowPath } from "./discovery.js";
+export type { DiscoveredWorkflow } from "./discovery.js";

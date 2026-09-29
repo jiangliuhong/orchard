@@ -16,6 +16,8 @@ export class WorkflowExecutionService {
   async execute<Input, Output>(runId: string, workflow: WorkflowDefinition<Input, Output>, input: unknown, signal: AbortSignal): Promise<Output> {
     validateWorkflowInput(workflow, input);
     const context = createWorkflowContext(runId, signal, async <T>(stepId: string, request: StepRequest): Promise<T> => {
+      const previous = this.steps.getSuccessful(runId, stepId);
+      if (previous) return previous.output as T;
       const executor = this.runner.getExecutor(request.type);
       const attempt = this.steps.beginStep({ runId, stepId, nodeType: executor.type, nodeVersion: executor.version, config: request.config, value: request.input });
       try {

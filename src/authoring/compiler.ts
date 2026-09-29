@@ -69,6 +69,7 @@ export async function validateWorkflowSource(options: {
   allowedImports?: readonly string[];
   allowedCapabilities?: readonly string[];
   requireWorkerEntry?: boolean;
+  requireWorkflowContract?: boolean;
 }): Promise<WorkflowSourceValidation> {
   const root = await realpath(resolve(options.rootDir));
   const entry = normalizeRelativePath(options.entry);
@@ -82,6 +83,9 @@ export async function validateWorkflowSource(options: {
   for (const file of files.filter((item) => /\.(ts|tsx|mts)$/.test(item))) {
     const source = await readFile(resolve(root, file), "utf8");
     if (file === entry && !/(defineWorkflow|export\s+default)/.test(source)) throw new Error(`${entry} must export a workflow definition`);
+    if (file === entry && options.requireWorkflowContract && /defineWorkflow\s*\(/.test(source) && !/\binputSchema\b/.test(source)) throw new Error(`${entry} must declare inputSchema`);
+    if (file === entry && options.requireWorkflowContract && /defineWorkflow\s*\(/.test(source) && !/\boutputSchema\b/.test(source)) throw new Error(`${entry} must declare outputSchema`);
+    if (file === entry && options.requireWorkflowContract && /defineWorkflow\s*\(/.test(source) && !/\brun\s*[:(]/.test(source)) throw new Error(`${entry} must declare a run handler`);
     for (const match of source.matchAll(/from\s+["']([^"']+)["']|import\s*[({]?[\s\S]*?from\s*["']([^"']+)["']/g)) {
       const dependency = match[1] ?? match[2];
       if (dependency?.startsWith(".")) continue;
@@ -97,7 +101,7 @@ export async function validateWorkflowSource(options: {
   return { files, sourceTreeHash: await digestFilesAsync(root, files), entry, capabilities: [...capabilities].sort() };
 }
 
-export async function compileWorkflow(options: { rootDir: string; entry: string; outputDir: string; requireWorkerEntry?: boolean; allowedCapabilities?: readonly string[] }): Promise<WorkflowBuildResult> {
+export async function compileWorkflow(options: { rootDir: string; entry: string; outputDir: string; requireWorkerEntry?: boolean; requireWorkflowContract?: boolean; allowedCapabilities?: readonly string[] }): Promise<WorkflowBuildResult> {
   const root = await realpath(resolve(options.rootDir));
   const requestedEntry = resolve(root, options.entry);
   if (!inside(root, requestedEntry) || !requestedEntry.endsWith(".ts")) throw new Error("Workflow entry must be a TypeScript file inside its workspace");
@@ -106,6 +110,7 @@ export async function compileWorkflow(options: { rootDir: string; entry: string;
     rootDir: root,
     entry: relative(root, entry),
     ...(options.requireWorkerEntry === undefined ? {} : { requireWorkerEntry: options.requireWorkerEntry }),
+    ...(options.requireWorkflowContract === undefined ? {} : { requireWorkflowContract: options.requireWorkflowContract }),
     ...(options.allowedCapabilities === undefined ? {} : { allowedCapabilities: options.allowedCapabilities }),
   });
   const source = await readFile(entry);

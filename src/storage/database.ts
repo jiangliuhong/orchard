@@ -133,9 +133,27 @@ export function initializeDatabase(dataDir = defaultInstanceRoot()): OrchardData
   };
 }
 
-export { AuthoringSessionRepository, EventRepository, ScheduleRepository, StepRepository, WorkflowRepository, RunRepository, WorkflowTaskRepository } from "./repository.js";
+export { AgentProfileRepository, ArtifactRepository, AuthoringSessionRepository, EventRepository, ScheduleRepository, StepRepository, WorkflowRepository, RunRepository, WorkflowTaskRepository } from "./repository.js";
+export type { AgentProfileRecord } from "./repository.js";
+export { migrateRegisteredWorkflows } from "./legacy-migration.js";
+export type { LegacyMigrationResult } from "./legacy-migration.js";
 export { OperationsLog } from "./operations-log.js";
 export type { OperationLogEntry } from "./operations-log.js";
+
+export function migrationDiagnostics(db: OrchardDatabase): { readonly userVersion: number; readonly migrations: readonly { version: number; name: string; appliedAt: number }[] } {
+  const userVersion = Number(db.database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+  const migrations = db.database.prepare("SELECT version, name, applied_at AS appliedAt FROM schema_migrations ORDER BY version").all() as { version: number; name: string; appliedAt: number }[];
+  return { userVersion, migrations };
+}
+
+/** Create an explicit backup before an operator performs a rollback. */
+export function backupDatabase(db: OrchardDatabase, destination?: string): string {
+  const target = destination ?? join(db.dataDir, "runtime", "backups", `orchard-manual-${Date.now()}.db`);
+  prepareDirectory(resolve(target, ".."));
+  db.database.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  copyFileSync(join(db.dataDir, "orchard.db"), target);
+  return target;
+}
 
 export function createDefaultWorkspace(db: OrchardDatabase, rootPath = join(db.dataDir, "workspaces", "default")): string {
   mkdirSync(rootPath, { recursive: true, mode: 0o700 });
