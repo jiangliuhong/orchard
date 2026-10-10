@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, statfsSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statfsSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -7,6 +7,10 @@ import { v7 as uuidv7 } from "uuid";
 const MIGRATIONS = [
   { version: 1, name: "001-initial", sql: readFileSync(new URL("../../migrations/001-initial.sql", import.meta.url), "utf8") },
   { version: 2, name: "002-workflow-runtime", sql: readFileSync(new URL("../../migrations/002-workflow-runtime.sql", import.meta.url), "utf8") },
+  { version: 3, name: "003-workflow-version-integrity", sql: readFileSync(new URL("../../migrations/003-workflow-version-integrity.sql", import.meta.url), "utf8") },
+  { version: 4, name: "004-durable-continuations", sql: readFileSync(new URL("../../migrations/004-durable-continuations.sql", import.meta.url), "utf8") },
+  { version: 5, name: "005-task-policy-state", sql: readFileSync(new URL("../../migrations/005-task-policy-state.sql", import.meta.url), "utf8") },
+  { version: 6, name: "006-flow-control-state", sql: readFileSync(new URL("../../migrations/006-flow-control-state.sql", import.meta.url), "utf8") },
 ] as const;
 
 function isProcessAlive(pid: number): boolean {
@@ -98,13 +102,16 @@ export function initializeDatabase(dataDir = defaultInstanceRoot()): OrchardData
     database = new DatabaseSync(databasePath);
     chmodSync(databasePath, 0o600);
     database.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
-    database.exec("BEGIN IMMEDIATE;");
     const current = Number(database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-    if (current > 0 && existsSync(databasePath)) {
+    if (current > MIGRATIONS[MIGRATIONS.length - 1]!.version) throw new Error('Database is newer than this runtime');
+    if (current > 0 && MIGRATIONS.some(migration => migration.version > current)) {
       const backupDir = join(runtimeDir, "backups");
       prepareDirectory(backupDir);
-      copyFileSync(databasePath, join(backupDir, `orchard-${Date.now()}-v${current}.db`));
+      const backupPath = join(backupDir, `orchard-${Date.now()}-v${current}.db`);
+      database.prepare('VACUUM INTO ?').run(backupPath);
+      chmodSync(backupPath, 0o600);
     }
+    database.exec("BEGIN IMMEDIATE;");
     for (const migration of MIGRATIONS) {
       if (current >= migration.version) continue;
       database.exec(migration.sql);
@@ -133,7 +140,7 @@ export function initializeDatabase(dataDir = defaultInstanceRoot()): OrchardData
   };
 }
 
-export { AgentProfileRepository, ArtifactRepository, AuthoringSessionRepository, EventRepository, ScheduleRepository, StepRepository, WorkflowRepository, RunRepository, WorkflowTaskRepository } from "./repository.js";
+export { AgentProfileRepository, ArtifactRepository, AuthoringSessionRepository, ContinuationRepository, EventRepository, PolicyBucketRepository, ScheduleRepository, StepRepository, WorkerHeartbeatRepository, WorkflowRepository, RunRepository, WorkflowTaskRepository } from "./repository.js";
 export type { AgentProfileRecord } from "./repository.js";
 export { migrateRegisteredWorkflows } from "./legacy-migration.js";
 export type { LegacyMigrationResult } from "./legacy-migration.js";
@@ -150,8 +157,8 @@ export function migrationDiagnostics(db: OrchardDatabase): { readonly userVersio
 export function backupDatabase(db: OrchardDatabase, destination?: string): string {
   const target = destination ?? join(db.dataDir, "runtime", "backups", `orchard-manual-${Date.now()}.db`);
   prepareDirectory(resolve(target, ".."));
-  db.database.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-  copyFileSync(join(db.dataDir, "orchard.db"), target);
+  db.database.prepare('VACUUM INTO ?').run(target);
+  chmodSync(target, 0o600);
   return target;
 }
 

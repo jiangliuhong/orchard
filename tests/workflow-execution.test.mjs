@@ -1,3 +1,4 @@
+import { createCodeVersion } from "./helpers/code-version.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,7 @@ async function fixture() {
   const workspace = createDefaultWorkspace(db);
   const workflows = new WorkflowRepository(db);
   const workflowRecord = workflows.createWorkflow({ workspaceId: workspace, name: "fixture" });
-  const version = workflows.createVersion({ workflowId: workflowRecord.id, contentHash: Math.random().toString(), sourcePath: "source", bundlePath: "bundle", manifest: {}, sdkVersion: "0.1.0" });
+  const version = createCodeVersion(workflows, { workflowId: workflowRecord.id, contentHash: Math.random().toString(), sourcePath: "source", bundlePath: "bundle", manifest: {}, sdkVersion: "0.1.0" });
   const nodes = new NodeRegistry().register({ type: "fixture.upper", version: "1", configSchema: Type.Object({}), inputSchema: Type.String(), outputSchema: Type.String(), async execute(_ctx, _config, input) { return input.toUpperCase(); } });
   const workflow = defineWorkflow({ id: "fixture", name: "Fixture", inputSchema: Type.Object({ text: Type.String() }), outputSchema: Type.Object({ value: Type.String() }), async run(ctx, input) { const value = await ctx.step.execute("uppercase", { type: "fixture.upper", config: {}, input: input.text }); return { value }; } });
   return { dir, db, version, runs: new RunRepository(db), workflow, nodes };

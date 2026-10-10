@@ -75,8 +75,7 @@
   "devDependencies": {
     "@types/node": "^24.13.6",
     "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "typescript": "^5.9.0"
+    "@types/react-dom": "^19.3.0"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
@@ -87,8 +86,10 @@
     "drizzle-orm": "~0.44.7",
     "esbuild": "~0.25.12",
     "fastify": "^5.12.5",
+    "monaco-editor": "0.57.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "typescript": "^5.9.0",
     "uuid": "^11.1.1"
   }
 }

@@ -7,6 +7,8 @@ export { RemoteWorker, signWorkerLease, verifyWorkerLease } from "./remote-worke
 export type { WorkerLease, WorkerTransport } from "./remote-worker.js";
 export { WorkerLoop } from "./worker-loop.js";
 export type { WorkerTaskContext, WorkerTaskHandler } from "./worker-loop.js";
+export type { TaskEnvelope, LeaseEnvelope, TaskClaim, TaskError, TaskResult, WorkerHealth } from "./task-protocol.js";
+export { assertTaskResult } from "./task-protocol.js";
 export { loadRegisteredBundle } from "./artifact-loader.js";
 export type { RuntimeArtifactManifest } from "./artifact-loader.js";
 export { executeRegisteredWorkflow } from "./registered-executor.js";

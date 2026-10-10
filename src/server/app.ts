@@ -1,15 +1,20 @@
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AgentProfileRecord, WorkflowRecord } from "../storage/repository.js";
 import { WORKBENCH_HTML } from "./workbench.js";
+import type { WorkflowDetail } from "./workflow-detail.js";
 
 export interface ServerOptions {
   readonly authority?: string;
   readonly listWorkflows?: (limit: number, offset: number) => readonly WorkflowRecord[];
-  readonly listRuns?: (limit: number, offset: number) => readonly { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number }[];
+  readonly deleteWorkflow?: (id: string) => boolean;
+  readonly getWorkflowDetail?: (id: string) => Promise<WorkflowDetail | undefined>;
+  readonly listRuns?: (limit: number, offset: number, filter?: { workflowId?: string; workflowVersionId?: string; status?: string; triggerId?: string; since?: number; until?: number }) => readonly { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number }[];
   readonly getRun?: (id: string) => { id: string; workflowVersionId: string; status: string; inputRef?: string; createdAt?: number } | undefined;
   readonly listRunEvents?: (id: string) => readonly { id: string; sequenceNo: number; type: string; stepId?: string; attemptId?: string; payload?: unknown; createdAt: number }[];
-  readonly createWorkflow?: (input: { name: string; description?: string }) => WorkflowRecord;
+  readonly traceRun?: (id: string) => readonly unknown[];
+  readonly rerunRun?: (id: string, stepId?: string) => { id: string; workflowVersionId: string; status: string };
+  readonly createWorkflow?: (input: { name: string; description?: string }) => WorkflowRecord | Promise<WorkflowRecord>;
   readonly listDiscoveredWorkflows?: () => Promise<readonly unknown[]> | readonly unknown[];
   readonly addDiscoveredWorkflow?: (input: { workspace: string; id: string }) => Promise<unknown> | unknown;
   readonly listAgents?: () => readonly AgentProfileRecord[];
@@ -22,6 +27,9 @@ export interface ServerOptions {
   readonly exportWorkflow?: (workflowId: string) => Promise<unknown>;
   readonly listTasks?: (runId?: string) => readonly unknown[];
   readonly getTask?: (taskId: string) => unknown;
+  readonly listContinuations?: (runId?: string) => readonly unknown[];
+  readonly listSchedulingDecisions?: (runId?: string) => readonly unknown[];
+  readonly workerHealth?: () => unknown;
   readonly publishWorkflow?: (workflowId: string, entry: string) => Promise<{ workflowId: string; versionId: string; contentHash: string; bundlePath: string }>;
   readonly listWorkflowVersions?: (workflowId: string) => readonly unknown[];
   readonly listSchedules?: () => readonly unknown[];
@@ -29,17 +37,16 @@ export interface ServerOptions {
   readonly setScheduleEnabled?: (scheduleId: string, enabled: boolean) => boolean;
   readonly createRun?: (workflowId: string, input: unknown, idempotencyKey?: string) => { id: string; workflowVersionId: string; status: string; inputRef?: string };
   readonly cancelRun?: (id: string, reason: string) => boolean;
-  readonly receiveEvent?: (input: { source: string; eventId: string; name: string; data: unknown }) => { id: string; duplicate: boolean };
+  readonly receiveEvent?: (input: { source: string; eventId: string; name: string; data: unknown }) => { id: string; duplicate: boolean; deliveries?: readonly string[] };
 }
 
 export function createServer(options: ServerOptions = {}): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, ajv: { customOptions: { removeAdditional: false } } });
   const authority = options.authority ?? "localhost:80";
-  const workbenchJs = readFileSync(new URL("./client.js", import.meta.url), "utf8");
-  const workbenchCss = readFileSync(new URL("./workbench.css", import.meta.url), "utf8");
 
   app.addHook("onRequest", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
+    reply.header("X-Operation-Id", request.id);
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
     reply.header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
@@ -73,13 +80,21 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
   app.setNotFoundHandler((request, reply) => reply.code(404).send({ code: "NOT_FOUND", message: "Route not found", requestId: request.id }));
 
   app.get("/api/health", async () => ({ status: "ok", service: "orchard", version: "0.1.0" }));
+  app.get("/api/worker/health", async (_request, reply) => {
+    if (!options.workerHealth) return reply.code(503).send({ code: "WORKER_UNAVAILABLE", message: "Worker health is not connected" });
+    return options.workerHealth();
+  });
   const serveWorkbench = async (_request: unknown, reply: { type: (contentType: string) => { send: (body: string) => unknown } }) => reply.type("text/html; charset=utf-8").send(WORKBENCH_HTML);
   app.get("/", serveWorkbench);
   app.get("/workflows", serveWorkbench);
+  app.get("/workflows/:workflowId", serveWorkbench);
   app.get("/runs", serveWorkbench);
+  app.get("/runs/:runId", serveWorkbench);
   app.get("/settings", serveWorkbench);
-  app.get("/workbench.css", async (_request, reply) => reply.type("text/css; charset=utf-8").send(workbenchCss));
-  app.get("/workbench.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(workbenchJs));
+  app.get("/workbench.css", async (_request, reply) => reply.type("text/css; charset=utf-8").send(await readFile(new URL("./workbench.css", import.meta.url), "utf8")));
+  app.get("/workbench.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(await readFile(new URL("./client.js", import.meta.url), "utf8")));
+  app.get("/editor.css", async (_request, reply) => reply.type("text/css; charset=utf-8").send(await readFile(new URL("./client.css", import.meta.url), "utf8")));
+  app.get("/editor-assets/editor.worker.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(await readFile(new URL("./editor-assets/editor.worker.js", import.meta.url), "utf8")));
   app.get("/api/agents", async (_request, reply) => {
     if (!options.listAgents) return reply.code(503).send({ code: "AGENTS_UNAVAILABLE", message: "Agent storage is not connected" });
     return { items: options.listAgents() };
@@ -94,6 +109,22 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     if (!options.listDiscoveredWorkflows) return reply.code(503).send({ code: "DISCOVERY_UNAVAILABLE", message: "Workflow discovery is not connected" });
     return { items: await options.listDiscoveredWorkflows() };
   });
+  app.get<{ Params: { workflowId: string } }>("/api/workflows/:workflowId", async (request, reply) => {
+    if (!options.getWorkflowDetail) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Workflow storage is not connected", requestId: request.id });
+    const detail = await options.getWorkflowDetail(request.params.workflowId);
+    if (!detail) return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在", requestId: request.id });
+    return detail;
+  });
+  app.delete<{ Params: { workflowId: string } }>("/api/workflows/:workflowId", async (request, reply) => {
+    if (!options.deleteWorkflow) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Workflow storage is not connected" });
+    try {
+      if (!options.deleteWorkflow(request.params.workflowId)) return reply.code(404).send({ code: "WORKFLOW_NOT_FOUND", message: "工作流不存在" });
+      return reply.code(204).send();
+    } catch (error) {
+      if (error instanceof Error && error.name === "WORKFLOW_BUSY") return reply.code(409).send({ code: "WORKFLOW_BUSY", message: error.message });
+      throw error;
+    }
+  });
   app.post<{ Body: { workspace: string; id: string } }>("/api/workflows/discovered", {
     schema: { body: { type: "object", additionalProperties: false, required: ["workspace", "id"], properties: { workspace: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$" }, id: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]*$" } } } },
   }, async (request, reply) => {
@@ -105,7 +136,7 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     schema: { body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 200 }, description: { type: "string", maxLength: 2_000 } } } },
   }, async (request, reply) => {
     if (!options.createWorkflow) return reply.code(503).send({ code: "AUTHORING_UNAVAILABLE", message: "Workflow authoring is not connected", requestId: request.id });
-    return reply.code(201).send(options.createWorkflow(request.body));
+    return reply.code(201).send(await options.createWorkflow(request.body));
   });
   app.post<{ Params: { workflowId: string }; Body: { baseVersionId?: string } }>("/api/workflows/:workflowId/drafts", {
     schema: { body: { type: "object", additionalProperties: false, properties: { baseVersionId: { type: "string", minLength: 1 } } } },
@@ -173,6 +204,18 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     return run;
   });
 
+  app.get<{ Params: { runId: string } }>("/api/runs/:runId/trace", async (request, reply) => {
+    if (!options.traceRun) return reply.code(503).send({ code: "TRACE_UNAVAILABLE", message: "Run trace is not connected", requestId: request.id });
+    return { runId: request.params.runId, items: options.traceRun(request.params.runId) };
+  });
+
+  app.post<{ Params: { runId: string }; Body: { stepId?: string } }>("/api/runs/:runId/rerun", {
+    schema: { body: { type: "object", additionalProperties: false, properties: { stepId: { type: "string", minLength: 1, maxLength: 200 } } } },
+  }, async (request, reply) => {
+    if (!options.rerunRun) return reply.code(503).send({ code: "RUNTIME_UNAVAILABLE", message: "Run replay is not connected", requestId: request.id });
+    try { return reply.code(202).send(options.rerunRun(request.params.runId, request.body?.stepId)); } catch (error) { return reply.code(400).send({ code: "RERUN_FAILED", message: error instanceof Error ? error.message : "Unable to rerun run", requestId: request.id }); }
+  });
+
   app.get<{ Params: { runId: string } }>("/api/runs/:runId/events", async (request, reply) => {
     if (!options.listRunEvents) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Run history is not connected", requestId: request.id });
     return { runId: request.params.runId, items: options.listRunEvents(request.params.runId) };
@@ -187,15 +230,15 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     return { accepted: true, runId: request.params.runId };
   });
 
-  app.get<{ Querystring: { limit?: number; offset?: number } }>("/api/runs", {
+  app.get<{ Querystring: { limit?: number; offset?: number; workflowId?: string; workflowVersionId?: string; status?: string; triggerId?: string; since?: number; until?: number } }>("/api/runs", {
     schema: { querystring: { type: "object", additionalProperties: false, properties: {
-      limit: { type: "integer", minimum: 1, maximum: 100 }, offset: { type: "integer", minimum: 0, maximum: 1_000_000 },
+      limit: { type: "integer", minimum: 1, maximum: 100 }, offset: { type: "integer", minimum: 0, maximum: 1_000_000 }, workflowId: { type: "string", minLength: 1 }, workflowVersionId: { type: "string", minLength: 1 }, status: { type: "string", minLength: 1 }, triggerId: { type: "string", minLength: 1 }, since: { type: "integer", minimum: 0 }, until: { type: "integer", minimum: 0 },
     } } },
   }, async (request, reply) => {
     if (!options.listRuns) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Storage is not connected", requestId: request.id });
     const limit = request.query.limit ?? 50;
     const offset = request.query.offset ?? 0;
-    const items = options.listRuns(limit, offset).map(({ id, workflowVersionId, status, inputRef, createdAt }) => ({ id, workflowVersionId, status, ...(inputRef === undefined ? {} : { inputRef }), ...(createdAt === undefined ? {} : { createdAt }) }));
+    const items = options.listRuns(limit, offset, request.query).map(({ id, workflowVersionId, status, inputRef, createdAt }) => ({ id, workflowVersionId, status, ...(inputRef === undefined ? {} : { inputRef }), ...(createdAt === undefined ? {} : { createdAt }) }));
     return { items, limit, offset };
   });
 
@@ -211,7 +254,7 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     if (!options.receiveEvent) return reply.code(503).send({ code: "EVENTS_UNAVAILABLE", message: "Event intake is not connected", requestId: request.id });
     try {
       const result = options.receiveEvent({ source: body.source, eventId: body.id, name: body.name, data: body.data });
-      return reply.code(result.duplicate ? 200 : 202).send({ eventId: result.id, duplicate: result.duplicate });
+      return reply.code(result.duplicate ? 200 : 202).send({ eventId: result.id, duplicate: result.duplicate, ...(result.deliveries === undefined ? {} : { deliveries: result.deliveries }) });
     } catch (error) {
       if (error instanceof Error && error.name === "EVENT_CONFLICT") return reply.code(409).send({ code: "EVENT_CONFLICT", message: error.message, requestId: request.id });
       throw error;
@@ -222,22 +265,23 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     if (!options.listSchedules) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Schedule storage is not connected" });
     return { items: options.listSchedules() };
   });
-  app.post<{ Body: { workflowId: string; workflowVersionId?: string; expression: string; timezone?: string; misfirePolicy?: string } }>("/api/schedules", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["workflowId", "expression"], properties: { workflowId: { type: "string", minLength: 1 }, workflowVersionId: { type: "string", minLength: 1 }, expression: { type: "string", minLength: 1 }, timezone: { type: "string", minLength: 1 }, misfirePolicy: { type: "string", enum: ["skip", "catch_up"] } } } },
-  }, async (request, reply) => {
-    if (!options.createSchedule) return reply.code(503).send({ code: "SCHEDULER_UNAVAILABLE", message: "Schedule storage is not connected" });
-    try { return reply.code(201).send(options.createSchedule(request.body)); } catch (error) { return reply.code(400).send({ code: "INVALID_SCHEDULE", message: error instanceof Error ? error.message : "Invalid schedule" }); }
-  });
-  app.post<{ Params: { scheduleId: string }; Body: { enabled: boolean } }>("/api/schedules/:scheduleId/enabled", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["enabled"], properties: { enabled: { type: "boolean" } } } },
-  }, async (request, reply) => {
-    if (!options.setScheduleEnabled) return reply.code(503).send({ code: "SCHEDULER_UNAVAILABLE", message: "Schedule storage is not connected" });
-    if (!options.setScheduleEnabled(request.params.scheduleId, request.body.enabled)) return reply.code(404).send({ code: "SCHEDULE_NOT_FOUND", message: "Schedule not found" });
-    return { scheduleId: request.params.scheduleId, enabled: request.body.enabled };
-  });
+  const definitionReadOnly = (_request: unknown, reply: import("fastify").FastifyReply) => reply.code(409).send({ code: "SOURCE_DEFINITION_READ_ONLY", message: "触发器和执行策略只允许在工作流源码中修改并发布。" });
+  app.post("/api/schedules", definitionReadOnly);
+  app.post("/api/schedules/:scheduleId/enabled", definitionReadOnly);
+  app.patch("/api/schedules/:scheduleId", definitionReadOnly);
+  app.delete("/api/schedules/:scheduleId", definitionReadOnly);
+  app.patch("/api/workflows/:workflowId", definitionReadOnly);
   app.get<{ Querystring: { runId?: string } }>("/api/tasks", async (request, reply) => {
     if (!options.listTasks) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Task storage is not connected", requestId: request.id });
     return { items: options.listTasks(request.query.runId) };
+  });
+  app.get<{ Querystring: { runId?: string } }>("/api/continuations", async (request, reply) => {
+    if (!options.listContinuations) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Continuation storage is not connected", requestId: request.id });
+    return { items: options.listContinuations(request.query.runId) };
+  });
+  app.get<{ Querystring: { runId?: string } }>("/api/scheduling-decisions", async (request, reply) => {
+    if (!options.listSchedulingDecisions) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Scheduling history is not connected", requestId: request.id });
+    return { items: options.listSchedulingDecisions(request.query.runId) };
   });
   app.get<{ Params: { taskId: string } }>("/api/tasks/:taskId", async (request, reply) => {
     if (!options.getTask) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Task storage is not connected", requestId: request.id });
@@ -253,7 +297,10 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
     if (!options.listWorkflows) return reply.code(503).send({ code: "STORAGE_UNAVAILABLE", message: "Storage is not connected", requestId: request.id });
     const limit = request.query.limit ?? 50;
     const offset = request.query.offset ?? 0;
-    const items = options.listWorkflows(limit, offset).map(({ id, workspaceId, name, description, status }) => ({ id, workspaceId, name, description, status }));
+    const items = await Promise.all(options.listWorkflows(limit, offset).map(async ({ id, workspaceId, name, status }) => {
+      const detail = await options.getWorkflowDetail?.(id);
+      return { id, workspaceId, name: detail?.workflow.name ?? id, description: detail?.workflow.description, status };
+    }));
     return { items, limit, offset };
   });
   return app;

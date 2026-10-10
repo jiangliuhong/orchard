@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, mkdir, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import process from "node:process";
 import { homedir } from "node:os";
 import { Command } from "commander";
 import { createServer } from "../server/app.js";
-import { AgentProfileRepository, createDefaultWorkspace, EventRepository, initializeDatabase, RunRepository, ScheduleRepository, WorkflowRepository, WorkflowTaskRepository } from "../storage/database.js";
-import { RunCoordinator, executeRegisteredWorkflow, WorkflowExecutionService } from "../runtime/index.js";
-import { NodeRegistry } from "../workflow-sdk/index.js";
+import { readWorkflowDetail } from "../server/workflow-detail.js";
+import { AgentProfileRepository, ContinuationRepository, createDefaultWorkspace, EventRepository, initializeDatabase, RunRepository, ScheduleRepository, WorkflowRepository, WorkflowTaskRepository } from "../storage/database.js";
+import { WorkerLoop, WorkflowExecutionService } from "../runtime/index.js";
+import { createLocalNodeRegistry } from "../runtime/local-nodes.js";
+import { PersistentScheduler } from "../scheduler/index.js";
 import { pathToFileURL } from "node:url";
+import { v7 as uuidv7 } from "uuid";
+import { loadRegisteredBundle } from "../runtime/artifact-loader.js";
 import { discoverWorkflows } from "../authoring/discovery.js";
 import { publishWorkflow } from "../authoring/publish.js";
 import { createWorkflowExport, publishWorkflowImport, validateWorkflowExport } from "../import-export/index.js";
@@ -48,57 +52,94 @@ async function start(options: { host: string; port: string; open?: boolean; data
   const runs = new RunRepository(storage);
   const schedules = new ScheduleRepository(storage);
   const tasks = new WorkflowTaskRepository(storage);
+  const continuations = new ContinuationRepository(storage);
   const events = new EventRepository(storage);
-  const coordinator = new RunCoordinator(runs);
-  const nodes = new NodeRegistry();
+  const nodes = createLocalNodeRegistry();
   const workflowExecution = new WorkflowExecutionService(storage, nodes);
-  const submitRun = (runId: string): void => {
-    void coordinator.submit(runId, async (run, signal) => {
+  const submitRun = (runId: string): void => { tasks.enqueueRun(runId); };
+  const worker = new WorkerLoop(tasks, async ({ task, signal }) => {
+      const run = runs.getRun(task.runId);
+      if (!run) throw new Error('RUN_NOT_FOUND');
       const version = workflows.getVersion(run.workflowVersionId);
       if (!version) throw new Error("WORKFLOW_VERSION_NOT_FOUND");
       const input = run.inputRef === undefined ? null : JSON.parse(run.inputRef);
       const manifest = version.manifest as Record<string, unknown>;
-      if (typeof manifest.artifactPath === "string") {
-        await executeRegisteredWorkflow(storage.dataDir, { appId: "orchard", workflowId: version.workflowId, versionId: version.id, artifactPath: manifest.artifactPath, manifest: manifest as never, input }, { runId: run.id, signal, step: async () => { throw new Error("Worker step execution is not configured"); }, invokeTool: async () => { throw new Error("Worker tool execution is not configured"); } });
-      } else {
-        const bundlePath = resolve(storage.dataDir, version.bundlePath);
-        const loaded = await import(pathToFileURL(bundlePath).href);
-        const candidate = loaded.default ?? loaded.workflow ?? loaded.run;
-        if (typeof candidate === "function") {
-          await candidate({ runId: run.id, signal, step: async () => { throw new Error("Worker step execution is not configured"); }, invokeTool: async () => { throw new Error("Worker tool execution is not configured"); } }, input);
-        } else if (candidate && typeof candidate.run === "function") {
-          await workflowExecution.execute(run.id, candidate, input, signal);
-        } else { 
-          throw new Error("Workflow bundle does not export a workflow");
-        }
-      }
-      return {};
-    }).catch(() => { /* RunCoordinator records failed state; the API exposes it via polling. */ });
-  };
+      const loaded = typeof manifest.artifactPath === "string"
+        ? (await loadRegisteredBundle({ instanceRoot: storage.dataDir, artifactPath: manifest.artifactPath, manifest: manifest as never, workflowId: version.workflowId, versionId: version.id })).module
+        : await import(pathToFileURL(resolve(storage.dataDir, version.bundlePath)).href);
+      const candidate = loaded.default ?? loaded.workflow ?? loaded.run;
+      let output: unknown;
+      if (typeof candidate === "function") {
+        output = await candidate({ runId: run.id, signal, step: <T>(stepKey: string, stepInput: unknown) => workflowExecution.executeStep<T>(run.id, stepKey, stepInput as import("../core/contracts.js").StepRequest, signal), invokeTool: async () => { throw new Error("Worker tool execution is not configured"); } }, input);
+      } else if (candidate && typeof candidate.run === "function") {
+        output = await workflowExecution.execute(run.id, { ...candidate, ...workflows.getSourceConfiguration(version.id) }, input, signal);
+      } else throw new Error("Workflow bundle does not export a workflow");
+      return output ?? null;
+  }, { workerId: `local:${process.pid}`, concurrency: 2 });
+  const scheduler = new PersistentScheduler(schedules, runs, (workflowId, scheduledFor, occurrenceKey, workflowVersionId, scheduleId) => {
+    const run = runs.createRunForWorkflow({ workflowId, ...(workflowVersionId ? { workflowVersionId } : {}), inputRef: JSON.stringify({ scheduledFor, occurrenceKey }), idempotencyKey: `cron:${scheduleId}:${occurrenceKey}` });
+    submitRun(run.id);
+    return run.id;
+  });
   // Runs are durable. Resume queued work after a process restart instead of
   // leaving it visible in the UI forever with no in-memory queue entry.
   for (const run of runs.listRuns(100, 0)) if (run.status === "queued") submitRun(run.id);
+  let schedulerTimer: ReturnType<typeof setInterval> | undefined;
+  const pollScheduler = (): void => {
+    for (const recover of [() => scheduler.tick(new Date()), () => continuations.resumeDue(), () => continuations.resumeChildren(), () => tasks.recoverExpired(), () => runs.recoverExpiredClaims()]) {
+      try { recover(); } catch { process.stderr.write('Runtime recovery operation failed; will retry.\n'); }
+    }
+    for (let offset = 0; ; offset += 100) {
+      const queued = runs.listRuns(100, offset, { status: 'queued' });
+      for (const run of queued) submitRun(run.id);
+      if (queued.length < 100) break;
+    }
+  };
+  pollScheduler();
+  schedulerTimer = setInterval(pollScheduler, 1_000);
+  worker.start();
   const readTree = async (root: string, prefix: string): Promise<Record<string, Buffer>> => { const result: Record<string, Buffer> = {}; for (const entry of await readdir(root, { withFileTypes: true })) { const source = join(root, entry.name); const name = prefix ? `${prefix}/${entry.name}` : entry.name; if (entry.isDirectory()) Object.assign(result, await readTree(source, name)); else result[name] = await readFile(source); } return result; };
   const app = createServer({
     authority,
     listWorkflows: (limit, offset) => workflows.listWorkflows(workspaceId, limit, offset),
-    listRuns: (limit, offset) => runs.listRuns(limit, offset),
+    deleteWorkflow: (id) => workflows.deleteWorkflow(id, workspaceId),
+    getWorkflowDetail: async (id) => {
+      const workflow = workflows.getWorkflow(id, workspaceId);
+      if (!workflow) return undefined;
+      const version = workflow.currentVersionId ? workflows.getVersion(workflow.currentVersionId) : undefined;
+      return readWorkflowDetail(storage.dataDir, workflow, version);
+    },
+    listRuns: (limit, offset, filter) => runs.listRuns(limit, offset, filter),
     getRun: (id) => runs.getRun(id),
     listRunEvents: (id) => runs.listEvents(id),
+    traceRun: (id) => runs.trace(id),
+    rerunRun: (id, stepId) => stepId ? (() => { const replay = runs.rerunFromStep(id, stepId); submitRun(replay.id); return replay; })() : (() => { const original = runs.getRun(id); if (!original) throw new Error("RUN_NOT_FOUND"); const replay = runs.createRun({ workflowVersionId: original.workflowVersionId, ...(original.inputRef === undefined ? {} : { inputRef: original.inputRef }), retryOfRunId: id }); submitRun(replay.id); return replay; })(),
     listWorkflowVersions: (workflowId) => workflows.listVersions(workflowId),
     createDraft: (input) => workflows.createDraft({ workspaceId, rootPath: `${storage.dataDir}/workspaces/default`, ...(input.workflowId ? { workflowId: input.workflowId } : {}), ...(input.baseVersionId ? { baseVersionId: input.baseVersionId } : {}) }),
     getDraft: (id) => workflows.getDraft(id),
     listTasks: (runId) => tasks.list(runId),
     getTask: (id) => tasks.get(id),
+    listContinuations: (runId) => continuations.list(runId),
+    listSchedulingDecisions: (runId) => runs.listSchedulingDecisions(runId),
+    workerHealth: () => tasks.health(),
     listSchedules: () => schedules.list(),
     createSchedule: (input) => schedules.create(input),
     setScheduleEnabled: (id, enabled) => schedules.setEnabled(id, enabled),
-    createWorkflow: (input) => workflows.createWorkflow({ workspaceId, ...input }),
+    createWorkflow: async (input) => {
+      const id = `workflow-${uuidv7()}`;
+      const rootDir = join(storage.dataDir, "workspaces", "default", "workflows", id);
+      await mkdir(rootDir, { recursive: true });
+      const source = `import { defineWorkflow } from '@jiangliuhong/orchard/workflow';\nexport default defineWorkflow({ id: ${JSON.stringify(id)}, name: ${JSON.stringify(input.name)}, description: ${JSON.stringify(input.description ?? '')}, inputSchema: {}, outputSchema: {}, async run() { return {}; } });\n`;
+      await writeFile(join(rootDir, "worker.ts"), source, { flag: "wx", mode: 0o600 });
+      const workflow = workflows.createWorkflow({ id, workspaceId, name: input.name });
+      await publishWorkflow({ workflows, workflowId: workflow.id, rootDir, entry: "worker.ts", outputDir: join(storage.dataDir, "versions", id) });
+      return workflows.getWorkflow(id)!;
+    },
     listDiscoveredWorkflows: async () => {
       const candidates = await discoverWorkflows(join(storage.dataDir, "workspaces"));
       return candidates.map((candidate) => {
         const targetWorkspace = workflows.getWorkspaceByName(candidate.workspace);
-        const existing = targetWorkspace ? workflows.getWorkflow(candidate.id, targetWorkspace.id) : undefined;
+        const existing = targetWorkspace ? workflows.getWorkflow(candidate.id, targetWorkspace.id, true) : undefined;
         return {
           ...candidate,
           relativePath: relative(storage.dataDir, candidate.sourcePath),
@@ -128,17 +169,36 @@ async function start(options: { host: string; port: string; open?: boolean; data
     createAgent: (input) => agents.create(input),
     exportWorkflow: async (workflowId) => { const versionId = workflows.getCurrentVersionId(workflowId); if (!versionId) throw new Error("Workflow has no published version"); const version = workflows.getVersion(versionId); if (!version) throw new Error("Workflow version not found"); const root = resolve(storage.dataDir, version.sourcePath); const files = await readTree(root, "source"); const bundle = resolve(storage.dataDir, version.bundlePath); try { Object.assign(files, await readTree(bundle, "bundle")); } catch { /* source-only legacy versions */ } return createWorkflowExport({ app: { id: "orchard", name: "Orchard" }, workflow: { id: workflowId }, version: { id: version.id, number: version.versionNo, manifest: version.manifest }, files }); },
     importWorkflow: async (body) => { const pkg = validateWorkflowExport(body); const workflow = workflows.createWorkflow({ id: pkg.workflow.id, workspaceId, name: pkg.workflow.name ?? pkg.workflow.id }); const published = await publishWorkflowImport({ instanceRoot: storage.dataDir, pkg, persist: ({ sourcePath, bundlePath }) => { workflows.createVersion({ id: pkg.version.id, workflowId: workflow.id, contentHash: pkg.version.id, sourcePath, bundlePath: bundlePath ?? `${sourcePath}/../bundle/worker.mjs`, manifest: pkg.version.manifest, sdkVersion: "0.1.0" }); } }); return { workflowId: workflow.id, versionId: pkg.version.id, artifactPath: published.artifactPath }; },
-    publishWorkflow: (workflowId, entry) => publishWorkflow({ workflows, workflowId, rootDir: `${storage.dataDir}/workspaces/default`, entry, outputDir: `${storage.dataDir}/versions/${workflowId}` }),
+    publishWorkflow: async (workflowId, entry) => {
+      if (!workflows.getWorkflow(workflowId, workspaceId)) throw new Error("WORKFLOW_NOT_FOUND");
+      const candidates = await discoverWorkflows(join(storage.dataDir, "workspaces"));
+      const candidate = candidates.find(item => item.id === workflowId && item.workspace === "default");
+      if (!candidate) throw new Error("WORKFLOW_SOURCE_NOT_FOUND");
+      return publishWorkflow({ workflows, workflowId, rootDir: candidate.sourcePath, entry, outputDir: join(storage.dataDir, "versions", workflowId) });
+    },
     createRun: (workflowId, input, idempotencyKey) => {
-      const workflowVersionId = workflows.getCurrentVersionId(workflowId);
-      if (!workflowVersionId) throw new Error("WORKFLOW_NOT_FOUND");
       const inputRef = JSON.stringify(input === undefined ? null : input);
-      const run = runs.createRun({ workflowVersionId, inputRef, ...(idempotencyKey === undefined ? {} : { idempotencyKey }) });
+      const run = runs.createRunForWorkflow({ workflowId, inputRef, ...(idempotencyKey === undefined ? {} : { idempotencyKey }) });
       submitRun(run.id);
       return run;
     },
-    cancelRun: (id, reason) => coordinator.cancel(id, reason),
-    receiveEvent: (input) => events.receive(input),
+    cancelRun: (id, reason) => {
+      const changed = runs.requestCancel(id, reason);
+      // requestCancel durably fences queued work; the worker fast path also
+      // aborts active user code instead of waiting for the lease to expire.
+      if (changed) worker.cancel(id, reason);
+      return changed;
+    },
+    receiveEvent: (input) => {
+      const result = events.deliverMatching({ ...input, createRun: (trigger, eventId) => {
+        const workflowVersionId = trigger.workflowVersionId ?? workflows.getCurrentVersionId(trigger.workflowId);
+        if (!workflowVersionId) throw new Error("WORKFLOW_NOT_FOUND");
+        const run = runs.createRun({ workflowVersionId, inputRef: JSON.stringify(input.data), triggerId: trigger.id, idempotencyKey: `${input.source}:${input.eventId}:${trigger.id}` });
+        return run.id;
+      } });
+      for (const runId of result.deliveries) if (runs.getRun(runId)?.status === "queued") submitRun(runId);
+      return { ...result.event, deliveries: result.deliveries };
+    },
   });
   try {
     const address = await app.listen({ host: options.host, port });
@@ -146,12 +206,16 @@ async function start(options: { host: string; port: string; open?: boolean; data
     process.stdout.write(`Data directory: ${storage.dataDir}\n`);
     if (options.open) openBrowser(address);
   } catch (error) {
+    if (schedulerTimer) clearInterval(schedulerTimer);
+    await worker.close();
+    await app.close();
     storage.close();
     throw error;
   }
   const shutdown = async (signal: string): Promise<void> => {
     process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
-    coordinator.close();
+    if (schedulerTimer) clearInterval(schedulerTimer);
+    await worker.close();
     await app.close();
     storage.close();
     process.exitCode = 0;
@@ -183,5 +247,18 @@ program
   .action(start);
 
 program.command("doctor").description("Check the local Orchard environment").action(doctor);
+
+async function apiCommand(path: string, method: string, body: unknown, options: { url: string }): Promise<void> {
+  const response = await fetch(new URL(path, options.url), { method, ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
+  const value: unknown = await response.json();
+  if (!response.ok) throw new Error(`API ${response.status}: ${JSON.stringify(value)}`);
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+const localUrl = 'http://127.0.0.1:7331';
+program.command('event <name>').description('Send an idempotent event').requiredOption('--id <id>', 'event identity').option('--source <source>', 'event source', 'cli').option('--data <json>', 'JSON data', '{}').option('--url <url>', 'server URL', localUrl).action(async (name: string, options: { id: string; source: string; data: string; url: string }) => apiCommand('/api/events', 'POST', { name, id: options.id, source: options.source, data: JSON.parse(options.data) }, options));
+program.command('schedule <id> <action>').description('Enable or disable a schedule').option('--url <url>', 'server URL', localUrl).action(async (id: string, action: string, options: { url: string }) => { if (!['enable', 'disable'].includes(action)) throw new Error('Action must be enable or disable'); await apiCommand(`/api/schedules/${encodeURIComponent(id)}/enabled`, 'POST', { enabled: action === 'enable' }, options); });
+program.command('cancel <runId>').description('Cancel a run').option('--reason <reason>', 'reason', 'CLI cancellation').option('--url <url>', 'server URL', localUrl).action(async (id: string, options: { reason: string; url: string }) => apiCommand(`/api/runs/${encodeURIComponent(id)}/cancel`, 'POST', { reason: options.reason }, options));
+program.command('rerun <runId>').description('Replay a run').option('--step <stepId>', 'replay boundary').option('--url <url>', 'server URL', localUrl).action(async (id: string, options: { step?: string; url: string }) => apiCommand(`/api/runs/${encodeURIComponent(id)}/rerun`, 'POST', options.step ? { stepId: options.step } : {}, options));
+program.command('worker-health').description('Query worker health').option('--url <url>', 'server URL', localUrl).action(async (options: { url: string }) => apiCommand('/api/worker/health', 'GET', undefined, options));
 
 await program.parseAsync(process.argv);

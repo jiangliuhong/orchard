@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { copyFile, mkdir } from "node:fs/promises";
 import { watch as watchFiles } from "node:fs";
 import { build, context } from "esbuild";
+import { webBuildOptions, editorWorkerBuildOptions } from "./web-build-options.mjs";
 
 const run = (command, args, options = {}) => spawn(command, args, { stdio: "inherit", shell: process.platform === "win32", ...options });
 const children = [];
@@ -26,11 +27,13 @@ try {
   children.push(ts);
 
   const web = await context({
-    entryPoints: ["src/web/App.tsx"], bundle: true, minify: true, format: "iife",
-    platform: "browser", target: "es2020", outfile: "dist/server/client.js",
+    ...webBuildOptions,
     plugins: [{ name: "copy-workbench-css", setup(build) { build.onEnd(async () => { await mkdir("dist/server", { recursive: true }); await copyFile("src/web/workbench.css", "dist/server/workbench.css"); }); } }],
   });
   await web.watch();
+  const editorWorker = await context(editorWorkerBuildOptions);
+  await editorWorker.watch();
+  children.push({ kill: () => void web.dispose() }, { kill: () => void editorWorker.dispose() });
 
   let server = run(process.execPath, ["dist/cli/main.js"]);
   children.push(server);

@@ -1,3 +1,4 @@
+import { createCodeVersion } from "./helpers/code-version.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ async function fixture() {
   const db = initializeDatabase(dir);
   const workspace = createDefaultWorkspace(db);
   const workflow = new WorkflowRepository(db).createWorkflow({ workspaceId: workspace, name: "fixture" });
-  const version = new WorkflowRepository(db).createVersion({ workflowId: workflow.id, contentHash: Math.random().toString(), sourcePath: "source", bundlePath: "bundle", manifest: {}, sdkVersion: "0.1.0" });
+  const version = createCodeVersion(new WorkflowRepository(db), { workflowId: workflow.id, contentHash: Math.random().toString(), sourcePath: "source", bundlePath: "bundle", manifest: {}, sdkVersion: "0.1.0" });
   return { dir, db, runs: new RunRepository(db), version };
 }
 

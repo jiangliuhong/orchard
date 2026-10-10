@@ -1,5 +1,6 @@
 import type { RunRecord, RunRepository } from "../storage/repository.js";
 import { RunQueue } from "../scheduler/run-queue.js";
+import { WorkflowSuspended } from "./suspension.js";
 
 export interface RunHandler {
   (run: RunRecord, signal: AbortSignal): Promise<{ outputRef?: string }>;
@@ -33,6 +34,7 @@ export class RunCoordinator {
         this.runs.finish(runId, "succeeded", result.outputRef);
         return { runId, ...(result.outputRef === undefined ? {} : { outputRef: result.outputRef }) };
       } catch (error) {
+        if (error instanceof WorkflowSuspended) return { runId };
         if (controller.signal.aborted || signal.aborted) this.runs.finish(runId, "cancelled");
         else this.runs.finish(runId, "failed");
         throw error;

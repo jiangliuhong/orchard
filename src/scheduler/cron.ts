@@ -23,17 +23,23 @@ function values(field: string, min: number, max: number): Set<number> {
   return result;
 }
 
-export function parseCron(expression: string): CronSchedule {
+export function parseCron(expression: string, timezone = 'UTC'): CronSchedule {
+  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' });
   const normalized = aliases[expression.trim()] ?? expression.trim();
   const fields = normalized.split(/\s+/);
   if (fields.length !== 5) throw new Error("Cron expression must contain five fields");
   const [minuteField, hourField, dayField, monthField, weekdayField] = fields;
   if (!minuteField || !hourField || !dayField || !monthField || !weekdayField) throw new Error("Cron expression must contain five fields");
   const minutes = values(minuteField, 0, 59), hours = values(hourField, 0, 23), days = values(dayField, 1, 31), months = values(monthField, 1, 12), weekdays = values(weekdayField, 0, 6);
-  return { expression: normalized, next(after: Date): Date {
-    const candidate = new Date(after.getTime()); candidate.setSeconds(0, 0); candidate.setMinutes(candidate.getMinutes() + 1);
-    for (let i = 0; i < 60 * 24 * 366 * 5; i++, candidate.setMinutes(candidate.getMinutes() + 1)) {
-      if (minutes.has(candidate.getMinutes()) && hours.has(candidate.getHours()) && days.has(candidate.getDate()) && months.has(candidate.getMonth() + 1) && weekdays.has(candidate.getDay())) return new Date(candidate);
+  return { expression: normalized, timezone, next(after: Date): Date {
+    if (!Number.isFinite(after.getTime())) throw new Error('Invalid Cron cursor');
+    let instant = Math.floor(after.getTime() / 60_000) * 60_000 + 60_000;
+    for (let i = 0; i < 60 * 24 * 366 * 5; i++, instant += 60_000) {
+      const parts = Object.fromEntries(formatter.formatToParts(new Date(instant)).filter(part => part.type !== 'literal').map(part => [part.type, Number(part.value)]));
+      const weekday = new Date(Date.UTC(parts.year!, parts.month! - 1, parts.day!)).getUTCDay();
+      const dayMatches = days.has(parts.day!), weekdayMatches = weekdays.has(weekday);
+      const calendarMatches = dayField === '*' ? weekdayMatches : weekdayField === '*' ? dayMatches : dayMatches || weekdayMatches;
+      if (minutes.has(parts.minute!) && hours.has(parts.hour!) && months.has(parts.month!) && calendarMatches) return new Date(instant);
     }
     throw new Error("Cron expression has no occurrence within five years");
   } };

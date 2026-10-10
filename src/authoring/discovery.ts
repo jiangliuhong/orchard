@@ -1,5 +1,7 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
+import { describeWorkflowSource } from "./source-descriptions.js";
+import { readSourceConfiguration } from "./source-configuration.js";
 
 export interface DiscoveredWorkflow {
   readonly workspace: string;
@@ -15,9 +17,11 @@ function safeSegment(value: string): boolean {
 }
 
 function metadata(source: string, fallback: string): { name: string; description: string; id: string } {
-  const id = source.match(/\bid\s*:\s*["']([^"']+)["']/)?.[1] ?? fallback;
-  const name = source.match(/\bname\s*:\s*["']([^"']+)["']/)?.[1] ?? id;
-  const description = source.match(/\bdescription\s*:\s*["']([^"']*)["']/)?.[1] ?? "";
+  const { metadata } = describeWorkflowSource("worker.ts", source);
+  const id = metadata.id ?? fallback;
+  const config = readSourceConfiguration("worker.ts", source);
+  const name = config.name ?? id;
+  const description = config.description ?? "";
   return { id, name, description };
 }
 

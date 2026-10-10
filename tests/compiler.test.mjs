@@ -5,6 +5,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { compileWorkflow } from "../dist/authoring/compiler.js";
 
+test("workflow compiler embeds the local Orchard SDK in runnable bundles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orchard-compile-sdk-"));
+  try {
+    await writeFile(join(root, "workflow.ts"), "import { defineWorkflow } from '@jiangliuhong/orchard/workflow'; export default defineWorkflow({ id: 'fixture', name: 'Fixture', inputSchema: {}, outputSchema: {}, async run() { return { ok: true }; } });\n");
+    const result = await compileWorkflow({ rootDir: root, entry: "workflow.ts", outputDir: join(root, "versions") });
+    const loaded = await import(`file://${result.bundlePath}`);
+    assert.equal(loaded.default.id, "fixture");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("workflow compiler emits content-addressed ESM bundles inside the output directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "orchard-compile-"));
   try {

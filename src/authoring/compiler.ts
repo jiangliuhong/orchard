@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { build } from "esbuild";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { build, type Plugin } from "esbuild";
 
 export interface WorkflowBuildResult {
   readonly contentHash: string;
@@ -101,6 +102,39 @@ export async function validateWorkflowSource(options: {
   return { files, sourceTreeHash: await digestFilesAsync(root, files), entry, capabilities: [...capabilities].sort() };
 }
 
+// Workflow bundles are loaded from the instance data directory, rather than
+// from this package's directory. Keep the SDK imports self-contained so a
+// locally checked-out Orchard (which is not installed in node_modules) works
+// the same way as a published installation.
+function orchardPackagePlugin(): Plugin {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const exports: Record<string, string> = {
+    "": "dist/server/app.js",
+    "/workflow": "dist/workflow-sdk/index.js",
+    "/runtime": "dist/runtime/index.js",
+    "/storage": "dist/storage/database.js",
+    "/authoring": "dist/authoring/index.js",
+    "/artifacts": "dist/artifacts/store.js",
+    "/scheduler": "dist/scheduler/index.js",
+    "/core-cli": "dist/integrations/cli/index.js",
+    "/pi": "dist/integrations/pi/index.js",
+    "/tenancy": "dist/tenancy/context.js",
+    "/remote-worker": "dist/runtime/remote-worker.js",
+    "/import-export": "dist/import-export/index.js",
+  };
+  return {
+    name: "orchard-package",
+    setup(build) {
+      build.onResolve({ filter: /^@jiangliuhong\/orchard(?:\/.*)?$/ }, ({ path }) => {
+        const suffix = path.slice("@jiangliuhong/orchard".length);
+        const target = exports[suffix];
+        if (!target) return { errors: [{ text: `Unsupported Orchard import: ${path}` }] };
+        return { path: resolve(packageRoot, target) };
+      });
+    },
+  };
+}
+
 export async function compileWorkflow(options: { rootDir: string; entry: string; outputDir: string; requireWorkerEntry?: boolean; requireWorkflowContract?: boolean; allowedCapabilities?: readonly string[] }): Promise<WorkflowBuildResult> {
   const root = await realpath(resolve(options.rootDir));
   const requestedEntry = resolve(root, options.entry);
@@ -119,7 +153,7 @@ export async function compileWorkflow(options: { rootDir: string; entry: string;
   await mkdir(outputDir, { recursive: true });
   const bundlePath = resolve(outputDir, `${contentHash}.mjs`);
   if (!inside(outputDir, bundlePath)) throw new Error("Workflow output escaped its output directory");
-  await build({ entryPoints: [entry], outfile: bundlePath, bundle: true, format: "esm", platform: "node", target: "node24", sourcemap: false, external: ["@jiangliuhong/orchard", "@jiangliuhong/orchard/*"], logLevel: "silent" });
+  await build({ entryPoints: [entry], outfile: bundlePath, bundle: true, format: "esm", platform: "node", target: "node24", plugins: [orchardPackagePlugin()], logLevel: "silent" });
   const bundle = await readFile(bundlePath);
   return {
     contentHash,

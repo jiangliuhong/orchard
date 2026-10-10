@@ -13,9 +13,25 @@ test("workflow SDK defines a validated workflow and rejects duplicate steps", as
   assert.equal(workflow.id, "hello-world");
   assert.deepEqual(validateJson({}, workflow.inputSchema), ["$.name is required"]);
 
-  const context = createWorkflowContext("run-1", new AbortController().signal, async () => "done");
-  await context.step.execute("first-step", { type: "test.node", config: {}, input: null });
-  await assert.rejects(() => context.step.execute("first-step", { type: "test.node", config: {}, input: null }), /Duplicate step id/);
+  const context = createWorkflowContext("run-1", new AbortController().signal, async (stepId) => stepId);
+  assert.equal(await context.step.execute("first-step", { type: "test.node", config: {}, input: null }), "first-step");
+  assert.equal(await context.step.execute("first-step", { type: "test.node", config: {}, input: null }), "first-step:1");
+  assert.equal(await context.step.execute("first-step", { type: "test.node", config: {}, input: null }), "first-step:2");
+});
+
+test("workflow policies and triggers are validated", () => {
+  const workflow = defineWorkflow({
+    id: "scheduled-workflow",
+    name: "Scheduled",
+    inputSchema: {},
+    outputSchema: {},
+    triggers: [{ type: "cron", config: { expression: "0 * * * *" } }],
+    policy: { timeoutMs: 1000, retry: { maxAttempts: 3, backoff: "exponential" } },
+    async run() { return {}; },
+  });
+  assert.equal(workflow.policy.retry.maxAttempts, 3);
+  assert.throws(() => defineWorkflow({ id: "invalid", name: "Invalid", inputSchema: {}, outputSchema: {}, triggers: [{ type: "unknown", config: {} }], async run() { return {}; } }), /Unsupported workflow trigger/);
+  assert.throws(() => defineWorkflow({ id: "invalid", name: "Invalid", inputSchema: {}, outputSchema: {}, policy: { retry: { maxAttempts: 0 } }, async run() { return {}; } }), /maxAttempts/);
 });
 
 test("node registry supports extension without scheduler changes", () => {

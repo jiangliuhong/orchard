@@ -1,16 +1,16 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { v7 as uuidv7 } from "uuid";
 import type { WorkflowRepository } from "../storage/repository.js";
 import { ArtifactStore } from "../artifacts/store.js";
 import { compileWorkflow } from "./compiler.js";
+import { readSourceConfiguration, sourceReadOnly } from "./source-configuration.js";
 
 export interface PublishResult { readonly workflowId: string; readonly versionId: string; readonly contentHash: string; readonly bundlePath: string; }
 
 /**
- * Compile first and activate only after all validation has succeeded. The
- * legacy output-directory mode is retained for callers that do not yet use the
- * controlled artifact store.
+ * Compile first and activate only after validation succeeds. Every publication
+ * retains immutable source and bundle copies in the artifact store.
  */
 export async function publishWorkflow(input: {
   workflows: WorkflowRepository;
@@ -23,22 +23,24 @@ export async function publishWorkflow(input: {
   artifactStore?: ArtifactStore;
   appId?: string;
 }): Promise<PublishResult> {
+  for (const key of ["name", "description", "triggers", "policy", "concurrency", "executionConfig", "definition"]) {
+    if (input.manifest && Object.hasOwn(input.manifest, key)) throw sourceReadOnly();
+  }
   const build = await compileWorkflow({
     rootDir: input.rootDir,
     entry: input.entry,
     outputDir: input.outputDir,
     ...(input.artifactStore === undefined ? {} : { requireWorkerEntry: input.entry === "worker.ts", requireWorkflowContract: input.entry === "worker.ts" }),
   });
-  const manifest = { ...build.manifest, ...(input.manifest ?? {}) };
-  if (!input.artifactStore || !input.appId) {
-    await mkdir(dirname(build.bundlePath), { recursive: true });
-    const versionId = input.workflows.createVersion({ workflowId: input.workflowId, contentHash: build.contentHash, sourcePath: build.sourcePath, bundlePath: build.bundlePath, manifest, sdkVersion: input.sdkVersion ?? "0.1.0" });
-    return { workflowId: input.workflowId, versionId, contentHash: build.contentHash, bundlePath: build.bundlePath };
-  }
+  readSourceConfiguration(input.entry, await readFile(build.sourcePath, "utf8"));
+  // Definition and compiler metadata cannot be overridden by manifest callers.
+  const manifest = { ...(input.manifest ?? {}), ...build.manifest };
+  const artifactStore = input.artifactStore ?? new ArtifactStore(input.workflows.instanceRoot);
+  const appId = input.appId ?? "orchard";
 
   const versionId = uuidv7();
-  const artifact = await input.artifactStore.publishWorkflowVersion({
-    appId: input.appId,
+  const artifact = await artifactStore.publishWorkflowVersion({
+    appId,
     workflowId: input.workflowId,
     versionId,
     sourceDir: resolve(input.rootDir),
@@ -54,11 +56,12 @@ export async function publishWorkflow(input: {
       contentHash: build.contentHash,
       sourcePath: relativeSource,
       bundlePath: relativeBundle,
-      manifest: { ...manifest, artifactPath: artifact.relativePath, manifestPath: artifact.manifestPath },
+      manifest: { ...manifest, sourceTreeHash: artifact.sourceTreeHash, bundleHash: artifact.bundleHash, artifactPath: artifact.relativePath, manifestPath: artifact.manifestPath },
       sdkVersion: input.sdkVersion ?? "0.1.0",
+      artifactHash: artifact.bundleHash,
     });
   } catch (error) {
-    await input.artifactStore.markOrphanCandidate(artifact.relativePath);
+    await artifactStore.markOrphanCandidate(artifact.relativePath);
     throw error;
   }
   return { workflowId: input.workflowId, versionId, contentHash: build.contentHash, bundlePath: `${artifact.relativePath}/bundle/worker.mjs` };

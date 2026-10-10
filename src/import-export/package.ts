@@ -10,11 +10,21 @@ export interface WorkflowExportPackage {
   readonly workflow: { readonly id: string; readonly name?: string };
   readonly version: { readonly id: string; readonly number: number; readonly manifest: unknown };
   readonly files: Readonly<Record<string, { readonly sha256: string; readonly contentBase64: string }>>;
+  readonly integrity: { readonly fileTreeSha256: string };
   readonly dependencies?: readonly string[];
   readonly triggers?: readonly unknown[];
 }
 
 function hash(content: Buffer): string { return createHash("sha256").update(content).digest("hex"); }
+function fileTreeHash(files: Readonly<Record<string, { readonly sha256: string; readonly contentBase64: string }>>): string {
+  const hashValue = createHash("sha256");
+  for (const path of Object.keys(files).sort()) {
+    const file = files[path];
+    if (file) hashValue.update(path).update("\\0").update(file.sha256).update("\\0");
+  }
+  return hashValue.digest("hex");
+}
+function validIdentity(value: unknown): value is string { return typeof value === "string" && /^[A-Za-z0-9._-]+$/.test(value) && value !== "." && value !== ".."; }
 
 export async function createWorkflowExport(input: {
   app: WorkflowExportPackage["app"];
@@ -31,7 +41,7 @@ export async function createWorkflowExport(input: {
   }
   return {
     format: "orchard-workflow", formatVersion: 1, app: input.app, workflow: input.workflow,
-    version: input.version, files,
+    version: input.version, files, integrity: { fileTreeSha256: fileTreeHash(files) },
     ...(input.dependencies === undefined ? {} : { dependencies: input.dependencies }),
     ...(input.triggers === undefined ? {} : { triggers: input.triggers }),
   };
@@ -40,16 +50,19 @@ export async function createWorkflowExport(input: {
 export function validateWorkflowExport(value: unknown): WorkflowExportPackage {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid workflow export package");
   const pkg = value as Partial<WorkflowExportPackage>;
-  if (pkg.format !== "orchard-workflow" || pkg.formatVersion !== 1 || !pkg.files || typeof pkg.files !== "object" || !pkg.app || !pkg.workflow || !pkg.version) throw new Error("Unsupported workflow export package");
+  if (pkg.format !== "orchard-workflow" || pkg.formatVersion !== 1 || !pkg.files || typeof pkg.files !== "object" || !pkg.app || !pkg.workflow || !pkg.version || !pkg.integrity || typeof pkg.integrity !== "object") throw new Error("Unsupported workflow export package");
+  if (!validIdentity(pkg.app.id) || !validIdentity(pkg.workflow.id) || !validIdentity(pkg.version.id) || !Number.isInteger(pkg.version.number) || pkg.version.number < 1) throw new Error("Invalid workflow export identity or version");
   const checked: Record<string, { sha256: string; contentBase64: string }> = {};
   for (const [path, item] of Object.entries(pkg.files)) {
     const normalized = normalizeRelativePath(path);
     if (normalized !== path || !item || typeof item.sha256 !== "string" || typeof item.contentBase64 !== "string") throw new Error(`Invalid exported file: ${path}`);
     const content = Buffer.from(item.contentBase64, "base64");
-    if (hash(content) !== item.sha256) throw new Error(`Export digest mismatch: ${path}`);
+    if (content.toString("base64") !== item.contentBase64) throw new Error(`Invalid base64 content: ${path}`);
+    if (!/^[a-f0-9]{64}$/.test(item.sha256) || hash(content) !== item.sha256) throw new Error(`Export digest mismatch: ${path}`);
     checked[path] = { sha256: item.sha256, contentBase64: item.contentBase64 };
   }
   if (!Object.hasOwn(checked, "source/worker.ts") && !Object.hasOwn(checked, "worker.ts")) throw new Error("Export is missing worker.ts");
+  if (typeof pkg.integrity.fileTreeSha256 !== "string" || pkg.integrity.fileTreeSha256 !== fileTreeHash(checked)) throw new Error("Export file tree digest mismatch");
   return { ...pkg, files: checked } as WorkflowExportPackage;
 }
 
