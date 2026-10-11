@@ -35,6 +35,8 @@ export interface CliToolDefinition<Input = unknown, Output = unknown> {
 export interface CliProcessCommand {
   readonly executable: string;
   readonly args: readonly string[];
+  /** Optional payload written to the child's stdin (written once, then closed). */
+  readonly stdin?: string;
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs: number;

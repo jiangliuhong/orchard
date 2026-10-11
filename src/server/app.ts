@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AgentProfileRecord, WorkflowRecord } from "../storage/repository.js";
+import { agentProfileValidationError } from "../integrations/pi/profile.js";
 import { WORKBENCH_HTML } from "./workbench.js";
 import type { WorkflowDetail } from "./workflow-detail.js";
 
@@ -18,7 +19,11 @@ export interface ServerOptions {
   readonly listDiscoveredWorkflows?: () => Promise<readonly unknown[]> | readonly unknown[];
   readonly addDiscoveredWorkflow?: (input: { workspace: string; id: string }) => Promise<unknown> | unknown;
   readonly listAgents?: () => readonly AgentProfileRecord[];
-  readonly createAgent?: (input: { name: string; provider: string; model: string; config?: unknown; allowedTools?: readonly string[]; secretRef?: string }) => AgentProfileRecord;
+  readonly createAgent?: (input: { name: string; provider: string; model: string; config?: unknown; allowedTools?: readonly string[] }) => AgentProfileRecord;
+  /** CLI backend status/edit surface (GET runs an immediate L1 probe; deep adds L2). */
+  readonly cliBackendStatus?: (deep: boolean) => Promise<readonly unknown[]> | readonly unknown[];
+  /** Saves (probed first) or clears (null/empty path) a launcher's trusted path. Throws to reject. */
+  readonly setCliBackendPath?: (launcher: "pi-cli" | "codex-cli", path: string | null) => Promise<unknown> | unknown;
   readonly createDraft?: (input: { workflowId?: string; baseVersionId?: string }) => unknown;
   readonly getDraft?: (draftId: string) => unknown;
   readonly updateDraft?: (draftId: string, input: { revision: number; files: Record<string, string> }) => boolean;
@@ -97,13 +102,34 @@ export function createServer(options: ServerOptions = {}): FastifyInstance {
   app.get("/editor-assets/editor.worker.js", async (_request, reply) => reply.type("application/javascript; charset=utf-8").send(await readFile(new URL("./editor-assets/editor.worker.js", import.meta.url), "utf8")));
   app.get("/api/agents", async (_request, reply) => {
     if (!options.listAgents) return reply.code(503).send({ code: "AGENTS_UNAVAILABLE", message: "Agent storage is not connected" });
-    return { items: options.listAgents() };
+    // Legacy rows with free-text providers stay visible but annotated; secret_ref is deprecated and never returned.
+    const items = options.listAgents().map(({ secretRef: _secretRef, ...agent }) => {
+      const validationError = agentProfileValidationError(agent);
+      return { ...agent, ...(validationError ? { validationError } : {}) };
+    });
+    return { items };
   });
-  app.post<{ Body: { name: string; provider: string; model: string; config?: unknown; allowedTools?: string[]; secretRef?: string } }>("/api/agents", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["name", "provider", "model"], properties: { name: { type: "string", minLength: 1, maxLength: 200 }, provider: { type: "string", minLength: 1, maxLength: 100 }, model: { type: "string", minLength: 1, maxLength: 200 }, config: {}, allowedTools: { type: "array", items: { type: "string", maxLength: 200 }, maxItems: 100 }, secretRef: { type: "string", minLength: 1, maxLength: 500 } } } },
+  app.post<{ Body: { name: string; provider: string; model: string; config?: unknown; allowedTools?: string[] } }>("/api/agents", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["name", "provider", "model"], properties: { name: { type: "string", minLength: 1, maxLength: 200 }, provider: { type: "string", enum: ["pi-cli", "codex-cli"] }, model: { type: "string", maxLength: 200 }, config: {}, allowedTools: { type: "array", items: { type: "string", maxLength: 100 }, maxItems: 50 } } } },
   }, async (request, reply) => {
     if (!options.createAgent) return reply.code(503).send({ code: "AGENTS_UNAVAILABLE", message: "Agent storage is not connected" });
-    return reply.code(201).send(options.createAgent(request.body));
+    try { return reply.code(201).send(options.createAgent(request.body)); }
+    catch (error) { return reply.code(400).send({ code: "INVALID_AGENT_PROFILE", message: error instanceof Error ? error.message : "Agent profile validation failed", requestId: request.id }); }
+  });
+  app.get<{ Querystring: { readiness?: string } }>("/api/settings/cli-backends", async (request, reply) => {
+    if (!options.cliBackendStatus) return reply.code(503).send({ code: "SETTINGS_UNAVAILABLE", message: "CLI backend settings are not connected", requestId: request.id });
+    return { items: await options.cliBackendStatus(request.query?.readiness === "deep") };
+  });
+  app.put<{ Params: { launcher: string }; Body: { path: string | null } }>("/api/settings/cli-backends/:launcher", {
+    schema: {
+      params: { type: "object", required: ["launcher"], properties: { launcher: { type: "string", enum: ["pi-cli", "codex-cli"] } } },
+      body: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: ["string", "null"], maxLength: 500 } } },
+    },
+  }, async (request, reply) => {
+    if (!options.setCliBackendPath) return reply.code(503).send({ code: "SETTINGS_UNAVAILABLE", message: "CLI backend settings are not connected", requestId: request.id });
+    const path = request.body.path === "" ? null : request.body.path;
+    try { return await options.setCliBackendPath(request.params.launcher as "pi-cli" | "codex-cli", path); }
+    catch (error) { return reply.code(400).send({ code: "CLI_BACKEND_PATH_REJECTED", message: error instanceof Error ? error.message : "The path was rejected", requestId: request.id }); }
   });
   app.get("/api/workflows/discovered", async (_request, reply) => {
     if (!options.listDiscoveredWorkflows) return reply.code(503).send({ code: "DISCOVERY_UNAVAILABLE", message: "Workflow discovery is not connected" });

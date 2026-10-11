@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir, readFile, mkdir, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import process from "node:process";
 import { homedir } from "node:os";
 import { Command } from "commander";
 import { createServer } from "../server/app.js";
 import { readWorkflowDetail } from "../server/workflow-detail.js";
-import { AgentProfileRepository, ContinuationRepository, createDefaultWorkspace, EventRepository, initializeDatabase, RunRepository, ScheduleRepository, WorkflowRepository, WorkflowTaskRepository } from "../storage/database.js";
+import { AgentProfileRepository, AuthoringSessionRepository, ContinuationRepository, createDefaultWorkspace, EventRepository, initializeDatabase, RunRepository, ScheduleRepository, WorkflowRepository, WorkflowTaskRepository } from "../storage/database.js";
+import { SettingsStore } from "../storage/settings.js";
+import { AGENT_LAUNCHERS, CliPiClient, probeBackend, probePiReadiness, probeVersion, resolveCliBackends, validateAgentProfile, versionVerifier, type LauncherProfileOverrides } from "../integrations/pi/index.js";
+import { PiAdapter } from "../integrations/pi/adapter.js";
+import { PiAuthoringService } from "../authoring/pi-session.js";
 import { WorkerLoop, WorkflowExecutionService } from "../runtime/index.js";
 import { createLocalNodeRegistry } from "../runtime/local-nodes.js";
 import { PersistentScheduler } from "../scheduler/index.js";
@@ -54,7 +59,17 @@ async function start(options: { host: string; port: string; open?: boolean; data
   const tasks = new WorkflowTaskRepository(storage);
   const continuations = new ContinuationRepository(storage);
   const events = new EventRepository(storage);
-  const nodes = createLocalNodeRegistry();
+  // Host CLI backends: trusted resolution (settings override -> documented
+  // discovery list), pinned to absolute paths for every execution.
+  const settings = new SettingsStore(storage.dataDir);
+  const workspaceRoot = join(storage.dataDir, "workspaces", "default");
+  const backends = await resolveCliBackends({ settings: await settings.read(), verify: versionVerifier() });
+  for (const launcher of AGENT_LAUNCHERS) {
+    const config = backends.get(launcher);
+    process.stdout.write(config ? `CLI backend ${launcher}: ${config.executable} (${config.source})\n` : `CLI backend ${launcher}: not configured\n`);
+  }
+  const piClient = new CliPiClient({ registry: backends, workspaceRoot });
+  const nodes = createLocalNodeRegistry({ agents, client: piClient });
   const workflowExecution = new WorkflowExecutionService(storage, nodes);
   const submitRun = (runId: string): void => { tasks.enqueueRun(runId); };
   const worker = new WorkerLoop(tasks, async ({ task, signal }) => {
@@ -99,6 +114,58 @@ async function start(options: { host: string; port: string; open?: boolean; data
   schedulerTimer = setInterval(pollScheduler, 1_000);
   worker.start();
   const readTree = async (root: string, prefix: string): Promise<Record<string, Buffer>> => { const result: Record<string, Buffer> = {}; for (const entry of await readdir(root, { withFileTypes: true })) { const source = join(root, entry.name); const name = prefix ? `${prefix}/${entry.name}` : entry.name; if (entry.isDirectory()) Object.assign(result, await readTree(source, name)); else result[name] = await readFile(source); } return result; };
+  const authoringSessions = new AuthoringSessionRepository(storage);
+  // Pi authoring reuses the same pi-cli backend; optionally pinned to a
+  // profile via settings (authoring.profileId). Unconfigured keeps the 503.
+  let authorPi: ((input: { draftId: string; prompt: string }) => Promise<unknown>) | undefined;
+  if (backends.get("pi-cli")) {
+    const overrides: LauncherProfileOverrides = {};
+    const pinnedId = await settings.getAuthoringProfileId();
+    const pinned = pinnedId ? agents.list().find((profile) => profile.id === pinnedId) : undefined;
+    if (pinned) {
+      try {
+        const normalized = validateAgentProfile(pinned);
+        Object.assign(overrides, {
+          ...(normalized.model ? { model: normalized.model } : {}),
+          ...(normalized.thinkingLevel ? { thinkingLevel: normalized.thinkingLevel } : {}),
+          ...(normalized.timeoutMs ? { timeoutMs: normalized.timeoutMs } : {}),
+          allowedTools: normalized.allowedTools,
+        });
+      } catch (error) {
+        process.stderr.write(`Ignoring invalid authoring profile "${pinnedId}": ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    }
+    const authoring = new PiAuthoringService(new PiAdapter(piClient.forLauncher("pi-cli", overrides)), authoringSessions);
+    const listDraftFiles = async (root: string): Promise<string[]> => {
+      const files: string[] = [];
+      const walk = async (dir: string, prefix: string): Promise<void> => {
+        let entries;
+        try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+        for (const entry of entries) {
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) await walk(join(dir, entry.name), rel);
+          else files.push(rel);
+        }
+      };
+      await walk(root, "");
+      // A fresh draft has no files yet; the conventional entry stays writable.
+      return files.length > 0 ? files : ["worker.ts"];
+    };
+    authorPi = async ({ draftId, prompt }) => {
+      const draft = workflows.getDraft(draftId);
+      if (!draft) throw new Error("DRAFT_NOT_FOUND");
+      const draftRoot = resolve(draft.rootPath, draftId);
+      await mkdir(draftRoot, { recursive: true, mode: 0o700 });
+      const session = authoringSessions.create({ workspaceId: draft.workspaceId, draftId });
+      return await authoring.generate({
+        sessionId: session.id,
+        workspaceRoot: draftRoot,
+        allowedFiles: await listDraftFiles(draftRoot),
+        prompt,
+        timeoutMs: 600_000,
+      });
+    };
+  }
   const app = createServer({
     authority,
     listWorkflows: (limit, offset) => workflows.listWorkflows(workspaceId, limit, offset),
@@ -115,8 +182,9 @@ async function start(options: { host: string; port: string; open?: boolean; data
     traceRun: (id) => runs.trace(id),
     rerunRun: (id, stepId) => stepId ? (() => { const replay = runs.rerunFromStep(id, stepId); submitRun(replay.id); return replay; })() : (() => { const original = runs.getRun(id); if (!original) throw new Error("RUN_NOT_FOUND"); const replay = runs.createRun({ workflowVersionId: original.workflowVersionId, ...(original.inputRef === undefined ? {} : { inputRef: original.inputRef }), retryOfRunId: id }); submitRun(replay.id); return replay; })(),
     listWorkflowVersions: (workflowId) => workflows.listVersions(workflowId),
-    createDraft: (input) => workflows.createDraft({ workspaceId, rootPath: `${storage.dataDir}/workspaces/default`, ...(input.workflowId ? { workflowId: input.workflowId } : {}), ...(input.baseVersionId ? { baseVersionId: input.baseVersionId } : {}) }),
+    createDraft: (input) => workflows.createDraft({ workspaceId, rootPath: `${storage.dataDir}/workspaces/default/drafts`, ...(input.workflowId ? { workflowId: input.workflowId } : {}), ...(input.baseVersionId ? { baseVersionId: input.baseVersionId } : {}) }),
     getDraft: (id) => workflows.getDraft(id),
+    ...(authorPi ? { authorPi } : {}),
     listTasks: (runId) => tasks.list(runId),
     getTask: (id) => tasks.get(id),
     listContinuations: (runId) => continuations.list(runId),
@@ -167,6 +235,58 @@ async function start(options: { host: string; port: string; open?: boolean; data
     },
     listAgents: () => agents.list(),
     createAgent: (input) => agents.create(input),
+    cliBackendStatus: async (deep: boolean) => {
+      const items: unknown[] = [];
+      for (const launcher of AGENT_LAUNCHERS) {
+        const config = backends.get(launcher);
+        if (!config) {
+          items.push({ launcher, available: false, reason: "Not resolved: no settings override and no discovery hit. Set a path in the workbench settings." });
+          continue;
+        }
+        const probe = await probeBackend(launcher, config);
+        const item: Record<string, unknown> = {
+          launcher,
+          available: probe.available,
+          path: config.executable,
+          source: config.source,
+          ...(probe.version ? { version: probe.version } : {}),
+          ...(probe.reason ? { reason: probe.reason } : {}),
+        };
+        if (deep && launcher === "pi-cli") {
+          // L2 is explicit and uncached: it must report what was just checked.
+          const readiness: unknown[] = [];
+          for (const profile of agents.list()) {
+            if (profile.provider !== "pi-cli") continue;
+            const result = await probePiReadiness(config.executable, profile.model);
+            readiness.push({ profileId: profile.id, name: profile.name, state: result.state, ...(result.reason ? { reason: result.reason } : {}) });
+          }
+          item.readiness = readiness;
+        }
+        items.push(item);
+      }
+      return items;
+    },
+    setCliBackendPath: async (launcher: "pi-cli" | "codex-cli", path: string | null) => {
+      const refresh = async () => {
+        const fresh = await resolveCliBackends({ settings: await settings.read(), verify: versionVerifier() });
+        const entry = fresh.get(launcher);
+        if (entry) backends.set(launcher, entry);
+        else backends.delete(launcher);
+        const config = backends.get(launcher);
+        if (!config) return { launcher, available: false, reason: "Not resolved after refresh." };
+        const probe = await probeBackend(launcher, config);
+        return { launcher, available: probe.available, path: config.executable, source: config.source, ...(probe.version ? { version: probe.version } : {}), ...(probe.reason ? { reason: probe.reason } : {}) };
+      };
+      if (path === null) {
+        await settings.setCliExecutable(launcher, null);
+        return await refresh();
+      }
+      if (!isAbsolute(path)) throw new Error("The executable path must be absolute.");
+      const probe = await probeVersion(path);
+      if (!probe.available) throw new Error(`Probe failed for "${path}": ${probe.reason ?? "unknown error"}`);
+      await settings.setCliExecutable(launcher, path);
+      return await refresh();
+    },
     exportWorkflow: async (workflowId) => { const versionId = workflows.getCurrentVersionId(workflowId); if (!versionId) throw new Error("Workflow has no published version"); const version = workflows.getVersion(versionId); if (!version) throw new Error("Workflow version not found"); const root = resolve(storage.dataDir, version.sourcePath); const files = await readTree(root, "source"); const bundle = resolve(storage.dataDir, version.bundlePath); try { Object.assign(files, await readTree(bundle, "bundle")); } catch { /* source-only legacy versions */ } return createWorkflowExport({ app: { id: "orchard", name: "Orchard" }, workflow: { id: workflowId }, version: { id: version.id, number: version.versionNo, manifest: version.manifest }, files }); },
     importWorkflow: async (body) => { const pkg = validateWorkflowExport(body); const workflow = workflows.createWorkflow({ id: pkg.workflow.id, workspaceId, name: pkg.workflow.name ?? pkg.workflow.id }); const published = await publishWorkflowImport({ instanceRoot: storage.dataDir, pkg, persist: ({ sourcePath, bundlePath }) => { workflows.createVersion({ id: pkg.version.id, workflowId: workflow.id, contentHash: pkg.version.id, sourcePath, bundlePath: bundlePath ?? `${sourcePath}/../bundle/worker.mjs`, manifest: pkg.version.manifest, sdkVersion: "0.1.0" }); } }); return { workflowId: workflow.id, versionId: pkg.version.id, artifactPath: published.artifactPath }; },
     publishWorkflow: async (workflowId, entry) => {
@@ -224,12 +344,55 @@ async function start(options: { host: string; port: string; open?: boolean; data
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
-async function doctor(): Promise<void> {
+async function doctor(options: { dataDir?: string }): Promise<void> {
   process.stdout.write(`Node.js: ${process.version}\n`);
   process.stdout.write(`Platform: ${process.platform}\n`);
   process.stdout.write("HTTP server: available\n");
   process.stdout.write("Persistence: SQLite schema available\n");
-  process.stdout.write("Pi: not configured\n");
+  const dataDir = options.dataDir ?? DEFAULT_DATA_DIR;
+  const settings = new SettingsStore(dataDir);
+  const backends = await resolveCliBackends({ settings: await settings.read(), verify: versionVerifier() });
+  // L2 (pi provider readiness) needs stored profiles; only open an existing DB.
+  // A running workbench holds the instance lock, so L2 degrades gracefully.
+  const dbPath = join(dataDir, "orchard.db");
+  let piProfiles: { name: string; model: string }[] = [];
+  let profilesUnavailable = "";
+  if (existsSync(dbPath)) {
+    try {
+      const storage = initializeDatabase(dataDir);
+      try {
+        piProfiles = new AgentProfileRepository(storage).list()
+          .filter((profile) => profile.provider === "pi-cli")
+          .map((profile) => ({ name: profile.name, model: profile.model }));
+      } finally {
+        storage.close();
+      }
+    } catch (error) {
+      profilesUnavailable = error instanceof Error ? error.message : String(error);
+    }
+  }
+  for (const launcher of AGENT_LAUNCHERS) {
+    const config = backends.get(launcher);
+    if (!config) {
+      process.stdout.write(`CLI backend ${launcher}: not configured\n`);
+      continue;
+    }
+    const probe = await probeBackend(launcher, config);
+    process.stdout.write(
+      `CLI backend ${launcher}: ${probe.available ? `available${probe.version ? ` (${probe.version})` : ""}` : `unavailable (${probe.reason ?? "probe failed"})`} at ${config.executable} (${config.source})\n`,
+    );
+    if (launcher === "pi-cli" && probe.available) {
+      if (profilesUnavailable) {
+        process.stdout.write(`  provider readiness: skipped (${profilesUnavailable})\n`);
+      } else if (piProfiles.length === 0) {
+        process.stdout.write("  provider readiness: no pi-cli agent profiles to check\n");
+      }
+      for (const profile of piProfiles) {
+        const readiness = await probePiReadiness(config.executable, profile.model);
+        process.stdout.write(`  readiness [${profile.name}]: ${readiness.state}${readiness.reason ? ` — ${readiness.reason}` : ""}\n`);
+      }
+    }
+  }
 }
 
 const program = new Command()
@@ -246,7 +409,7 @@ program
   .option("--open", "open the workbench in a browser")
   .action(start);
 
-program.command("doctor").description("Check the local Orchard environment").action(doctor);
+program.command("doctor").description("Check the local Orchard environment").option("--data-dir <path>", "data directory to inspect", DEFAULT_DATA_DIR).action(doctor);
 
 async function apiCommand(path: string, method: string, body: unknown, options: { url: string }): Promise<void> {
   const response = await fetch(new URL(path, options.url), { method, ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });

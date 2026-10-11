@@ -7,6 +7,7 @@ import {
   CliExecutionError,
   CliToolRegistry,
   CoreCliExecutor,
+  ProcessController,
 } from "../dist/integrations/cli/index.js";
 
 const fixture = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "cli-fixture.mjs");
@@ -93,5 +94,48 @@ test("registry rejects duplicates and unknown tools", async () => {
     executor.execute({}, { toolId: "fixture.unknown" }, ""),
     (error) => error instanceof CliExecutionError && error.code === "TOOL_NOT_FOUND",
   );
+});
+
+test("process controller pipes stdin payloads to the child", async () => {
+  const controller = new ProcessController();
+  const result = await controller.execute({
+    executable: execPath,
+    args: [fixture, "stdin-echo"],
+    stdin: "hello stdin",
+    timeoutMs: 10_000,
+    maxOutputBytes: 64 * 1024,
+    killGraceMs: 100,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "hello stdin");
+});
+
+test("process controller ignores EPIPE when the child exits before reading stdin", async () => {
+  const controller = new ProcessController();
+  const result = await controller.execute({
+    executable: execPath,
+    args: [fixture, "stdin-exit-early"],
+    stdin: "payload nobody reads",
+    timeoutMs: 10_000,
+    maxOutputBytes: 64 * 1024,
+    killGraceMs: 100,
+  });
+  // The EPIPE from the undrained stdin write must not surface as a crash; the
+  // failure is reported through the ordinary exit code / stderr path.
+  assert.equal(result.exitCode, 9);
+  assert.match(result.stderr, /early exit before stdin/);
+});
+
+test("process controller keeps ignore-stdio behaviour when no stdin is supplied", async () => {
+  const controller = new ProcessController();
+  const result = await controller.execute({
+    executable: execPath,
+    args: [fixture, "ok", "plain"],
+    timeoutMs: 10_000,
+    maxOutputBytes: 64 * 1024,
+    killGraceMs: 100,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { value: "plain" });
 });
 

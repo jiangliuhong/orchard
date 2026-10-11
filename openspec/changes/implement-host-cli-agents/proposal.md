@@ -23,9 +23,10 @@
   - `config_json` → 受控配置字段（超时覆盖、codex 沙箱模式、pi thinking level），仅枚举字段，不允许任意命令行参数注入。
   - `allowed_tools_json` → pi 的 `--tools` 白名单；codex 映射为沙箱级别（默认 `read-only`，显式授权才可 `workspace-write`）。
   - `secret_ref` → 弃用并置 NULL，凭证由宿主 CLI 自持。
+- 宿主机 CLI 可执行文件在启动时自动发现（文档化的常见安装目录清单，`--version` 验证后钉定绝对路径），零启动参数、零环境变量；用户可在工作台系统设置中查看与修改各后端路径（保存时探测验证，立即生效）。
+- 启动时与 `orchard doctor` 中探测宿主机 CLI 可用性（可执行文件存在、`--version` 可执行、pi 的 provider 就绪状态），探测结果（含解析路径与来源）在工作台系统设置与 Agent 管理界面可见。
 - 运行时节点注册表注册 `ai.pi` 节点，执行时按 step config 中的 `agentProfileId` 解析 profile 并路由到对应 CLI 后端，接通"profile → 执行"断路。
-- Pi authoring（`PiAuthoringService`）可配置为同一 CLI 后端，替代永不接线的 HTTP 网关路径。
-- 启动时与 `orchard doctor` 中探测宿主机 CLI 可用性（可执行文件存在、`--version` 可执行、pi 的 provider 就绪状态），探测结果在工作台 Agent 管理界面可见。
+- Pi authoring（`PiAuthoringService`）可配置为同一 CLI 后端（绑定经系统设置），替代永不接线的 HTTP 网关路径。
 - CLI 后端的运行时错误（如凭证过期、地区限制 403、模型不存在）作为明确的 failed attempt 记录并透出原始 stderr，遵循"不伪造输出"约定。
 - 输出契约校验沿用 `PiAdapter` 既有的 `assertValidJson` 后校验；失败视为可重试错误，交给 step attempt 重试机制处理。
 
@@ -43,7 +44,7 @@
 
 - `ai.pi` 节点在配置了有效 agent profile 且宿主机 CLI 可用时可以真实执行，输出通过 JSON Schema 校验。
 - 不引入 HTTP 网关、不新增服务依赖、不保存任何裸密钥。
-- 可执行文件路径只能在启动时经配置注册，运行请求不可临时指定 executable，与 `core.cli` 的受信注册规矩一致。
+- 可执行文件路径只能来自受信解析（系统设置或启动时自动发现并钉定），运行请求不可临时指定 executable，与 `core.cli` 的受信注册规矩一致。
 - CLI 后端故障（凭证、网络、地区限制）在 Run/Step/Attempt 历史中可定位、可重试。
 
 ## Non-goals
@@ -56,7 +57,7 @@
 
 ## Impact
 
-- 代码：`src/integrations/pi/`（新增 `CliPiClient` 与输出解析）、`src/runtime/local-nodes.ts`（注册 `ai.pi` 节点）、`src/cli/main.ts`（后端接线与探测）、`src/server/app.ts`（Agent API 语义收紧）、`src/web/App.tsx`（创建 Agent 表单改为 launcher 选择）。
+- 代码：`src/integrations/pi/`（新增 `CliPiClient`、后端解析/探测与输出解析）、`src/runtime/local-nodes.ts`（注册 `ai.pi` 节点）、`src/cli/main.ts`（后端接线与探测）、`src/server/app.ts`（Agent API 语义收紧、新增设置 API）、`src/web/App.tsx`（创建 Agent 表单改为 launcher 选择、设置页接入 CLI 后端管理）。
 - 数据库：无 migration。`agent_profiles` 仅重解释字段语义；`secret_ref` 弃用但保留列以避免结构变更。
 - 测试：`CliPiClient` 输出解析（正常 JSONL、错误事件、超时、取消、凭证失败）与 profile 解析需要新增单测；e2e 使用 fake CLI 可执行脚本模拟 pi/codex 行为。
 - 安全：受信注册 + 默认最小权限（`--no-tools` / `-s read-only`）+ cwd 锁定 workspace；风险集中在"CLI 拥有宿主机凭证"这一事实，由本地优先的单使用者定位与既有安全边界（回环监听、Host/Origin 校验）覆盖。

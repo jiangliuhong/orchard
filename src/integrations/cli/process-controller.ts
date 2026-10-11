@@ -88,9 +88,15 @@ export class ProcessController {
         detached: process.platform !== "win32",
         env,
         shell: false,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [command.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         windowsHide: true,
       });
+      if (command.stdin !== undefined) {
+        // A child that exits before draining stdin emits EPIPE here; the failure
+        // is already surfaced through the exit code / stderr path below.
+        child.stdin?.on("error", () => {});
+        child.stdin?.end(command.stdin);
+      }
     } catch (error) {
       throw new CliExecutionError(
         "PROCESS_START_FAILED",

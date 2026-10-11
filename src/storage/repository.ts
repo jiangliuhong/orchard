@@ -5,6 +5,7 @@ import type { OrchardDatabase } from "./database.js";
 import { assertRunTransition, type RunStatus } from "../core/contracts.js";
 import { parseCron } from "../scheduler/cron.js";
 import { assertTaskResult, type TaskResult } from '../runtime/task-protocol.js';
+import { validateAgentProfile } from "../integrations/pi/profile.js";
 
 export interface AppRecord {
   readonly id: string;
@@ -98,11 +99,17 @@ export class AgentProfileRepository {
     return rows.map((row) => ({ id: row.id, name: row.name, provider: row.provider, model: row.model, config: JSON.parse(row.configJson), allowedTools: JSON.parse(row.allowedToolsJson), ...(row.secretRef ? { secretRef: row.secretRef } : {}), createdAt: row.createdAt, updatedAt: row.updatedAt }));
   }
 
-  create(input: { name: string; provider: string; model: string; config?: unknown; allowedTools?: readonly string[]; secretRef?: string }): AgentProfileRecord {
+  create(input: { name: string; provider: string; model: string; config?: unknown; allowedTools?: readonly string[] }): AgentProfileRecord {
+    const profile = validateAgentProfile(input);
     const id = uuidv7(); const timestamp = now();
-    const config = input.config ?? {}; const allowedTools = input.allowedTools ?? [];
-    this.db.database.prepare("INSERT INTO agent_profiles (id, name, provider, model, config_json, allowed_tools_json, secret_ref, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(id, input.name, input.provider, input.model, json(config), json(allowedTools), input.secretRef ?? null, timestamp, timestamp);
-    return { id, name: input.name, provider: input.provider, model: input.model, config, allowedTools, ...(input.secretRef ? { secretRef: input.secretRef } : {}), createdAt: timestamp, updatedAt: timestamp };
+    const config: Record<string, unknown> = {};
+    if (profile.timeoutMs !== undefined) config.timeoutMs = profile.timeoutMs;
+    if (profile.thinkingLevel !== undefined) config.thinkingLevel = profile.thinkingLevel;
+    const allowedTools = [...profile.allowedTools];
+    // secret_ref is deprecated: credentials are owned by the host CLI and the
+    // column is kept (no schema change) but never written again.
+    this.db.database.prepare("INSERT INTO agent_profiles (id, name, provider, model, config_json, allowed_tools_json, secret_ref, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)").run(id, profile.name, profile.launcher, profile.model, json(config), json(allowedTools), timestamp, timestamp);
+    return { id, name: profile.name, provider: profile.launcher, model: profile.model, config, allowedTools, createdAt: timestamp, updatedAt: timestamp };
   }
 }
 
