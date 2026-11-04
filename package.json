@@ -6,90 +6,43 @@
   "engines": {
     "node": ">=24"
   },
-  "bin": {
-    "orchard": "./dist/cli/main.js"
-  },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm build && node --test tests/*.test.mjs",
-    "test:e2e": "pnpm build && node --test tests/e2e/*.test.mjs",
-    "test:package": "pnpm build && npm pack --dry-run",
-    "dev": "node scripts/dev.mjs"
-  },
-  "exports": {
-    ".": {
-      "types": "./dist/server/app.d.ts",
-      "import": "./dist/server/app.js"
-    },
-    "./workflow": {
-      "types": "./dist/workflow-sdk/index.d.ts",
-      "import": "./dist/workflow-sdk/index.js"
-    },
-    "./runtime": {
-      "types": "./dist/runtime/index.d.ts",
-      "import": "./dist/runtime/index.js"
-    },
-    "./storage": {
-      "types": "./dist/storage/database.d.ts",
-      "import": "./dist/storage/database.js"
-    },
-    "./authoring": {
-      "types": "./dist/authoring/index.d.ts",
-      "import": "./dist/authoring/index.js"
-    },
-    "./artifacts": {
-      "types": "./dist/artifacts/store.d.ts",
-      "import": "./dist/artifacts/store.js"
-    },
-    "./scheduler": {
-      "types": "./dist/scheduler/index.d.ts",
-      "import": "./dist/scheduler/index.js"
-    },
-    "./core-cli": {
-      "types": "./dist/integrations/cli/index.d.ts",
-      "import": "./dist/integrations/cli/index.js"
-    },
-    "./pi": {
-      "types": "./dist/integrations/pi/index.d.ts",
-      "import": "./dist/integrations/pi/index.js"
-    },
-    "./tenancy": {
-      "types": "./dist/tenancy/context.d.ts",
-      "import": "./dist/tenancy/context.js"
-    },
-    "./remote-worker": {
-      "types": "./dist/runtime/remote-worker.d.ts",
-      "import": "./dist/runtime/remote-worker.js"
-    },
-    "./import-export": {
-      "types": "./dist/import-export/index.d.ts",
-      "import": "./dist/import-export/index.js"
-    }
-  },
-  "files": [
-    "dist",
-    "migrations"
-  ],
-  "devDependencies": {
-    "@types/node": "^24.13.6",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0"
+    "dev": "node --import tsx --watch src/server/main.ts",
+    "dev:web": "vite",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "start": "node dist/server/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
   },
   "dependencies": {
-    "@ant-design/icons": "^6.3.4",
-    "@sinclair/typebox": "~0.34.52",
-    "ajv": "^8.20.0",
-    "antd": "^5.29.3",
-    "commander": "^14.0.3",
-    "drizzle-orm": "~0.44.7",
-    "esbuild": "~0.25.12",
-    "fastify": "^5.12.5",
+    "@fastify/static": "10.1.8",
+    "@xyflow/react": "12.12.1",
+    "ajv": "8.20.0",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "esbuild": "0.28.2",
+    "fastify": "5.12.8",
+    "lucide-react": "1.67.0",
     "monaco-editor": "0.57.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0",
-    "typescript": "^5.9.0",
-    "uuid": "^11.1.1"
+    "radix-ui": "1.8.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "smol-toml": "1.9.1",
+    "tailwind-merge": "3.7.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.4",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.8",
+    "@types/jsdom": "30.0.0",
+    "@types/node": "26.6.6",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "jsdom": "30.1.3",
+    "tailwindcss": "4.3.4",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
   }
 }

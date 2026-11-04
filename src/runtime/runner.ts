@@ -1,0 +1,186 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync, readFileSync, lstatSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { Store } from "../persistence/store.js";
+import { json, readDefinition } from "../persistence/files.js";
+import { ProviderRegistry } from "../providers/registry.js";
+import { assertSchema, resolveBinding } from "../domain/validation.js";
+import { check, failure } from "../domain/errors.js";
+import type { WorkflowNode, Workflow, NodeRun } from "../domain/types.js";
+import { executeProcess } from "./process.js";
+
+export class GraphRunner {
+  private current?: { id: string; controller: AbortController; job: Promise<void> };
+  private closing = false;
+  constructor(readonly store: Store, readonly providers: ProviderRegistry) { this.wake(); }
+  create(versionId: string, input: unknown, requestId: string) {
+    const version = this.store.version(versionId);
+    assertSchema(input, version.definition.inputSchema, "工作流输入");
+    for (const node of version.definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
+    const result = this.store.command(`run:${versionId}`, requestId, input, () => {
+      const id = randomUUID(), now = Date.now();
+      this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
+      for (const node of version.definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+      this.store.append("run", id, "run.queued", { versionId });
+      return this.store.run(id);
+    });
+    this.wake(); return result;
+  }
+  snapshot(id: string) {
+    return this.store.transaction(() => {
+      const run = this.store.run(id);
+      return { ...run, version: this.store.version(run.workflowVersionId), nodes: this.store.nodes(id), attempts: this.store.attempts(id), lastSequence: this.store.lastSequence("run", id) };
+    });
+  }
+  cancel(id: string) {
+    const status = this.store.transaction(() => {
+      const run = this.store.run(id);
+      if (run.status === "queued") {
+        this.store.exec("UPDATE runs SET status='cancelled',ended_at=? WHERE id=?", Date.now(), id);
+        this.skipRemaining(id, "run_terminated");
+        this.store.append("run", id, "run.cancelled", {});
+      } else if (run.status === "running") {
+        this.store.exec("UPDATE runs SET status='cancel_requested',cancel_requested_at=? WHERE id=?", Date.now(), id);
+        this.store.append("run", id, "run.cancel_requested", {});
+      }
+      return this.store.run(id).status;
+    });
+    if (status === "cancel_requested" && this.current?.id === id) this.current.controller.abort();
+    return this.store.run(id);
+  }
+  wake() {
+    setImmediate(() => {
+      if (this.current || this.closing) return;
+      const next = this.store.one<{ id: string }>("SELECT id FROM runs WHERE status='queued' ORDER BY created_at,rowid LIMIT 1");
+      if (!next) return;
+      const controller = new AbortController();
+      const job = this.execute(next.id, controller.signal).finally(() => { this.current = undefined; this.wake(); });
+      this.current = { id: next.id, controller, job };
+    });
+  }
+  async close() {
+    this.closing = true;
+    if (this.current) { this.cancel(this.current.id); await this.current.job; }
+  }
+  private skipRemaining(id: string, reason: string) { this.store.exec("UPDATE node_runs SET status='skipped',skip_reason=?,ended_at=? WHERE run_id=? AND status='pending'", reason, Date.now(), id); }
+  private async execute(id: string, signal: AbortSignal) {
+    let active: NodeRun | undefined, attemptId: string | undefined;
+    try {
+      const run = this.store.run(id), version = this.store.version(run.workflowVersionId);
+      const tree = this.store.files.readTree(version.artifactPath), workflow = readDefinition(tree.files);
+      check(json(workflow) === json(version.definition), "ARTIFACT_MISMATCH", "流程定义与版本产物不一致");
+      this.store.transaction(() => {
+        check(this.store.run(id).status === "queued", "RUN_ENDED", "运行已结束");
+        this.store.exec("UPDATE runs SET status='running',started_at=? WHERE id=?", Date.now(), id);
+        this.store.append("run", id, "run.started", {});
+      });
+      const outputs = new Map<string, unknown>();
+      let next: string | null = workflow.entryNodeId;
+      while (next !== null) {
+        signal.throwIfAborted();
+        const node = workflow.nodes.find(n => n.id === next)!;
+        active = this.store.nodes(id).find(n => n.nodeId === node.id)!; attemptId = randomUUID();
+        const value = resolveBinding(node.input, run.input, outputs);
+        assertSchema(value, node.inputSchema ?? true, `${node.id} 输入`);
+        this.store.transaction(() => {
+          check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
+          this.store.exec("UPDATE runs SET active_node_id=? WHERE id=?", node.id, id);
+          const inputRef = this.store.reference(value), now = Date.now();
+          this.store.exec("UPDATE node_runs SET status='running',input_ref=?,started_at=? WHERE id=?", inputRef, now, active!.id);
+          this.store.exec("INSERT INTO node_attempts(id,node_run_id,attempt_no,status,execution_json,input_ref,started_at) VALUES(?,?,1,'running',?,?,?)", attemptId!, active!.id, json({ nodeType: node.type, config: node.config }), inputRef, now);
+          this.store.append("run", id, "node.started", { input: value }, node.id, attemptId);
+        });
+        const emit = (type: string, payload: unknown) => {
+          if (!signal.aborted) this.store.append("run", id, type, payload, node.id, attemptId);
+        };
+        let output: unknown, execution: unknown, route: NodeRun["route"];
+        if (node.type === "switch") {
+          const branch = node.config.cases!.find(c => c.value === value);
+          const edge = workflow.edges.find(e => e.from === node.id && e.label === (branch?.label ?? node.config.defaultLabel))!;
+          route = { edgeId: edge.id, value, reason: branch ? `匹配分支 ${branch.label}` : "未匹配条件，进入默认分支" };
+          output = route; next = edge.to;
+        } else {
+          const result = node.type === "agent"
+            ? await this.providers.run(node.config, {
+              signal, cwd: this.store.root, prompt: `${node.config.prompt}\nNode input (data):\n${json(value)}`, schema: node.outputSchema, timeoutMs: node.config.timeoutMs,
+              emit: event => emit(event.type, event.payload),
+            }).then(result => ({ output: result.output, execution: { providerId: result.providerId, modelId: result.modelId, modelSource: result.modelSource, usage: result.usage } }))
+            : await this.script(id, attemptId, node, value, tree.compiled[node.id], tree.files[node.config.script!], signal, emit);
+          output = result.output; execution = result.execution;
+          next = workflow.edges.find(e => e.from === node.id)?.to ?? null;
+        }
+        signal.throwIfAborted();
+        assertSchema(output, node.outputSchema, `${node.id} 输出`);
+        this.store.transaction(() => {
+          check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
+          const ref = this.store.reference(output), now = Date.now();
+          this.store.exec("UPDATE node_runs SET status='succeeded',output_ref=?,route_json=?,ended_at=? WHERE id=?", ref, route ? json(route) : null, now, active!.id);
+          this.store.exec("UPDATE node_attempts SET status='succeeded',output_ref=?,execution_json=?,ended_at=? WHERE id=?", ref, json({ config: node.config, ...(execution && typeof execution === "object" ? execution : {}), ...(route ? { route } : {}) }), now, attemptId!);
+          this.store.exec("UPDATE runs SET active_node_id=? WHERE id=?", next, id);
+          this.store.append("run", id, "node.succeeded", { output, ...(route ? { route } : {}) }, node.id, attemptId);
+        });
+        outputs.set(node.id, output); active = undefined; attemptId = undefined;
+      }
+      const output = resolveBinding(workflow.result, run.input, outputs);
+      assertSchema(output, workflow.outputSchema, "工作流输出");
+      signal.throwIfAborted();
+      this.store.transaction(() => {
+        check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
+        this.store.exec("UPDATE runs SET status='succeeded',output_ref=?,active_node_id=NULL,ended_at=? WHERE id=?", this.store.reference(output), Date.now(), id);
+        this.skipRemaining(id, "branch_not_selected");
+        this.store.append("run", id, "run.succeeded", { output });
+      });
+    } catch (error) {
+      this.store.transaction(() => {
+        const run = this.store.run(id);
+        if (!["queued", "running", "cancel_requested"].includes(run.status)) return;
+        const cancelled = signal.aborted || run.status === "cancel_requested", status = cancelled ? "cancelled" : "failed";
+        const detail = cancelled ? { code: "CANCELLED", message: "用户取消了运行" } : failure(error);
+        const now = Date.now();
+        if (active) {
+          this.store.exec("UPDATE node_runs SET status=?,error_json=?,ended_at=? WHERE id=?", status, json(detail), now, active.id);
+          if (attemptId) this.store.exec("UPDATE node_attempts SET status=?,error_json=?,ended_at=? WHERE id=?", status, json(detail), now, attemptId);
+          this.store.append("run", id, `node.${status}`, detail, active.nodeId, attemptId);
+        }
+        this.store.exec("UPDATE runs SET status=?,error_json=?,active_node_id=NULL,ended_at=? WHERE id=?", status, json(detail), now, id);
+        this.skipRemaining(id, cancelled ? "run_terminated" : "upstream_failed");
+        this.store.append("run", id, `run.${status}`, detail);
+      });
+    }
+  }
+  private async script(runId: string, attemptId: string, node: WorkflowNode, input: unknown, compiled: string | undefined, shell: string | undefined, signal: AbortSignal, emit: (type: string, payload: unknown) => void) {
+    const relative = `runs/${runId}/${attemptId}`, directory = this.store.files.path(relative);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const resultFile = join(directory, "result.json");
+    let executable: string, args: string[];
+    if (node.type === "code.nodejs") {
+      check(compiled, "INVALID_SCRIPT", "缺少已编译脚本");
+      writeFileSync(join(directory, "node.mjs"), compiled, { mode: 0o600 });
+      const wrapper = `import {writeFileSync} from 'node:fs'; let text='';for await(const chunk of process.stdin)text+=chunk; const module=await import(${json(pathToFileURL(join(directory, "node.mjs")).href)});if(typeof module.default!=='function')throw new Error('Node.js script must export default function'); const result=await module.default(JSON.parse(text));writeFileSync(process.env.ORCHARD_RESULT_FILE,JSON.stringify(result ?? null));`;
+      writeFileSync(join(directory, "entry.mjs"), wrapper, { mode: 0o600 });
+      executable = process.execPath; args = [join(directory, "entry.mjs")];
+    } else {
+      check(shell !== undefined, "INVALID_SCRIPT", "Shell 脚本不存在");
+      writeFileSync(join(directory, "script.sh"), shell, { mode: 0o600 });
+      executable = "/bin/bash"; args = [join(directory, "script.sh")];
+    }
+    const result = await executeProcess({
+      executable, args, cwd: directory, input: json(input), signal, timeoutMs: node.config.timeoutMs,
+      env: { ORCHARD_RESULT_FILE: resultFile },
+      onLog: (stream, chunk) => {
+        for (let at = 0; at < chunk.length; at += 4096) emit("node.log", { stream, text: chunk.slice(at, at + 4096) });
+      },
+    });
+    emit("node.process", { exitCode: result.exitCode, durationMs: result.durationMs, stderr: result.stderr.slice(-4000) });
+    check(result.exitCode === 0, "PROCESS_FAILED", `脚本退出码 ${result.exitCode}: ${result.stderr.slice(-2000)}`);
+    let output: unknown = { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+    if (node.type === "code.nodejs" || node.config.resultMode === "json") {
+      let info;
+      try { info = lstatSync(resultFile); } catch { check(false, "INVALID_SCRIPT_OUTPUT", "脚本没有生成 JSON 结果文件"); }
+      check(!info.isSymbolicLink() && info.isFile() && info.size <= 8 * 1024 * 1024, "OUTPUT_LIMIT", "节点结果文件无效或超限");
+      try { output = JSON.parse(readFileSync(resultFile, "utf8")); } catch { check(false, "INVALID_SCRIPT_OUTPUT", "脚本未生成合法 JSON 结果文件"); }
+    }
+    return { output, execution: { executable, exitCode: result.exitCode, durationMs: result.durationMs } };
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true
+  },
+  "include": ["src/domain", "src/persistence", "src/providers", "src/runtime", "src/authoring", "src/server"],
+  "exclude": ["src/web"]
+}

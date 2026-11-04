@@ -1,0 +1,1 @@
+export default async function(input: Record<string,unknown>) { console.log('checking'); return {...input, checked:true}; }

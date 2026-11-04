@@ -1,0 +1,47 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { setup, publishExample, until } from "./helpers.js";
+import { createApp } from "../src/server/app.js";
+
+test("SSE replays persisted events, delivers new commits and resumes with Last-Event-ID", async t => {
+  const { store, providers, provider, authoring } = setup(t);
+  let release!: () => void;
+  provider.handler = async request => { await new Promise<void>(resolve => { release = resolve; }); return { output: { action: "skip" }, providerId: provider.id, modelId: request.modelId }; };
+  const version = await publishExample(authoring), { app, runner } = createApp(store, providers);
+  t.after(async () => { release?.(); await app.close(); });
+  const base = await app.listen({ host: "127.0.0.1", port: 0 });
+  const run = runner.create(version.id, {}, randomUUID());
+  await until(() => typeof release === "function");
+  const controller = new AbortController(), response = await fetch(`${base}/api/runs/${run.id}/stream`, { signal: controller.signal });
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  const reader = response.body!.getReader(), decoder = new TextDecoder();
+  let text = "";
+  while (!text.includes("run.queued")) text += decoder.decode((await reader.read()).value);
+  const event = store.append("run", run.id, "test.live", { live: true });
+  while (!text.includes("test.live")) text += decoder.decode((await reader.read()).value);
+  assert.ok(text.includes(`id: ${event.sequence}`)); controller.abort(); await reader.cancel().catch(() => {});
+  const reconnectController = new AbortController();
+  const reconnected = await fetch(`${base}/api/runs/${run.id}/stream?after=0`, { signal: reconnectController.signal, headers: { "Last-Event-ID": String(event.sequence - 1) } });
+  const resumedReader = reconnected.body!.getReader();
+  const resumed = decoder.decode((await resumedReader.read()).value);
+  assert.ok(resumed.includes("test.live")); assert.ok(!resumed.includes("run.queued"));
+  reconnectController.abort(); await resumedReader.cancel().catch(() => {});
+  release(); await until(() => store.run(run.id).status === "succeeded");
+});
+test("SSE ends a backpressured replay instead of retaining an unbounded client queue", async t => {
+  const { store, providers, provider, authoring } = setup(t);
+  let release!: () => void;
+  provider.handler = async request => { await new Promise<void>(resolve => { release = resolve; }); return { output: { action: "skip" }, providerId: provider.id, modelId: request.modelId }; };
+  const version = await publishExample(authoring), { app, runner } = createApp(store, providers);
+  t.after(async () => { release?.(); await app.close(); });
+  const base = await app.listen({ host: "127.0.0.1", port: 0 }), run = runner.create(version.id, {}, randomUUID());
+  await until(() => typeof release === "function");
+  for (let i = 0; i < 100; i++) store.append("run", run.id, "node.log", { text: "x".repeat(4096), i });
+  const response = await fetch(`${base}/api/runs/${run.id}/stream`), text = await response.text();
+  const frames = text.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6)));
+  assert.ok(frames.length > 0 && frames.length < 100);
+  const last = frames.at(-1).sequence;
+  assert.ok(store.stream("run", run.id, last).length > 0);
+  release(); await until(() => store.run(run.id).status === "succeeded");
+});

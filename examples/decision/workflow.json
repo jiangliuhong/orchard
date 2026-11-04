@@ -1,0 +1,139 @@
+{
+  "formatVersion": 1,
+  "id": "decision-example",
+  "name": "检查并执行",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string"
+      }
+    },
+    "additionalProperties": false
+  },
+  "outputSchema": {
+    "type": "object"
+  },
+  "entryNodeId": "a",
+  "defaults": {
+    "agent": {
+      "providerId": "codex-cli",
+      "modelId": "your-model-id"
+    }
+  },
+  "nodes": [
+    {
+      "id": "a",
+      "name": "读取输入",
+      "type": "code.nodejs",
+      "input": {
+        "source": "workflow"
+      },
+      "outputSchema": {
+        "type": "object"
+      },
+      "config": {
+        "script": "scripts/a.ts"
+      }
+    },
+    {
+      "id": "b",
+      "name": "Agent 决策",
+      "type": "agent",
+      "input": {
+        "source": "node",
+        "nodeId": "a"
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "config": {
+        "prompt": "Analyze input and choose execute or skip"
+      }
+    },
+    {
+      "id": "route",
+      "name": "条件路由",
+      "type": "switch",
+      "input": {
+        "source": "node",
+        "nodeId": "b",
+        "pointer": "/action"
+      },
+      "outputSchema": true,
+      "config": {
+        "cases": [
+          {
+            "label": "execute",
+            "value": "execute"
+          },
+          {
+            "label": "skip",
+            "value": "skip"
+          }
+        ],
+        "defaultLabel": "other"
+      }
+    },
+    {
+      "id": "c",
+      "name": "执行脚本",
+      "type": "shell",
+      "input": {
+        "source": "node",
+        "nodeId": "a"
+      },
+      "outputSchema": {
+        "type": "object"
+      },
+      "config": {
+        "script": "scripts/c.sh"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "a-b",
+      "from": "a",
+      "to": "b"
+    },
+    {
+      "id": "b-route",
+      "from": "b",
+      "to": "route"
+    },
+    {
+      "id": "do",
+      "from": "route",
+      "to": "c",
+      "label": "execute"
+    },
+    {
+      "id": "skip",
+      "from": "route",
+      "to": null,
+      "label": "skip"
+    },
+    {
+      "id": "other",
+      "from": "route",
+      "to": null,
+      "label": "other"
+    }
+  ],
+  "result": {
+    "source": "node",
+    "nodeId": "b"
+  }
+}

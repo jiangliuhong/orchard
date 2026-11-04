@@ -1,0 +1,42 @@
+import { useEffect, useRef, useState } from "react";
+import type { StreamEvent } from "../../domain/types.js";
+
+export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers);
+  if (typeof options.body === "string" && options.body.length > 0 && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const response = await fetch(`/api${path}`, { ...options, headers });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.message ?? "请求失败"); return body as T;
+}
+export const send = <T>(path: string, value?: unknown, method = "POST") => api<T>(path, { method, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
+export const requestId = () => crypto.randomUUID();
+export const pretty = (value: unknown) => JSON.stringify(value, null, 2) ?? "—";
+export function useResource<T>(path: string) {
+  const [data, setData] = useState<T>(), [error, setError] = useState(""), [revision, setRevision] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController(); setError("");
+    void api<T>(path, { signal: controller.signal }).then(value => { if (!controller.signal.aborted) setData(value); }).catch(error => { if (!controller.signal.aborted) setError(error.message); });
+    return () => controller.abort();
+  }, [path, revision]);
+  return { data, error, reload: () => setRevision(r => r + 1) };
+}
+export function useStream(resource: "runs" | "turns", id: string | undefined, callback: (event: StreamEvent) => void) {
+  const handler = useRef(callback); handler.current = callback;
+  useEffect(() => {
+    if (!id) return;
+    const source = new EventSource(`/api/${resource}/${encodeURIComponent(id)}/stream`);
+    let last = 0;
+    source.onmessage = message => {
+      const event = JSON.parse(message.data) as StreamEvent;
+      if (event.sequence <= last) return;
+      last = event.sequence; handler.current(event);
+    };
+    return () => source.close();
+  }, [resource, id]);
+}
+export function mergeEvents(current: StreamEvent[], event: StreamEvent) {
+  if (current.some(item => item.sequence === event.sequence)) return current;
+  return [...current, event].sort((a, b) => a.sequence - b.sequence).slice(-500);
+}
