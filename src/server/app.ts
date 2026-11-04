@@ -10,6 +10,7 @@ import { assertSchema } from "../domain/validation.js";
 import { AppError, check } from "../domain/errors.js";
 import type { SourceFiles, StreamEvent } from "../domain/types.js";
 import { digest, json } from "../persistence/files.js";
+import { SCHEMA_VERSION } from "../persistence/schema.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -49,7 +50,7 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
     const status = known ? /CONFLICT|BUSY|IDENTITY_CHANGED/.test(error.code) ? 409 : error.code === "NOT_FOUND" ? 404 : error.statusCode : (error as { statusCode?: number }).statusCode ?? 500;
     reply.code(status).send({ code: known ? error.code : "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) });
   });
-  app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: 1, activeModelVerifications: providers.activeVerificationCount }));
+  app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount }));
   app.get("/api/providers", async () => ({ items: providers.views() }));
   app.patch<{ Params: { id: string } }>("/api/providers/:id", async request => providers.update(request.params.id, request.body));
   app.post<{ Params: { id: string } }>("/api/providers/:id/detect", async request => providers.detect(request.params.id));
@@ -76,6 +77,7 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
     return authoring.create(input.workflowId, input.requestId);
   });
   app.get<{ Params: { id: string } }>("/api/drafts/:id", async request => authoring.snapshot(request.params.id));
+  app.delete<{ Params: { id: string } }>("/api/drafts/:id", async request => authoring.deleteDraft(request.params.id));
   app.patch<{ Params: { id: string } }>("/api/drafts/:id", async request => {
     const input = body<{ expectedRevision: number; files: SourceFiles }>(request.body, { expectedRevision, files: { type: "object", additionalProperties: { type: "string" } } }, ["expectedRevision", "files"]);
     return authoring.update(request.params.id, input.expectedRevision, input.files);
@@ -89,7 +91,17 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
     const input = body<{ expectedRevision: number; requestId: string }>(request.body, { expectedRevision, requestId }, ["expectedRevision", "requestId"]);
     return authoring.publish(request.params.id, input.expectedRevision, input.requestId);
   });
+  app.post<{ Params: { id: string } }>("/api/drafts/:id/runs", async (request, reply) => {
+    const input = body<{ expectedRevision: number; input: unknown; requestId: string }>(request.body, { expectedRevision, input: {}, requestId }, ["expectedRevision", "input", "requestId"]);
+    const result = await runner.createDraft(request.params.id, input.expectedRevision, input.input, input.requestId);
+    reply.code(202); return result;
+  });
   app.get("/api/workflows", async () => ({ items: store.workflows() }));
+  app.delete<{ Params: { id: string } }>("/api/workflows/:id", async request => authoring.deleteWorkflow(request.params.id));
+  app.post<{ Params: { id: string } }>("/api/workflows/:id/draft", async request => {
+    const input = body<{ versionId?: string; mode: "edit" | "copy" | "restore"; requestId: string }>(request.body, { versionId: { type: "string" }, mode: { enum: ["edit", "copy", "restore"] }, requestId }, ["mode", "requestId"]);
+    return authoring.editVersion(request.params.id, input.versionId, input.mode, input.requestId);
+  });
   app.get<{ Params: { id: string } }>("/api/workflows/:id", async request => {
     const workflow = store.workflows().find(w => w.id === request.params.id); check(workflow, "NOT_FOUND", "工作流不存在");
     return { ...workflow, versions: store.versions(workflow.id) };

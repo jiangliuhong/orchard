@@ -13,10 +13,15 @@ export function projectGraph(workflow: Workflow, layout: Layout = {}, records: N
       if (depth > (depths.get(edge.to!) ?? -1) && depth <= workflow.nodes.length) { depths.set(edge.to!, depth); queue.push(edge.to!); }
     }
   }
+  const counts = new Map<number, number>();
+  for (const node of workflow.nodes) {
+    const depth = depths.get(node.id) ?? 0;
+    counts.set(depth, (counts.get(depth) ?? 0) + 1);
+  }
   const levels = new Map<number, number>();
   const nodes: CanvasNode[] = workflow.nodes.map(node => {
     const depth = depths.get(node.id) ?? 0, row = levels.get(depth) ?? 0; levels.set(depth, row + 1);
-    return { id: node.id, type: "workflow", position: layout[node.id] ?? { x: row * 260, y: depth * 155 }, data: {
+    return { id: node.id, type: "workflow", position: layout[node.id] ?? { x: (row - ((counts.get(depth) ?? 1) - 1) / 2) * 224, y: depth * 128 }, data: {
       label: node.name, kind: node.type, status: records.find(r => r.nodeId === node.id)?.status,
       subtitle: node.type === "agent" ? [node.config.providerId ?? "继承默认", node.config.modelId].filter(Boolean).join(" · ") : node.type === "switch" ? `${node.config.cases?.length ?? 0} 个条件 + 默认` : node.config.script ?? "",
     } };
@@ -27,8 +32,10 @@ export function projectGraph(workflow: Workflow, layout: Layout = {}, records: N
     const selected = chosen.has(edge.id) || from?.type !== "switch" && from?.status === "succeeded" && to?.status !== "skipped" && to?.status !== "pending";
     return { id: edge.id, source: edge.from, target: edge.to ?? "__end", label: edge.label, type: "smoothstep", animated: selected && to?.status === "running", style: { stroke: selected ? "var(--graph-edge-active)" : "var(--graph-edge)", strokeWidth: selected ? 2.5 : 1.5 }, labelStyle: { fontSize: 11 } };
   });
-  const maxDepth = Math.max(...depths.values(), 0);
-  nodes.push({ id: "__end", type: "workflow", position: { x: 0, y: (maxDepth + 1) * 155 }, data: { label: "结束", kind: "end", subtitle: "返回工作流结果" }, selectable: false });
+  const bottom = Math.max(...nodes.map(node => node.position.y), 0);
+  const lastNodes = nodes.filter(node => node.position.y === bottom);
+  const center = lastNodes.reduce((sum, node) => sum + node.position.x, 0) / (lastNodes.length || 1);
+  nodes.push({ id: "__end", type: "workflow", position: { x: center + 42, y: bottom + 128 }, data: { label: "结束", kind: "end", subtitle: "返回工作流结果" } });
   for (const node of workflow.nodes.filter(n => !workflow.edges.some(e => e.from === n.id))) edges.push({ id: `__end-${node.id}`, source: node.id, target: "__end", type: "smoothstep" });
   return { nodes, edges };
 }

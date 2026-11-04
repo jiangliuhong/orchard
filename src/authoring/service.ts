@@ -24,6 +24,42 @@ export function initialFiles(id: string): SourceFiles {
 export class AuthoringService {
   private readonly jobs = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   constructor(readonly store: Store, readonly providers: ProviderRegistry) {}
+  private ensureDeletable(draftIds: string[]) {
+    check(![...this.jobs.keys()].some(id => draftIds.includes(this.store.turn(id).draftId)), "WORKFLOW_BUSY", "创作任务尚未结束，请等待取消或生成完成后再删除");
+  }
+  deleteWorkflow(id: string) {
+    this.ensureDeletable(this.store.workflowDraftIds(id));
+    return this.store.deleteWorkflow(id);
+  }
+  deleteDraft(id: string) {
+    this.ensureDeletable([id]);
+    return this.store.deleteDraft(id);
+  }
+  async editVersion(workflowId: string, versionId: string | undefined, mode: "edit" | "copy" | "restore", requestId: string) {
+    const scope = `version-draft:${workflowId}`, input = { versionId, mode };
+    if (this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) return this.store.command(scope, requestId, input, () => { throw new Error("unreachable"); });
+    const workflow = this.store.workflows().find(w => w.id === workflowId);
+    check(workflow, "NOT_FOUND", "工作流不存在");
+    const version = this.store.version(versionId ?? workflow.currentVersionId);
+    check(version.workflowId === workflowId, "NOT_FOUND", "版本不属于该工作流");
+    const files = { ...this.store.files.readTree(version.artifactPath).files };
+    if (mode === "copy") {
+      const definition = readDefinition(files);
+      files["workflow.json"] = JSON.stringify({ ...definition, id: `workflow-${randomUUID()}`, name: `${definition.name}（副本）` }, null, 2);
+    }
+    const validation = await validateFiles(files), tree = this.store.files.saveTree(files);
+    return this.store.command(scope, requestId, input, () => {
+      const current = this.store.workflows().find(w => w.id === workflowId);
+      check(current, "NOT_FOUND", "工作流不存在");
+      check(current.currentVersionId === workflow.currentVersionId, "BASELINE_CONFLICT", "工作流已有新版本，请刷新后重试");
+      const existing = this.store.drafts().find(d => d.workflowId === workflowId && ["draft", "publishing"].includes(d.status));
+      if (mode === "edit" && existing) return existing;
+      check(mode !== "restore" || !existing, "DRAFT_BUSY", "已有未发布的草稿，请先完成该草稿后再还原历史版本");
+      const id = randomUUID(), now = Date.now();
+      this.store.exec("INSERT INTO drafts VALUES(?,?,?,?,?,?,NULL,'draft',?,?)", id, mode === "copy" ? null : workflowId, mode === "copy" ? null : current.currentVersionId, 0, tree.path, json(validation), now, now);
+      return this.store.draft(id);
+    });
+  }
   async create(workflowId: string | undefined, requestId: string) {
     const prior = this.store.one("SELECT * FROM command_receipts WHERE scope='draft' AND request_id=?", requestId);
     if (prior) return this.store.command("draft", requestId, { workflowId }, () => { throw new Error("unreachable"); });

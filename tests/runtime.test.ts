@@ -20,7 +20,7 @@ test("same published version runs two paths and retains node results and metadat
     assert.equal(snapshot.nodes.find(n => n.nodeId === "c")!.status, action === "execute" ? "succeeded" : "skipped");
     assert.equal(snapshot.nodes.find(n => n.nodeId === "route")!.route?.edgeId, action === "unexpected" ? "other" : action === "execute" ? "do" : "skip");
     assert.ok(snapshot.attempts.length >= 3);
-    assert.equal(snapshot.version.id, version.id);
+    assert.equal(snapshot.version?.id, version.id);
     assert.ok(store.stream("run", run.id).some(e => e.type === "node.log"));
   }
   assert.ok(provider.calls.every(call => call.modelId === "test-model"));
@@ -119,4 +119,166 @@ test("Shell nonzero exit cannot succeed from a result file and no retry occurs",
   const run = runner.create(version.id, {}, randomUUID()); await until(() => store.run(run.id).status === "failed");
   assert.equal(store.nodes(run.id)[0]!.error!.code, "PROCESS_FAILED"); assert.equal(store.attempts(run.id).length, 1);
   assert.ok(store.stream("run", run.id).some(e => e.type === "node.process"));
+});
+
+test("unpublished drafts run immutable snapshots without creating published workflows or versions", async t => {
+  const { store, providers, authoring } = setup(t), runner = new GraphRunner(store, providers);
+  t.after(async () => { await runner.close(); await authoring.close(); store.close(); });
+  const draft = await authoring.create(undefined, randomUUID());
+  const key = randomUUID(), input = { example: "original" };
+  const run = await runner.createDraft(draft.id, 0, input, key);
+  const originalPath = run.snapshotPath;
+  assert.equal(run.workflowVersionId, null);
+  assert.equal(run.draftId, draft.id);
+  assert.equal(run.draftRevision, 0);
+  const files = authoring.snapshot(draft.id).files;
+  await authoring.update(draft.id, 0, { ...files, "scripts/start.ts": "export default () => ({changed:true})" });
+  assert.equal((await runner.createDraft(draft.id, 0, input, key)).id, run.id);
+  await assert.rejects(runner.createDraft(draft.id, 0, { different: true }, key), /不同内容/);
+  const done = await until(() => { const current = store.run(run.id); return ["succeeded", "failed"].includes(current.status) && current; });
+  assert.equal(done.status, "succeeded", JSON.stringify(done.error));
+  assert.deepEqual(done.output, input);
+  const snapshot = runner.snapshot(run.id);
+  assert.equal(snapshot.version, null);
+  assert.equal(snapshot.execution.artifactPath, originalPath);
+  assert.equal(snapshot.nodes[0]!.status, "succeeded");
+  assert.ok(snapshot.attempts.length);
+  assert.equal(store.draft(draft.id).status, "draft");
+  assert.equal(store.draft(draft.id).revision, 1);
+  assert.equal(store.workflows().length, 0);
+  assert.equal(store.all("SELECT id FROM workflow_versions").length, 0);
+  const second = await runner.createDraft(draft.id, 1, input, randomUUID());
+  await until(() => store.run(second.id).status === "succeeded");
+  assert.deepEqual(store.run(second.id).output, { changed: true });
+  assert.notEqual(second.snapshotPath, originalPath);
+});
+
+test("draft tests reject stale revisions, invalid input, invalid scripts, active authoring and published drafts", async t => {
+  const { store, providers, provider, authoring } = setup(t), runner = new GraphRunner(store, providers);
+  t.after(async () => { await runner.close(); await authoring.close(); store.close(); });
+  const draft = await authoring.create(undefined, randomUUID()), files = authoring.snapshot(draft.id).files;
+  const workflow = JSON.parse(files["workflow.json"]!);
+  workflow.inputSchema = { type: "object", required: ["name"], properties: { name: { type: "string" } } };
+  await authoring.update(draft.id, 0, { ...files, "workflow.json": JSON.stringify(workflow) });
+  await assert.rejects(runner.createDraft(draft.id, 0, { name: "test" }, randomUUID()), /草稿已更新/);
+  await assert.rejects(runner.createDraft(draft.id, 1, {}, randomUUID()), /工作流输入/);
+  const saved = authoring.snapshot(draft.id).files;
+  await authoring.update(draft.id, 1, { ...saved, "scripts/start.ts": "not valid typescript !!!" });
+  await assert.rejects(runner.createDraft(draft.id, 2, { name: "test" }, randomUUID()), /校验/);
+  await authoring.update(draft.id, 2, saved);
+  let release!: () => void;
+  provider.handler = async request => {
+    await new Promise<void>(resolve => { release = resolve; });
+    return { output: { summary: "unchanged", changes: [] }, providerId: provider.id, modelId: request.modelId };
+  };
+  const turn = await authoring.start(draft.id, { providerId: provider.id, modelId: "test-model", prompt: "review", expectedRevision: 3, requestId: randomUUID() });
+  await until(() => typeof release === "function");
+  await assert.rejects(runner.createDraft(draft.id, 3, { name: "test" }, randomUUID()), /正在生成/);
+  release(); await authoring.wait(turn.id);
+  await authoring.publish(draft.id, 3, randomUUID());
+  await assert.rejects(runner.createDraft(draft.id, 3, { name: "test" }, randomUUID()), /已经发布/);
+  assert.equal(store.runs().length, 0);
+});
+
+test("draft tests freeze Agent models, reject revisions changed during preparation and support cancellation", async t => {
+  const { store, providers, provider, authoring } = setup(t), runner = new GraphRunner(store, providers);
+  t.after(async () => { await runner.close(); await authoring.close(); store.close(); });
+  const draft = await authoring.create(undefined, randomUUID()), workflowId = JSON.parse(authoring.snapshot(draft.id).files["workflow.json"]!).id;
+  await authoring.update(draft.id, 0, exampleFiles(workflowId));
+  let release!: () => void;
+  provider.handler = async request => {
+    await new Promise<void>(resolve => { release = resolve; });
+    return { output: { action: "skip" }, providerId: provider.id, modelId: request.modelId };
+  };
+  const run = await runner.createDraft(draft.id, 1, {}, randomUUID());
+  const frozen = runner.snapshot(run.id).execution.definition.nodes.find(node => node.id === "b")!;
+  assert.equal(frozen.config.modelId, "test-model");
+  await until(() => typeof release === "function");
+  const queued = await runner.createDraft(draft.id, 1, {}, randomUUID());
+  runner.cancel(queued.id);
+  assert.equal(store.run(queued.id).status, "cancelled");
+  runner.cancel(run.id); release();
+  await until(() => store.run(run.id).status === "cancelled");
+  assert.equal(store.nodes(run.id).find(node => node.nodeId === "c")!.skipReason, "run_terminated");
+  const freeze = providers.freeze.bind(providers);
+  providers.freeze = async workflow => {
+    const result = await freeze(workflow);
+    await authoring.update(draft.id, 1, authoring.snapshot(draft.id).files);
+    return result;
+  };
+  await assert.rejects(runner.createDraft(draft.id, 1, {}, randomUUID()), /草稿已更新/);
+  assert.equal(store.runs().length, 2);
+});
+
+test("restart resumes queued draft snapshots and interrupts active tests without repeating them", async t => {
+  const { root, store, authoring, provider } = setup(t);
+  const draft = await authoring.create(undefined, randomUUID());
+  const files = authoring.snapshot(draft.id).files;
+  const { compileScripts, readDefinition } = await import("../src/persistence/files.js");
+  const tree = store.files.saveTree(files, await compileScripts(files, readDefinition(files)));
+  for (const status of ["running", "queued"]) {
+    const id = `draft-${status}`;
+    store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,0,?,?,?,?)", id, draft.id, tree.path, status, store.reference({ restored: true }), Date.now());
+    store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,'start','code.nodejs',?)", `node-${status}`, id, status === "running" ? "running" : "pending");
+    if (status === "running") store.exec("INSERT INTO node_attempts(id,node_run_id,attempt_no,status,execution_json,started_at) VALUES('draft-attempt',?,1,'running','{}',?)", `node-${status}`, Date.now());
+  }
+  store.close();
+  const recovered = new Store(root);
+  const { ProviderRegistry } = await import("../src/providers/registry.js");
+  const runner = new GraphRunner(recovered, new ProviderRegistry(recovered).register(provider, process.execPath));
+  t.after(async () => { await runner.close(); recovered.close(); });
+  assert.equal(recovered.run("draft-running").status, "interrupted");
+  assert.equal(recovered.nodes("draft-running")[0]!.status, "interrupted");
+  assert.equal(recovered.attempts("draft-running")[0]!.status, "interrupted");
+  await until(() => recovered.run("draft-queued").status === "succeeded");
+  assert.deepEqual(recovered.run("draft-queued").output, { restored: true });
+  assert.equal(runner.snapshot("draft-queued").version, null);
+  assert.equal(recovered.workflows().length, 0);
+});
+
+test("configured final output extracts text and composes fields independently of node outputs", async context => {
+  const { store, providers, authoring } = setup(context), runner = new GraphRunner(store, providers);
+  context.after(async () => { await runner.close(); await authoring.close(); store.close(); });
+  const draft = await authoring.create(undefined, randomUUID()), files = authoring.snapshot(draft.id).files;
+  const definition = JSON.parse(files["workflow.json"]!);
+  definition.result = { source: "node", nodeId: "start", pointer: "/summary" };
+  definition.outputSchema = { type: "string" };
+  files["workflow.json"] = JSON.stringify(definition);
+  files["scripts/start.ts"] = 'export default input => ({summary: "最终正文", metadata: input})';
+  await authoring.update(draft.id, 0, files);
+  const test = await runner.createDraft(draft.id, 1, { query: "土豆" }, randomUUID());
+  await until(() => ["succeeded", "failed"].includes(store.run(test.id).status));
+  assert.equal(store.run(test.id).status, "succeeded");
+  assert.equal(store.run(test.id).output, "最终正文");
+  assert.deepEqual(store.nodes(test.id)[0]!.output, { summary: "最终正文", metadata: { query: "土豆" } });
+  const version = await authoring.publish(draft.id, 1, randomUUID());
+  const edit = await authoring.editVersion(version.workflowId, undefined, "edit", randomUUID());
+  definition.result = { source: "object", properties: { summary: { source: "node", nodeId: "start", pointer: "/summary" }, query: { source: "workflow", pointer: "/query" } } };
+  definition.outputSchema = { type: "object", required: ["summary", "query"], properties: { summary: { type: "string" }, query: { type: "string" } } };
+  files["workflow.json"] = JSON.stringify(definition);
+  await authoring.update(edit.id, 0, files);
+  const composed = await runner.createDraft(edit.id, 1, { query: "土豆" }, randomUUID());
+  await until(() => ["succeeded", "failed"].includes(store.run(composed.id).status));
+  assert.equal(store.run(composed.id).status, "succeeded");
+  assert.deepEqual(store.run(composed.id).output, { summary: "最终正文", query: "土豆" });
+  assert.equal(store.run(test.id).output, "最终正文");
+  assert.equal(store.version(version.id).definition.result.source, "node");
+});
+
+test("final output schema and missing fields can fail a run after all nodes succeed", async context => {
+  const { store, providers, authoring } = setup(context), runner = new GraphRunner(store, providers);
+  context.after(async () => { await runner.close(); await authoring.close(); store.close(); });
+  const draft = await authoring.create(undefined, randomUUID()), files = authoring.snapshot(draft.id).files;
+  const definition = JSON.parse(files["workflow.json"]!);
+  for (const [index, pointer, schema, error] of [[0, "/missing", true, "MISSING_INPUT"], [1, "", { type: "string" }, "SCHEMA_MISMATCH"]] as const) {
+    definition.result = { source: "node", nodeId: "start", pointer };
+    definition.outputSchema = schema;
+    files["workflow.json"] = JSON.stringify(definition);
+    await authoring.update(draft.id, index, files);
+    const run = await runner.createDraft(draft.id, index + 1, { value: 1 }, randomUUID());
+    await until(() => store.run(run.id).status === "failed");
+    assert.equal(store.run(run.id).error!.code, error);
+    assert.equal(store.run(run.id).output, undefined);
+    assert.equal(store.nodes(run.id)[0]!.status, "succeeded");
+  }
 });

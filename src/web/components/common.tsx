@@ -15,6 +15,6 @@ export function Payload({ value }: { value: unknown }) {
   const artifact = value && typeof value === "object" && "artifact" in value ? (value as { artifact: { id: string; byteSize: number } }).artifact : null;
   return artifact ? <a className="artifact-link" href={`/api/artifacts/${artifact.id}`} target="_blank" rel="noreferrer">查看完整产物 · {(artifact.byteSize / 1024).toFixed(1)} KiB ↗</a> : <pre className="payload">{JSON.stringify(value, null, 2) ?? "—"}</pre>;
 }
-export function NodePicker({ nodes, value, onChange }: { nodes: WorkflowNode[]; value: string; onChange: (id: string) => void }) {
-  return <select aria-label="选择节点" className="node-picker" value={value} onChange={e => onChange(e.target.value)}>{nodes.map(node => <option key={node.id} value={node.id}>{node.name}</option>)}</select>;
+export function NodePicker({ nodes, value, onChange, includeOutput = false }: { nodes: WorkflowNode[]; value: string; onChange: (id: string) => void; includeOutput?: boolean }) {
+  return <select aria-label="选择节点" className="node-picker" value={value} onChange={e => onChange(e.target.value)}>{nodes.map(node => <option key={node.id} value={node.id}>{node.name}</option>)}{includeOutput && <option value="__end">工作流最终输出</option>}</select>;
 }

@@ -52,3 +52,39 @@ test("cancelled late changes do not modify draft and baseline conflicts preserve
   authoring.cancel(second.id, turn.id); release(); await authoring.wait(turn.id);
   assert.equal(store.turn(turn.id).status, "cancelled"); assert.equal(store.draft(second.id).revision, 0);
 });
+
+test("editing reuses a draft, copies have independent identities, and restoration preserves history", async t => {
+  const { store, authoring } = setup(t);
+  t.after(async () => { await authoring.close(); store.close(); });
+  const first = await publishExample(authoring);
+  const edit = await authoring.editVersion(first.workflowId, undefined, "edit", "edit");
+  assert.equal((await authoring.editVersion(first.workflowId, undefined, "edit", "edit-again")).id, edit.id);
+  const files = authoring.snapshot(edit.id).files;
+  const definition = JSON.parse(files["workflow.json"]!);
+  definition.name = "更新后的流程";
+  await authoring.update(edit.id, 0, { ...files, "workflow.json": JSON.stringify(definition) });
+  const second = await authoring.publish(edit.id, 1, "publish-second");
+  assert.equal(second.workflowId, first.workflowId);
+  assert.equal(second.number, 2);
+  assert.equal(store.workflows().length, 1);
+
+  const copy = await authoring.editVersion(first.workflowId, first.id, "copy", "copy");
+  assert.equal((await authoring.editVersion(first.workflowId, first.id, "copy", "copy")).id, copy.id);
+  assert.equal(copy.workflowId, null);
+  const copied = await authoring.publish(copy.id, 0, "publish-copy");
+  assert.notEqual(copied.workflowId, first.workflowId);
+  assert.equal(copied.number, 1);
+  assert.deepEqual(copied.definition.nodes, first.definition.nodes);
+  await assert.rejects(authoring.editVersion(first.workflowId, copied.id, "restore", "wrong-owner"), /不属于/);
+
+  const restored = await authoring.editVersion(first.workflowId, first.id, "restore", "restore");
+  assert.equal(restored.baseVersionId, second.id);
+  assert.equal(JSON.parse(authoring.snapshot(restored.id).files["workflow.json"]!).name, first.definition.name);
+  await assert.rejects(authoring.editVersion(first.workflowId, first.id, "restore", "restore-again"), /已有未发布/);
+  const third = await authoring.publish(restored.id, 0, "publish-restored");
+  assert.equal(third.number, 3);
+  assert.equal(third.workflowId, first.workflowId);
+  assert.equal(store.workflows().find(w => w.id === first.workflowId)!.currentVersionId, third.id);
+  assert.deepEqual(store.version(first.id), first);
+  assert.deepEqual(store.version(second.id), second);
+});

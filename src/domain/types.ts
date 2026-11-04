@@ -82,9 +82,11 @@ export interface Draft {
   publishedVersionId: string | null; status: string; createdAt: number; updatedAt: number;
 }
 export interface Run {
-  id: string; workflowVersionId: string; status: RunStatus; input: unknown; output?: unknown;
+  id: string; workflowVersionId: string | null; draftId: string | null; draftRevision: number | null; snapshotPath: string | null;
+  status: RunStatus; input: unknown; output?: unknown;
   activeNodeId: string | null; error?: Failure; createdAt: number; startedAt: number | null; endedAt: number | null;
 }
+export interface RunExecution { definition: Workflow; layout: Layout; artifactPath: string }
 export interface NodeRun {
   id: string; runId: string; nodeId: string; type: WorkflowNode["type"]; status: NodeStatus;
   input?: unknown; output?: unknown; route?: { edgeId: string; value: unknown; reason: string };

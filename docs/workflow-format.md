@@ -38,6 +38,21 @@
 
 Schema 使用严格 JSON Schema 校验。声明 required 字段时同时在 properties 中定义，不支持异步 Schema。实际运行输入输出再次校验。
 
+## 最终输出
+
+工作流顶层的 `result` 使用与节点输入相同的绑定语法，决定整个流程最终返回什么，不会自动采用最后一个节点的输出。顶层 `outputSchema` 校验该结果，区别于每个节点自身的输出 Schema。
+
+例如从总结节点提取纯文本：
+
+```json
+{
+  "result": { "source": "node", "nodeId": "summarize", "pointer": "/summary" },
+  "outputSchema": { "type": "string" }
+}
+```
+
+也可使用 `source: "object"` 组合不同节点及原始输入，或使用数组、常量、整个节点输出。引用节点必须在所有结束路径中可用；结果字段路径在运行时解析，缺失字段或最终 Schema 校验失败会使整次运行失败，即使此前所有节点已成功。编辑页的“最终输出”表单直接写入上述现有字段，不改变执行顺序或增加业务节点。
+
 ## Node.js
 
 ```ts

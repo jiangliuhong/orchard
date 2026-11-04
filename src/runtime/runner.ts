@@ -3,11 +3,11 @@ import { mkdirSync, writeFileSync, readFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Store } from "../persistence/store.js";
-import { json, readDefinition } from "../persistence/files.js";
+import { compileScripts, json, readDefinition, readLayout } from "../persistence/files.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import { assertSchema, resolveBinding } from "../domain/validation.js";
 import { check, failure } from "../domain/errors.js";
-import type { WorkflowNode, Workflow, NodeRun } from "../domain/types.js";
+import type { WorkflowNode, Workflow, NodeRun, Run, RunExecution } from "../domain/types.js";
 import { executeProcess } from "./process.js";
 
 export class GraphRunner {
@@ -27,10 +27,46 @@ export class GraphRunner {
     });
     this.wake(); return result;
   }
+  private editableDraft(id: string, revision: number) {
+    const draft = this.store.draft(id);
+    check(draft.revision === revision, "REVISION_CONFLICT", "草稿已更新，请刷新后重新测试");
+    check(draft.status === "draft" && !this.store.turns(id).some(turn => turn.status === "running"), "DRAFT_BUSY", "草稿正在生成或发布，或已经发布");
+    check(draft.validation.valid, "INVALID_WORKFLOW", "请先修复草稿校验错误");
+    return draft;
+  }
+  async createDraft(draftId: string, revision: number, input: unknown, requestId: string) {
+    const scope = `draft-run:${draftId}`, command = { revision, input };
+    if (this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
+      return this.store.command<Run>(scope, requestId, command, () => { throw new Error("unreachable"); });
+    }
+    const draft = this.editableDraft(draftId, revision);
+    const original = this.store.files.readTree(draft.artifactPath).files;
+    const definition = await this.providers.freeze(readDefinition(original));
+    assertSchema(input, definition.inputSchema, "工作流输入");
+    const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
+    readLayout(files);
+    const compiled = await compileScripts(files, definition), tree = this.store.files.saveTree(files, compiled);
+    const result = this.store.command(scope, requestId, command, () => {
+      this.editableDraft(draftId, revision);
+      for (const node of definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
+      const id = randomUUID(), now = Date.now();
+      this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
+      for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+      this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
+      return this.store.run(id);
+    });
+    this.wake(); return result;
+  }
+  private execution(run: Run): RunExecution {
+    if (run.workflowVersionId) return this.store.version(run.workflowVersionId);
+    check(run.snapshotPath, "INVALID_SNAPSHOT", "草稿测试缺少运行快照");
+    const tree = this.store.files.readTree(run.snapshotPath);
+    return { definition: readDefinition(tree.files), layout: readLayout(tree.files), artifactPath: run.snapshotPath };
+  }
   snapshot(id: string) {
     return this.store.transaction(() => {
       const run = this.store.run(id);
-      return { ...run, version: this.store.version(run.workflowVersionId), nodes: this.store.nodes(id), attempts: this.store.attempts(id), lastSequence: this.store.lastSequence("run", id) };
+      return { ...run, version: run.workflowVersionId ? this.store.version(run.workflowVersionId) : null, execution: this.execution(run), nodes: this.store.nodes(id), attempts: this.store.attempts(id), lastSequence: this.store.lastSequence("run", id) };
     });
   }
   cancel(id: string) {
@@ -67,9 +103,9 @@ export class GraphRunner {
   private async execute(id: string, signal: AbortSignal) {
     let active: NodeRun | undefined, attemptId: string | undefined;
     try {
-      const run = this.store.run(id), version = this.store.version(run.workflowVersionId);
-      const tree = this.store.files.readTree(version.artifactPath), workflow = readDefinition(tree.files);
-      check(json(workflow) === json(version.definition), "ARTIFACT_MISMATCH", "流程定义与版本产物不一致");
+      const run = this.store.run(id), execution = this.execution(run);
+      const tree = this.store.files.readTree(execution.artifactPath), workflow = readDefinition(tree.files);
+      check(json(workflow) === json(execution.definition), "ARTIFACT_MISMATCH", "流程定义与运行快照不一致");
       this.store.transaction(() => {
         check(this.store.run(id).status === "queued", "RUN_ENDED", "运行已结束");
         this.store.exec("UPDATE runs SET status='running',started_at=? WHERE id=?", Date.now(), id);

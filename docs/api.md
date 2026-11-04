@@ -13,10 +13,13 @@
 | 验证模型可用性 | `POST /providers/:id/models/:modelId/verify` |
 | 草稿列表 / 创建 | `GET /drafts` / `POST /drafts` |
 | 草稿快照 / 保存文件 | `GET /drafts/:id` / `PATCH /drafts/:id` |
+| 删除草稿 | `DELETE /drafts/:id` |
 | 发起创作 | `POST /drafts/:id/turns` |
 | 取消创作 | `POST /drafts/:id/turns/:turnId/cancel` |
 | 发布 | `POST /drafts/:id/publish` |
+| 测试草稿 | `POST /drafts/:id/runs` |
 | 工作流列表 / 详情 | `GET /workflows` / `GET /workflows/:id` |
+| 删除工作流 | `DELETE /workflows/:id` |
 | 版本与源码 | `GET /workflows/:id/versions/:versionId` |
 | 运行 | `POST /workflows/:id/runs` |
 | 运行列表 / 快照 | `GET /runs` / `GET /runs/:id` |
@@ -34,9 +37,11 @@
 }
 ```
 
-创建草稿时省略 workflowId 即创建新工作流候选。轮次请求包含 requestId、expectedRevision、providerId、modelId、prompt。手动保存文件包含 expectedRevision 和完整 files 字典。发布包含 requestId 和 expectedRevision。运行包含 requestId、input、可选 versionId，省略版本时选当前发布版本。
+创建草稿时省略 workflowId 即创建新工作流候选。轮次请求包含 requestId、expectedRevision、providerId、modelId、prompt。手动保存文件包含 expectedRevision 和完整 files 字典。发布包含 requestId 和 expectedRevision。草稿测试包含 requestId、expectedRevision 和 input；测试前校验草稿修订，冻结定义、模型配置、布局与编译脚本为不可变快照，不创建 workflow_versions 记录，也不改变草稿状态或当前发布版本。运行包含 requestId、input、可选 versionId，省略版本时选当前发布版本。
 
 同 scope/requestId 和相同内容返回原结果，同键不同内容拒绝。自动重试请求应复用标识；用户发起新的运行使用新标识。
+
+删除端点不发送请求体，成功返回 `{id, deleted: true}`，重复删除同一 ID 仍返回成功。删除工作流会在同一事务中清理全部发布版本、关联草稿（包括首次发布的原始草稿）、对话、正式及草稿测试运行、节点执行、事件和相关请求回执。存在生成、发布、排队、运行或取消尚未完成的任务时返回 409 / WORKFLOW_BUSY。删除草稿仅清理该草稿及其测试记录，不影响已发布版本；已发布草稿需通过工作流删除入口处理。独立复制出的工作流及草稿不受影响。共享的摘要文件和产物保留，避免破坏其他引用，不执行磁盘文件回收。
 
 ## 模型管理
 
@@ -76,7 +81,7 @@ status 为 available、failed 或 cancelled。checkedAt 是服务端完成检查
 
 ## 快照和事件
 
-运行快照包括 version、nodes、attempts 和 lastSequence。初次获取快照后可以从 lastSequence 订阅；SSE 使用 `id: sequence`、`data: JSON`，支持 Last-Event-ID 重连。事件包含 streamType、streamId、sequence、type、可选 nodeId / attemptId、payload 与 createdAt。
+正式运行快照包括 version；草稿测试快照包括 draftId、draftRevision 和 execution（不可变流程定义、布局与产物路径），两者都包括 nodes、attempts 和 lastSequence。初次获取快照后可以从 lastSequence 订阅；SSE 使用 `id: sequence`、`data: JSON`，支持 Last-Event-ID 重连。事件包含 streamType、streamId、sequence、type、可选 nodeId / attemptId、payload 与 createdAt。
 
 HTTP events 一次最多返回 500 条，按最后返回的 sequence 分页，直到达到 lastSequence。客户端按 sequence 去重，不能用数组长度当游标。服务先补读历史再续读新事件；慢连接结束后可以用持久化游标重连，服务不无限缓存日志。
 

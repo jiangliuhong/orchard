@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { resolve, join } from "node:path";
 import { existsSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { SCHEMA } from "./schema.js";
+import { MIGRATE_V1_TO_V2, SCHEMA, SCHEMA_VERSION } from "./schema.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
 import type { Draft, Message, NodeRun, ProviderSetting, Run, StreamEvent, Turn, Version, Workflow } from "../domain/types.js";
@@ -39,7 +39,17 @@ export class Store {
       if (version === 0) {
         check(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length === 0, "UNKNOWN_DATABASE", "拒绝初始化未知数据库");
         this.db.exec(`BEGIN; ${SCHEMA} COMMIT;`);
-      } else check(version === 1 && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
+      } else {
+        check([1, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
+        if (version === 1) {
+          this.db.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;");
+          try {
+            this.db.exec(MIGRATE_V1_TO_V2);
+            check(this.db.prepare("PRAGMA foreign_key_check").all().length === 0, "MIGRATION_FAILED", "数据库升级外键校验失败");
+            this.db.exec("COMMIT;");
+          } catch (error) { this.db.exec("ROLLBACK;"); throw error; }
+        }
+      }
       this.db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
       rmSync(this.files.path("staging"), { force: true, recursive: true });
       this.recover();
@@ -130,6 +140,56 @@ export class Store {
   }
   workflows() { return this.all<{ id: string; name: string; currentVersionId: string; createdAt: number; updatedAt: number }>("SELECT id,name,current_version_id AS currentVersionId,created_at AS createdAt,updated_at AS updatedAt FROM workflows ORDER BY updated_at DESC"); }
   versions(workflowId: string) { return this.all<{ id: string }>("SELECT id FROM workflow_versions WHERE workflow_id=? ORDER BY version_no DESC", workflowId).map(r => this.version(r.id)); }
+  workflowDraftIds(workflowId: string) {
+    return this.all<{ id: string }>("SELECT id FROM drafts WHERE workflow_id=? OR base_version_id IN (SELECT id FROM workflow_versions WHERE workflow_id=?) OR published_version_id IN (SELECT id FROM workflow_versions WHERE workflow_id=?)", workflowId, workflowId, workflowId).map(row => row.id);
+  }
+  private deleteContent(draftIds: string[], versionIds: string[]) {
+    const runs = new Map<string, { id: string; status: string }>();
+    for (const versionId of versionIds) for (const run of this.all<{ id: string; status: string }>("SELECT id,status FROM runs WHERE workflow_version_id=?", versionId)) runs.set(run.id, run);
+    for (const draftId of draftIds) {
+      const draft = this.draft(draftId);
+      check(draft.status !== "publishing", "WORKFLOW_BUSY", "工作流正在发布，请完成后再删除");
+      check(!this.turns(draftId).some(turn => turn.status === "running"), "WORKFLOW_BUSY", "工作流正在生成，请取消或完成后再删除");
+      for (const run of this.all<{ id: string; status: string }>("SELECT id,status FROM runs WHERE draft_id=?", draftId)) runs.set(run.id, run);
+    }
+    check(![...runs.values()].some(run => ["queued", "running", "cancel_requested"].includes(run.status)), "WORKFLOW_BUSY", "工作流有排队或执行中的运行，请取消或完成后再删除");
+    for (const run of runs.values()) {
+      this.exec("DELETE FROM node_attempts WHERE node_run_id IN (SELECT id FROM node_runs WHERE run_id=?)", run.id);
+      this.exec("DELETE FROM node_runs WHERE run_id=?", run.id);
+      this.exec("DELETE FROM stream_events WHERE stream_type='run' AND stream_id=?", run.id);
+      this.exec("DELETE FROM command_receipts WHERE json_extract(result_json,'$.id')=?", run.id);
+      this.exec("DELETE FROM runs WHERE id=?", run.id);
+    }
+    for (const draftId of draftIds) {
+      this.exec("DELETE FROM command_receipts WHERE json_extract(result_json,'$.id') IN (SELECT id FROM authoring_turns WHERE draft_id=?) OR scope IN (?,?,?)", draftId, `turn:${draftId}`, `publish:${draftId}`, `draft-run:${draftId}`);
+      this.exec("DELETE FROM stream_events WHERE stream_type='authoring_turn' AND stream_id IN (SELECT id FROM authoring_turns WHERE draft_id=?)", draftId);
+      this.exec("DELETE FROM authoring_messages WHERE draft_id=?", draftId);
+      this.exec("DELETE FROM authoring_turns WHERE draft_id=?", draftId);
+      this.exec("DELETE FROM command_receipts WHERE json_extract(result_json,'$.id')=?", draftId);
+      this.exec("DELETE FROM drafts WHERE id=?", draftId);
+    }
+  }
+  deleteWorkflow(id: string) {
+    return this.transaction(() => {
+      if (!this.one("SELECT id FROM workflows WHERE id=?", id)) return { id, deleted: true };
+      const versions = this.all<{ id: string }>("SELECT id FROM workflow_versions WHERE workflow_id=?", id);
+      this.deleteContent(this.workflowDraftIds(id), versions.map(version => version.id));
+      this.exec("UPDATE workflows SET current_version_id=NULL WHERE id=?", id);
+      for (const version of versions) this.exec("DELETE FROM command_receipts WHERE scope=? OR json_extract(result_json,'$.id')=?", `run:${version.id}`, version.id);
+      this.exec("DELETE FROM command_receipts WHERE scope=?", `version-draft:${id}`);
+      this.exec("DELETE FROM workflow_versions WHERE workflow_id=?", id);
+      this.exec("DELETE FROM workflows WHERE id=?", id);
+      return { id, deleted: true };
+    });
+  }
+  deleteDraft(id: string) {
+    return this.transaction(() => {
+      if (!this.one("SELECT id FROM drafts WHERE id=?", id)) return { id, deleted: true };
+      check(this.draft(id).status !== "published", "DRAFT_BUSY", "已发布草稿请通过工作流详情删除");
+      this.deleteContent([id], []);
+      return { id, deleted: true };
+    });
+  }
   draft(id: string): Draft {
     const r = this.one("SELECT * FROM drafts WHERE id=?", id); check(r, "NOT_FOUND", "草稿不存在");
     return { id: String(r.id), workflowId: r.workflow_id as string | null, baseVersionId: r.base_version_id as string | null, revision: Number(r.revision), artifactPath: String(r.artifact_path), validation: parsed(r.validation_json), publishedVersionId: r.published_version_id as string | null, status: String(r.status), createdAt: Number(r.created_at), updatedAt: Number(r.updated_at) };
@@ -148,7 +208,7 @@ export class Store {
   messages(draftId: string): Message[] { return this.all("SELECT * FROM authoring_messages WHERE draft_id=? ORDER BY sequence", draftId).map(r => ({ id: String(r.id), draftId, turnId: r.turn_id as string | null, sequence: Number(r.sequence), role: String(r.role), content: parsed(r.content_json), createdAt: Number(r.created_at) })); }
   run(id: string): Run {
     const r = this.one("SELECT * FROM runs WHERE id=?", id); check(r, "NOT_FOUND", "运行不存在");
-    return { id: String(r.id), workflowVersionId: String(r.workflow_version_id), status: r.status as Run["status"], input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
+    return { id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
   }
   runs() { return this.all<{ id: string }>("SELECT id FROM runs ORDER BY created_at DESC LIMIT 200").map(r => this.run(r.id)); }
   nodes(runId: string): NodeRun[] {

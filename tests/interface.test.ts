@@ -2,7 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { JSDOM } from "jsdom";
-import type { ProviderView, NodeRun, StreamEvent } from "../src/domain/types.js";
+import type { Binding, ProviderView, NodeRun, StreamEvent, Workflow } from "../src/domain/types.js";
 import { projectGraph, applyEventStatus, renderableWorkflow } from "../src/web/features/graph.js";
 import { mergeEvents } from "../src/web/lib/api.js";
 import { exampleFiles } from "./helpers.js";
@@ -32,6 +32,11 @@ const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
 const { ModelManager } = await import("../src/web/features/ModelManager.js");
 const { DraftPage } = await import("../src/web/features/DraftPage.js");
 const { RunPage } = await import("../src/web/features/RunPages.js");
+const { DeleteWorkflowButton } = await import("../src/web/features/DeleteWorkflowButton.js");
+const { WorkflowsPage } = await import("../src/web/features/WorkflowPages.js");
+const { SourceFileList } = await import("../src/web/features/SourceTabs.js");
+const { WorkflowOutputEditor } = await import("../src/web/features/WorkflowOutputEditor.js");
+const { FinalResult } = await import("../src/web/features/FinalResult.js");
 const { default: App } = await import("../src/web/App.js");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { ThemePicker, ThemeProvider, themeStorageKey } = await import("../src/web/lib/theme.js");
@@ -354,15 +359,268 @@ test("run UI uses its version graph and lets users inspect skipped node reasons"
   const snapshot = {
     id: "run-ui", workflowVersionId: "v1", status: "succeeded", activeNodeId: null, createdAt: 1,
     input: { action: "skip" }, output: { action: "skip" }, lastSequence: 20, attempts: [],
+    execution: { definition, layout: {}, artifactPath: "" },
     version: { id: "v1", workflowId: "ui-run", number: 1, definition, layout: {}, artifactPath: "", contentHash: "", createdAt: 1 },
     nodes: definition.nodes.map((node: { id: string; type: string }) => ({ id: `n-${node.id}`, runId: "run-ui", nodeId: node.id, type: node.type, status: node.id === "c" ? "skipped" : "succeeded", skipReason: node.id === "c" ? "branch_not_selected" : undefined, output: node.id === "b" ? { action: "skip" } : undefined, startedAt: 1, endedAt: 2 })),
   };
   globalThis.fetch = async () => Response.json(snapshot);
   try {
     render(createElement(RunPage, { id: "run-ui" }));
+    await waitFor(() => assert.equal(screen.getByRole("tab", { name: "最终结果" }).getAttribute("aria-selected"), "true"));
+    assert.ok(screen.getByRole("region", { name: "工作流最终结果" }));
+    await userEvent.setup({ document: dom.window.document }).click(screen.getByRole("tab", { name: "执行详情" }));
     const picker = await screen.findByLabelText("选择节点");
     fireEvent.change(picker, { target: { value: "c" } });
     assert.ok(await screen.findByText("条件未选择此分支"));
     assert.ok(screen.getByText("v1"));
+    fireEvent.change(picker, { target: { value: "__end" } });
+    assert.ok(await screen.findByRole("region", { name: "工作流最终结果" }));
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("delete confirmation supports cancellation, displays busy rejection and retries without a request body", async () => {
+  const originalFetch = globalThis.fetch, requests: RequestInit[] = [];
+  let fail = true, deleted = 0;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "/api/workflows/delete-me");
+    requests.push(options!);
+    return fail ? Response.json({ message: "工作流有排队或执行中的运行" }, { status: 409 }) : Response.json({ id: "delete-me", deleted: true });
+  };
+  try {
+    render(createElement(DeleteWorkflowButton, { id: "delete-me", name: "待删除流程", onDeleted: () => { deleted++; } }));
+    fireEvent.click(screen.getByRole("button", { name: "删除工作流 待删除流程" }));
+    assert.ok(screen.getByRole("dialog"));
+    assert.ok(screen.getByText(/全部历史版本、关联草稿/));
+    assert.equal(requests.length, 0);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    assert.equal(screen.queryByRole("dialog"), null);
+    assert.equal(requests.length, 0);
+    fireEvent.click(screen.getByRole("button", { name: "删除工作流 待删除流程" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    assert.ok(await screen.findByRole("alert"));
+    assert.equal(deleted, 0);
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => assert.equal(deleted, 1));
+    assert.equal(screen.queryByRole("dialog"), null);
+    assert.equal(requests.length, 2);
+    for (const request of requests) {
+      assert.equal(request.method, "DELETE");
+      assert.equal(request.body, undefined);
+      assert.equal(new Headers(request.headers).has("Content-Type"), false);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("workflow list deletion refreshes workflow and draft lists without placing a button inside a link", async () => {
+  const originalFetch = globalThis.fetch;
+  let removed = false;
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === "DELETE") { removed = true; return Response.json({ deleted: true }); }
+    if (String(url) === "/api/workflows") return Response.json({ items: removed ? [] : [{ id: "listed-workflow", name: "列表流程", createdAt: 1, updatedAt: 1 }] });
+    return Response.json({ items: removed ? [] : [{ id: "listed-draft", name: "列表草稿", status: "draft", updatedAt: 1 }] });
+  };
+  try {
+    render(createElement(WorkflowsPage));
+    const remove = await screen.findByRole("button", { name: "删除工作流 列表流程" });
+    assert.equal(remove.closest("a"), null);
+    assert.ok(await screen.findByRole("button", { name: "删除草稿 列表草稿" }));
+    fireEvent.click(remove);
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    assert.ok(await screen.findByText("还没有已发布的工作流"));
+    await waitFor(() => assert.equal(screen.queryByRole("button", { name: "删除草稿 列表草稿" }), null));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("compact graph layout centers branches and puts its small end marker below saved positions", () => {
+  const workflow = JSON.parse(exampleFiles("compact")["workflow.json"]!);
+  workflow.nodes = workflow.nodes.slice(0, 3);
+  workflow.edges = [{ id: "left", from: "a", to: "b" }, { id: "right", from: "a", to: "route" }];
+  workflow.entryNodeId = "a";
+  const projected = projectGraph(workflow);
+  assert.deepEqual(projected.nodes.find(node => node.id === "a")!.position, { x: 0, y: 0 });
+  assert.deepEqual(projected.nodes.find(node => node.id === "b")!.position, { x: -112, y: 128 });
+  assert.deepEqual(projected.nodes.find(node => node.id === "route")!.position, { x: 112, y: 128 });
+  const custom = projectGraph(workflow, { b: { x: 500, y: 600 } });
+  assert.deepEqual(custom.nodes.find(node => node.id === "b")!.position, { x: 500, y: 600 });
+  assert.deepEqual(custom.nodes.find(node => node.id === "__end")!.position, { x: 542, y: 728 });
+});
+
+test("source file list distinguishes nested file paths and updates the selected file accessibly", () => {
+  const paths = ["workflow.json", "layout.json", "scripts/main.ts", "scripts/nested/main.ts", "scripts/check.sh"];
+  const selected: string[] = [];
+  const view = render(createElement(SourceFileList, { paths, selected: "workflow.json", onSelect: path => selected.push(path) }));
+  assert.ok(screen.getByRole("navigation", { name: "源码文件列表" }));
+  assert.equal(screen.getByRole("button", { name: "workflow.json" }).getAttribute("aria-current"), "page");
+  fireEvent.click(screen.getByRole("button", { name: "scripts/nested/main.ts" }));
+  assert.deepEqual(selected, ["scripts/nested/main.ts"]);
+  view.rerender(createElement(SourceFileList, { paths, selected: selected[0]!, onSelect: path => selected.push(path) }));
+  assert.equal(screen.getByRole("button", { name: "scripts/nested/main.ts" }).getAttribute("aria-current"), "page");
+  assert.equal(screen.getByRole("button", { name: "scripts/main.ts" }).getAttribute("aria-current"), null);
+  assert.equal(screen.getByRole("button", { name: "workflow.json" }).getAttribute("aria-current"), null);
+  assert.equal(screen.getByRole("button", { name: "scripts/nested/main.ts" }).getAttribute("title"), "scripts/nested/main.ts");
+});
+
+test("workflow output configuration selects a node field and rejects references unavailable on every path", () => {
+  const workflow: Workflow = JSON.parse(exampleFiles("output-config")["workflow.json"]!);
+  const applied: { result: Binding; schema: Workflow["outputSchema"] }[] = [];
+  render(createElement(WorkflowOutputEditor, { workflow, onApply: (result, schema) => applied.push({ result, schema }) }));
+  fireEvent.change(screen.getByLabelText("字段路径（JSON Pointer）"), { target: { value: "/reason" } });
+  fireEvent.change(screen.getByLabelText("最终输出 Schema"), { target: { value: '{"type":"string"}' } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.deepEqual(applied, [{ result: { source: "node", nodeId: "b", pointer: "/reason" }, schema: { type: "string" } }]);
+  fireEvent.change(screen.getByLabelText("输出节点"), { target: { value: "c" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.match(screen.getByRole("alert").textContent!, /并非所有路径必经/);
+  assert.equal(applied.length, 1);
+  fireEvent.change(screen.getByLabelText("输出节点"), { target: { value: "b" } });
+  fireEvent.change(screen.getByLabelText("字段路径（JSON Pointer）"), { target: { value: "summary" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.match(screen.getByRole("alert").textContent!, /JSON Pointer/);
+});
+
+test("workflow output composition combines fields and rejects duplicate names and invalid schemas", () => {
+  const workflow: Workflow = JSON.parse(exampleFiles("output-fields")["workflow.json"]!);
+  const applied: Binding[] = [];
+  render(createElement(WorkflowOutputEditor, { workflow, onApply: result => applied.push(result) }));
+  fireEvent.change(screen.getByLabelText("输出方式"), { target: { value: "object" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加输出字段" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加输出字段" }));
+  fireEvent.change(screen.getAllByLabelText("字段名")[0]!, { target: { value: "summary" } });
+  fireEvent.change(screen.getAllByLabelText("字段名")[1]!, { target: { value: "summary" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.match(screen.getByRole("alert").textContent!, /不能为空或重复/);
+  fireEvent.change(screen.getAllByLabelText("字段名")[1]!, { target: { value: "action" } });
+  fireEvent.change(screen.getAllByLabelText("数据来源")[1]!, { target: { value: "workflow" } });
+  fireEvent.change(screen.getByLabelText("来源节点"), { target: { value: "b" } });
+  fireEvent.change(screen.getAllByLabelText("字段路径")[0]!, { target: { value: "/reason" } });
+  fireEvent.change(screen.getAllByLabelText("字段路径")[1]!, { target: { value: "/action" } });
+  fireEvent.change(screen.getByLabelText("最终输出 Schema"), { target: { value: "[]" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.ok(screen.getByRole("alert"));
+  assert.equal(applied.length, 0);
+  fireEvent.change(screen.getByLabelText("最终输出 Schema"), { target: { value: '{"type":"object"}' } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.deepEqual(applied, [{ source: "object", properties: { summary: { source: "node", nodeId: "b", pointer: "/reason" }, action: { source: "workflow", pointer: "/action" } } }]);
+});
+
+test("advanced output bindings remain intact and published output configuration is read-only", () => {
+  const workflow: Workflow = JSON.parse(exampleFiles("advanced-output")["workflow.json"]!);
+  workflow.result = { source: "array", items: [{ source: "literal", value: false }, { source: "node", nodeId: "b" }] };
+  workflow.outputSchema = true;
+  const applied: Binding[] = [];
+  const view = render(createElement(WorkflowOutputEditor, { workflow, onApply: result => applied.push(result) }));
+  assert.equal((screen.getByLabelText("输出方式") as HTMLSelectElement).value, "advanced");
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.deepEqual(applied, [workflow.result]);
+  fireEvent.change(screen.getByLabelText("最终输出绑定 JSON"), { target: { value: "{" } });
+  fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+  assert.ok(screen.getByRole("alert"));
+  assert.equal(applied.length, 1);
+  view.rerender(createElement(WorkflowOutputEditor, { workflow, disabled: true }));
+  assert.equal((screen.getByLabelText("输出方式") as HTMLSelectElement).disabled, true);
+  assert.equal(screen.queryByRole("button", { name: "应用输出配置" }), null);
+});
+
+test("draft output configuration applies to workflow.json and saves through the existing revision API", async () => {
+  const originalFetch = globalThis.fetch;
+  let state = { id: "output-draft", revision: 0, status: "draft", workflowId: null, publishedVersionId: null, files: exampleFiles("output-draft-flow"), validation: { valid: true, diagnostics: [] }, messages: [], turns: [] };
+  const saved: { files: Record<string, string>; expectedRevision: number }[] = [];
+  globalThis.fetch = async (url, options) => {
+    if (String(url) === "/api/providers") return Response.json({ items: [] });
+    if (options?.method === "PATCH") {
+      const body = JSON.parse(String(options.body)); saved.push(body);
+      state = { ...state, files: body.files, revision: 1 };
+    }
+    return Response.json(state);
+  };
+  try {
+    render(createElement(DraftPage, { id: state.id }));
+    await userEvent.setup({ document: dom.window.document }).click(await screen.findByRole("tab", { name: "最终输出" }));
+    fireEvent.change(screen.getByLabelText("字段路径（JSON Pointer）"), { target: { value: "/reason" } });
+    fireEvent.change(screen.getByLabelText("最终输出 Schema"), { target: { value: '{"type":"string"}' } });
+    fireEvent.click(screen.getByRole("button", { name: "应用输出配置" }));
+    assert.equal((screen.getByRole("button", { name: "保存修改" }) as HTMLButtonElement).disabled, false);
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => assert.equal(saved.length, 1));
+    const definition = JSON.parse(saved[0]!.files["workflow.json"]!);
+    assert.deepEqual(definition.result, { source: "node", nodeId: "b", pointer: "/reason" });
+    assert.deepEqual(definition.outputSchema, { type: "string" });
+    assert.equal(saved[0]!.expectedRevision, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("final results render plain text safely and distinguish JSON, false, zero and null", () => {
+  const text = "<script>alert('test')</script>\n这是一段完整的最终结果。";
+  const view = render(createElement(FinalResult, { runId: "text", status: "succeeded", value: text }));
+  assert.ok(screen.getByRole("region", { name: "工作流最终结果" }));
+  assert.equal(document.querySelector(".final-result-content")!.textContent, text);
+  assert.equal(document.querySelector(".final-result-content script"), null);
+  fireEvent.change(screen.getByLabelText("结果显示格式"), { target: { value: "json" } });
+  assert.equal(document.querySelector(".final-result-content")!.textContent, JSON.stringify(text, null, 2));
+  for (const value of [false, 0, null, { summary: "结果", items: [1, 2] }]) {
+    view.rerender(createElement(FinalResult, { runId: "json", status: "succeeded", value }));
+    assert.equal(document.querySelector(".final-result-content")!.textContent, JSON.stringify(value, null, 2));
+  }
+});
+
+test("final result artifact content loads explicitly, reports errors and becomes available for export", async () => {
+  const originalFetch = globalThis.fetch;
+  let fail = true, calls = 0;
+  globalThis.fetch = async url => {
+    calls++; assert.equal(String(url), "/api/artifacts/result-artifact");
+    return fail ? Response.json({ message: "产物读取失败" }, { status: 500 }) : Response.json({ summary: "完整结果" });
+  };
+  try {
+    render(createElement(FinalResult, { runId: "artifact-run", status: "succeeded", value: { artifact: { id: "result-artifact", sha256: "hash", byteSize: 50000 } } }));
+    assert.equal(calls, 0);
+    assert.equal((screen.getByRole("button", { name: "复制" }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(screen.getByRole("button", { name: "加载完整结果" }));
+    assert.ok(await screen.findByText("产物读取失败"));
+    fail = false;
+    fireEvent.click(screen.getByRole("button", { name: "加载完整结果" }));
+    await waitFor(() => assert.match(document.querySelector(".final-result-content")!.textContent!, /完整结果/));
+    assert.equal((screen.getByRole("button", { name: "复制" }) as HTMLButtonElement).disabled, false);
+    assert.equal(screen.queryByRole("alert"), null);
+    assert.equal(calls, 2);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("final result fullscreen exits cleanly and unfinished runs never display a successful result", async () => {
+  const view = render(createElement(FinalResult, { runId: "fullscreen-result", status: "succeeded", value: "最终正文" }));
+  fireEvent.click(screen.getByRole("button", { name: "全屏查看最终结果" }));
+  assert.ok(screen.getByRole("dialog", { name: "工作流最终结果" }));
+  fireEvent.click(screen.getByRole("button", { name: "退出全屏" }));
+  assert.equal(screen.queryByRole("dialog"), null);
+  view.rerender(createElement(FinalResult, { runId: "pending-result", status: "running", value: undefined }));
+  assert.ok(screen.getByText(/工作流尚未完成/));
+  assert.equal((screen.getByRole("button", { name: "下载" }) as HTMLButtonElement).disabled, true);
+  view.rerender(createElement(FinalResult, { runId: "failed-result", status: "failed", value: undefined }));
+  assert.ok(screen.getByText(/此次运行未成功完成/));
+});
+
+test("final result copies and downloads the displayed text or JSON without altering data", async () => {
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const createURL = URL.createObjectURL, revokeURL = URL.revokeObjectURL, click = dom.window.HTMLAnchorElement.prototype.click;
+  const copied: string[] = [], blobs: Blob[] = [], downloads: string[] = [];
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
+  URL.createObjectURL = object => { blobs.push(object as Blob); return "blob:final-result"; };
+  URL.revokeObjectURL = () => {};
+  dom.window.HTMLAnchorElement.prototype.click = function () { downloads.push(this.download); };
+  try {
+    render(createElement(FinalResult, { runId: "export-run", status: "succeeded", value: "第一行\n第二行" }));
+    fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    assert.ok(await screen.findByRole("button", { name: "已复制" }));
+    assert.deepEqual(copied, ["第一行\n第二行"]);
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+    assert.equal(downloads[0], "workflow-result-export-run.txt");
+    assert.equal(await blobs[0]!.text(), "第一行\n第二行");
+    fireEvent.change(screen.getByLabelText("结果显示格式"), { target: { value: "json" } });
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+    assert.equal(downloads[1], "workflow-result-export-run.json");
+    assert.equal(await blobs[1]!.text(), JSON.stringify("第一行\n第二行"));
+  } finally {
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard); else Reflect.deleteProperty(navigator, "clipboard");
+    URL.createObjectURL = createURL; URL.revokeObjectURL = revokeURL; dom.window.HTMLAnchorElement.prototype.click = click;
+  }
 });
