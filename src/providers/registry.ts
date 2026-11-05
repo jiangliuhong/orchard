@@ -1,28 +1,47 @@
 import { accessSync, constants, readFileSync, mkdtempSync, rmSync, readdirSync, lstatSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { executeProcess } from "../runtime/process.js";
 import { check, AppError, failure } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
-import type { AgentChoice, JsonSchema, Model, ModelVerification, ProviderCapabilities, ProviderSetting, ProviderView, Workflow } from "../domain/types.js";
+import type { AgentChoice, BackendRef, JsonSchema, Model, ModelVerification, ProviderCapabilities, ProviderSetting, ProviderView, Workflow } from "../domain/types.js";
 import type { Store } from "../persistence/store.js";
 import { isModelEnabled, visibleModels } from "../domain/models.js";
 import { readCodexConfig, readCodexModels } from "./codex-config.js";
+import { DEFAULT_AGENT_LIMITS } from "./agent-limits.js";
+import type { NativeAdapter, SessionProvider } from "./session.js";
+import { connectionFingerprint } from "./session.js";
+import type { SessionManager } from "./session-manager.js";
+
+export type { BackendRef };
 
 export interface ProviderEvent { type: string; payload: unknown }
 export interface TurnRequest {
   modelId: string; prompt: string; schema?: JsonSchema; signal: AbortSignal; cwd: string; timeoutMs?: number;
   emit: (event: ProviderEvent) => void;
 }
-export interface ProviderResult { output: unknown; modelId: string; modelSource?: "reported" | "requested"; providerId: string; usage?: unknown }
+export interface ProviderResult {
+  output: unknown; modelId: string; modelSource?: "reported" | "requested"; providerId: string;
+  usage?: unknown; usageScope?: "turn" | "session"; backendTurnId?: string;
+}
 export interface AgentProvider {
   id: string; name: string; capabilities: ProviderCapabilities; configSchema: JsonSchema;
   defaultConfig?: Record<string, unknown>;
   detect(setting: ProviderSetting): Promise<ProviderView["readiness"]>;
   models(setting: ProviderSetting, cwd: string): Promise<{ models: Model[]; warning?: string }>;
   turn(setting: ProviderSetting, request: TurnRequest): Promise<ProviderResult>;
+  /** 可选原生会话能力；按能力分派，业务层不得根据固定 Provider ID 判断会话能力。 */
+  sessionProvider?: SessionProvider;
+  /** 按配置计算实际能力（如 transport 决定原生会话）；未实现时回退静态声明。 */
+  capabilitiesFor?(setting: ProviderSetting): ProviderCapabilities;
 }
-const configSchema: JsonSchema = { type: "object", required: ["executable"], properties: { executable: { type: "string", minLength: 1 } }, additionalProperties: false };
+
+/** 读取规范化层：config 缺少 transport 时按 legacy 读取，不自动切换已有配置（§17.1）。 */
+export function transportOf(config: Record<string, unknown>): "legacy" | "native" {
+  return config.transport === "native" ? "native" : "legacy";
+}
+const configSchema: JsonSchema = { type: "object", required: ["executable"], properties: { executable: { type: "string", minLength: 1 }, transport: { enum: ["legacy", "native"] } }, additionalProperties: false };
 function discoveredExecutable(command: string) {
   const paths = [...(process.env.PATH ?? "").split(":"), join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"];
   try {
@@ -39,7 +58,8 @@ export class ProviderRegistry {
   private readonly adapters = new Map<string, AgentProvider>();
   private readonly states = new Map<string, ProviderView["readiness"]>();
   private readonly verifications = new Map<string, { controller: AbortController; finished: Promise<void> }>();
-  constructor(readonly store: Store) {}
+  /** 可选全局进程调度器：提供时单次 legacy 进程也必须申请同一槽位，禁止绕过限额（§23.1）。 */
+  constructor(readonly store: Store, private readonly scheduler?: SessionManager) {}
   register(provider: AgentProvider, executable = discoveredExecutable(provider.id.replace("-cli", ""))) {
     check(!this.adapters.has(provider.id), "DUPLICATE_PROVIDER", "Provider ID 已注册");
     this.adapters.set(provider.id, provider);
@@ -49,16 +69,23 @@ export class ProviderRegistry {
   adapter(id: string) { const adapter = this.adapters.get(id); check(adapter, "PROVIDER_NOT_FOUND", `Provider 未注册: ${id}`); return adapter; }
   views(): ProviderView[] { return [...this.adapters.values()].map(p => {
     const setting = this.store.provider(p.id)!;
-    return { ...setting, models: visibleModels(setting.models), name: p.name, configSchema: p.configSchema, capabilities: p.capabilities, readiness: this.states.get(p.id) ?? { state: "unknown" } };
+    const capabilities = p.capabilitiesFor?.(setting) ?? p.capabilities;
+    return { ...setting, models: visibleModels(setting.models), name: p.name, configSchema: p.configSchema, capabilities: { ...capabilities, sessions: capabilities.sessions ?? "none" }, readiness: this.states.get(p.id) ?? { state: "unknown" } };
   }); }
   setting(id: string) { this.adapter(id); return this.store.provider(id)!; }
   update(id: string, input: unknown) {
+    const adapter = this.adapter(id);
+    // 输入的 config 允许部分字段（随后与现有配置合并），合并后仍按完整 Schema 校验。
+    const configInputSchema: JsonSchema = adapter.configSchema && typeof adapter.configSchema === "object" && !Array.isArray(adapter.configSchema)
+      ? { type: "object", properties: (adapter.configSchema as { properties?: Record<string, unknown> }).properties ?? {}, additionalProperties: false }
+      : adapter.configSchema;
     assertSchema(input, {
-      type: "object", properties: { enabled: { type: "boolean" }, config: this.adapter(id).configSchema, defaultModel: { type: "string", maxLength: 200 },
+      type: "object", properties: { enabled: { type: "boolean" }, config: configInputSchema, defaultModel: { type: "string", maxLength: 200 },
         models: { type: "array", maxItems: 500, items: { type: "object", required: ["id", "name", "source"], properties: { id: { type: "string", minLength: 1, maxLength: 200 }, name: { type: "string", minLength: 1, maxLength: 200 }, source: { enum: ["configured", "discovered"] }, enabled: { type: "boolean" } }, additionalProperties: false } } }, additionalProperties: false,
     }, "Provider 设置");
     const current = this.setting(id), data = input as Partial<ProviderSetting>;
-    const next = { ...current, ...data, id, revision: current.revision + 1, updatedAt: Date.now() };
+    // 设置保存必须合并现有 config，不能因 UI 只提交 executable 就意外清空 transport（§18.3）。
+    const next = { ...current, ...data, config: { ...current.config, ...(data.config ?? {}) }, id, revision: current.revision + 1, updatedAt: Date.now() };
     if (data.models) {
       check(new Set(data.models.map(model => model.id)).size === data.models.length, "MODEL_CONFLICT", "模型 ID 不能重复");
       const merged = new Map(current.models.map(model => [model.id, model]));
@@ -107,7 +134,7 @@ export class ProviderRegistry {
     const model = setting.models.find(candidate => candidate.id === modelId && !candidate.deleted);
     if (!model) throw new AppError("MODEL_NOT_FOUND", "模型不存在", 404);
     check(!this.verifications.has(id), "MODEL_VERIFICATION_BUSY", "该 Provider 已有模型正在验证，请等待或取消后重试");
-    const timeoutMs = Math.min(options.timeoutMs ?? 60000, 60000);
+    const timeoutMs = Math.min(options.timeoutMs ?? DEFAULT_AGENT_LIMITS.modelVerificationTotalTimeoutMs, DEFAULT_AGENT_LIMITS.modelVerificationTotalTimeoutMs);
     check(Number.isInteger(timeoutMs) && timeoutMs > 0, "INVALID_TIMEOUT", "验证超时时间无效");
     const startedAt = Date.now(), controller = new AbortController();
     const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
@@ -122,7 +149,7 @@ export class ProviderRegistry {
       check(this.setting(id).revision === setting.revision, "SETTINGS_CONFLICT", "配置已改变，请重新验证");
       this.states.set(id, readiness);
       check(readiness.state === "ready", "PROVIDER_UNAVAILABLE", readiness.reason ?? "Provider 未就绪");
-      const response = await adapter.turn(setting, {
+      const response = await this.dispatch(setting, {
         modelId, prompt: "Reply with only OK. Do not use tools or perform any other task.",
         signal, cwd: this.store.root, timeoutMs, emit: () => {},
       });
@@ -211,7 +238,7 @@ export class ProviderRegistry {
     check(this.setting(effective.providerId).enabled, "PROVIDER_DISABLED", "Provider 已禁用");
     check(this.setting(effective.providerId).revision === setting.revision, "SETTINGS_CONFLICT", "Provider 配置已改变，请重试");
     this.states.set(setting.id, state);
-    check(state.state === "ready", "PROVIDER_UNAVAILABLE", state.reason ?? "Provider 未就绪");
+    check(state.state === "ready", "PROVIDER_UNAVAILABLE", state.reason ?? "Provider 未就绪", 503);
     return { ...effective, setting };
   }
   async freeze(workflow: Workflow): Promise<Workflow> {
@@ -225,12 +252,41 @@ export class ProviderRegistry {
   async run(choice: AgentChoice, request: Omit<TurnRequest, "modelId">) {
     const effective = await this.ready(choice);
     request.signal.throwIfAborted();
-    request.emit({ type: "provider.started", payload: { providerId: effective.providerId, requestedModel: effective.modelId, revision: effective.setting.revision, executable: effective.setting.config.executable } });
-    const result = await this.adapter(effective.providerId).turn(effective.setting, { ...request, modelId: effective.modelId });
+    request.emit({ type: "provider.started", payload: { providerId: effective.providerId, requestedModel: effective.modelId, revision: effective.setting.revision, executable: effective.setting.config.executable, transport: transportOf(effective.setting.config) } });
+    const result = await this.dispatch(effective.setting, { ...request, modelId: effective.modelId });
     request.signal.throwIfAborted();
     if (request.schema !== undefined) assertSchema(result.output, request.schema, "Agent 输出");
     request.emit({ type: "provider.completed", payload: result });
     return result;
+  }
+  /**
+   * 按能力分派（§18.2）：legacy 调用原 CliProvider.turn()；native 创建临时专属句柄
+   * （persistent=false，Codex ephemeral thread / Pi --no-session），不论成功失败
+   * 在 finally 中释放句柄并等待进程退出。节点与验证不查找或写入任何草稿会话。
+   */
+  private async dispatch(setting: ProviderSetting, request: TurnRequest): Promise<ProviderResult> {
+    const adapter = this.adapter(setting.id);
+    const sessionProvider = adapter.sessionProvider;
+    if (transportOf(setting.config) !== "native" || !sessionProvider) {
+      // legacy 单次进程同样占用全局槽位（若提供调度器），不绕过限额。
+      if (!this.scheduler) return adapter.turn(setting, request);
+      const slot = await this.scheduler.acquire(null, request.signal, "legacy-turn");
+      try { return await adapter.turn(setting, request); }
+      finally { slot.finish(); }
+    }
+    const directory = mkdtempSync(join(request.cwd, ".agent-"));
+    const handle = await sessionProvider.openSession(setting, {
+      key: `single:${randomUUID()}`, modelId: request.modelId, cwd: directory,
+      persistent: false, signal: request.signal,
+    });
+    try {
+      return await sessionProvider.sendTurn(handle, {
+        ...request, cwd: directory, hostTurnId: randomUUID(),
+        onAccepted: async () => { /* 单次调用无宿主持久化步骤 */ },
+      });
+    } finally {
+      await sessionProvider.releaseSession(handle).finally(() => rmSync(directory, { recursive: true, force: true }));
+    }
   }
 }
 
@@ -238,21 +294,57 @@ export class CliProvider implements AgentProvider {
   readonly name: string;
   readonly configSchema = configSchema;
   readonly capabilities: ProviderCapabilities;
-  constructor(readonly id: "codex-cli" | "pi-cli") {
+  private readonly probeCache = new Map<string, { at: number; readiness: ProviderView["readiness"] }>();
+  constructor(readonly id: "codex-cli" | "pi-cli", private readonly options: { native?: NativeAdapter; probeCacheMs?: number; initializeTimeoutMs?: number; scheduler?: SessionManager } = {}) {
     this.name = id === "codex-cli" ? "Codex CLI" : "Pi CLI";
-    this.capabilities = { modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: false, textStream: id === "pi-cli" };
+    this.capabilities = { modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: false, textStream: id === "pi-cli", sessions: "none" };
   }
+  /** 按配置计算实际能力：transport=native 且适配器可用时为原生持久会话。 */
+  capabilitiesFor(setting: ProviderSetting): ProviderCapabilities {
+    if (transportOf(setting.config) === "native" && this.options.native) return this.options.native.capabilities(setting);
+    return this.capabilities;
+  }
+  get sessionProvider(): SessionProvider | undefined { return this.options.native?.sessionProvider; }
   async detect(setting: ProviderSetting): Promise<ProviderView["readiness"]> {
     try {
       const executable = this.executable(setting);
       accessSync(executable, constants.X_OK);
-      const result = await executeProcess({ executable, args: ["--version"], cwd: tmpdir(), timeoutMs: 10000, maxBytes: 65536 });
+      // --version 检测同样占用调度槽位（若提供调度器），但不占用后续执行槽（串行释放，§23.1）。
+      const versionCheck = async () => executeProcess({ executable, args: ["--version"], cwd: tmpdir(), timeoutMs: 10000, maxBytes: 65536 });
+      const result = this.options.scheduler
+        ? await this.options.scheduler.acquire(null, new AbortController().signal, `${this.id}-version`).then(async slot => {
+          try { return await versionCheck(); } finally { slot.finish(); }
+        })
+        : await versionCheck();
       check(result.exitCode === 0, "PROVIDER_UNAVAILABLE", result.stderr || "版本检测失败");
       const config = this.id === "codex-cli" ? readCodexConfig() : undefined;
-      return { state: "ready", version: result.stdout.trim().slice(0, 200), reason: config
+      const base: ProviderView["readiness"] = { state: "ready", version: result.stdout.trim().slice(0, 200), reason: config
         ? `CLI 可执行；沿用本机 Codex 配置${config.customRoute ? "（自定义网关）" : ""}${config.catalogPath ? "与自定义模型目录" : ""}；模型权限需验证`
         : "CLI 可执行；账号及模型权限在调用时验证" };
+      if (transportOf(setting.config) === "native" && this.options.native) return this.probeNative(setting, base);
+      return base;
     } catch (error) { return { state: "unavailable", reason: error instanceof Error ? error.message : String(error) }; }
+  }
+  /** 原生模式无模型协议探测；按连接指纹缓存，配置变化立即失效（新指纹未命中）。 */
+  private async probeNative(setting: ProviderSetting, base: ProviderView["readiness"]): Promise<ProviderView["readiness"]> {
+    const cacheMs = this.options.probeCacheMs ?? DEFAULT_AGENT_LIMITS.probeCacheMs;
+    const fingerprint = connectionFingerprint(setting);
+    const cached = this.probeCache.get(fingerprint);
+    if (cached && Date.now() - cached.at < cacheMs) return cached.readiness;
+    let readiness: ProviderView["readiness"];
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new AppError("TIMEOUT", "原生模式探测超时")), this.options.initializeTimeoutMs ?? DEFAULT_AGENT_LIMITS.initializeTimeoutMs);
+      timer.unref();
+      try { await this.options.native!.probe(setting, controller.signal); } finally { clearTimeout(timer); }
+      // 能力与 readiness 不可混淆：探测通过仅表示协议可用，不等于账号或模型可用性。
+      readiness = { ...base, transport: "native" };
+    } catch (error) {
+      const detail = error instanceof AppError ? error : new AppError("PROTOCOL_UNSUPPORTED", error instanceof Error ? error.message : String(error), 503);
+      readiness = { state: "unavailable", transport: "native", errorCode: detail.code, version: base.version, reason: `原生模式探测失败：${detail.message}；可在设置中切回兼容模式` };
+    }
+    this.probeCache.set(fingerprint, { at: Date.now(), readiness });
+    return readiness;
   }
   async models(setting: ProviderSetting, cwd: string) {
     try {

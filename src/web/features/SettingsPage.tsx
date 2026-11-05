@@ -18,6 +18,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
   const [executable, setExecutable] = useState(String(provider.config.executable ?? ""));
   const [configText, setConfigText] = useState(JSON.stringify(provider.config, null, 2));
   const [defaultModel, setDefaultModel] = useState(provider.defaultModel);
+  const [transport, setTransport] = useState<"legacy" | "native">(provider.config.transport === "native" ? "native" : "legacy");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -37,7 +38,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
   const save = () => action("save", async () => {
     await patch({
       enabled,
-      config: localCli ? { executable } : JSON.parse(configText),
+      config: localCli ? { ...provider.config, executable, transport } : { ...JSON.parse(configText), transport },
     });
     setNotice("设置已保存");
   });
@@ -93,10 +94,11 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
       {localCli
         ? <div className="field provider-path"><label htmlFor={`${provider.id}-path`}>CLI 可执行文件</label><Input id={`${provider.id}-path`} value={executable} onChange={event => setExecutable(event.target.value)} /></div>
         : <div className="field provider-path"><label htmlFor={`${provider.id}-config`}>连接配置 JSON</label><Textarea id={`${provider.id}-config`} value={configText} onChange={event => setConfigText(event.target.value)} rows={5} /></div>}
+      {localCli && <div className="field provider-path"><label htmlFor={`${provider.id}-transport`}>传输模式</label><Select value={transport} onValueChange={value => setTransport(value as "legacy" | "native")}><SelectTrigger id={`${provider.id}-transport`}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="legacy">兼容单次（legacy）</SelectItem><SelectItem value="native">原生协议（native）</SelectItem></SelectContent></Select><span className="field-hint">native 使用常驻协议连接；创作多轮会话需要当前版本支持。</span></div>}
       {provider.id === "codex-cli" && <p className="field-hint">沿用本机 Codex 用户配置，支持 Magpie 等自定义网关和模型目录。刷新模型后使用模型 ID；显示名称不会作为调用 ID。</p>}
       <p className="field-hint">点击名称旁的模型数量管理模型，在列表行选择已启用的默认模型。</p>
       <div className="provider-config-footer">
-        <div className="provider-capabilities"><span>{provider.capabilities.structuredOutput === "native" ? "原生结构化输出" : "宿主校验输出"}</span><span>{provider.capabilities.textStream ? "文本事件流" : "最终消息"}</span><span>{provider.capabilities.nativeResume ? "原生会话" : "应用历史"}</span></div>
+        <div className="provider-capabilities"><span>{provider.capabilities.structuredOutput === "native" ? "原生结构化输出" : "宿主校验输出"}</span><span>{provider.capabilities.textStream ? "文本事件流" : "最终消息"}</span><span>{provider.config.transport === "native" ? "原生协议" : "兼容单次"}</span></div>
         <div className="actions">
           <Button variant="ghost" size="sm" disabled={!!busy} onClick={() => void action("models", async () => {
             const result = await send<{ warning?: string }>(`/providers/${provider.id}/models/refresh`);

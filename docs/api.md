@@ -13,6 +13,8 @@
 | 验证模型可用性 | `POST /providers/:id/models/:modelId/verify` |
 | 草稿列表 / 创建 | `GET /drafts` / `POST /drafts` |
 | 草稿快照 / 保存文件 | `GET /drafts/:id` / `PATCH /drafts/:id` |
+| 对话列表 / 创建重置 | `GET /drafts/:id/conversations` / `POST /drafts/:id/conversations` |
+| 对话消息 | `GET /drafts/:id/messages?conversationId=...` |
 | 删除草稿 | `DELETE /drafts/:id` |
 | 发起创作 | `POST /drafts/:id/turns` |
 | 取消创作 | `POST /drafts/:id/turns/:turnId/cancel` |
@@ -37,7 +39,7 @@
 }
 ```
 
-创建草稿时省略 workflowId 即创建新工作流候选。轮次请求包含 requestId、expectedRevision、providerId、modelId、prompt。手动保存文件包含 expectedRevision 和完整 files 字典。发布包含 requestId 和 expectedRevision。草稿测试包含 requestId、expectedRevision 和 input；测试前校验草稿修订，冻结定义、模型配置、布局与编译脚本为不可变快照，不创建 workflow_versions 记录，也不改变草稿状态或当前发布版本。运行包含 requestId、input、可选 versionId，省略版本时选当前发布版本。
+创建草稿时省略 workflowId 即创建新工作流候选。轮次请求包含 requestId、expectedRevision、providerId、modelId、prompt，可选 `conversationId` 与 `mode`（single/multi）；缺省时使用当前对话，配置/模型快照变化会原子轮换。创建/重置对话请求包含 providerId、modelId、expectedRevision、requestId，可选 mode 与 rebuildFromId；操作不调用模型、不提高草稿 revision。手动保存文件包含 expectedRevision 和完整 files 字典。发布包含 requestId 和 expectedRevision。草稿测试包含 requestId、expectedRevision 和 input；测试前校验草稿修订，冻结定义、模型配置、布局与编译脚本为不可变快照，不创建 workflow_versions 记录，也不改变草稿状态或当前发布版本。运行包含 requestId、input、可选 versionId，省略版本时选当前发布版本。
 
 同 scope/requestId 和相同内容返回原结果，同键不同内容拒绝。自动重试请求应复用标识；用户发起新的运行使用新标识。
 

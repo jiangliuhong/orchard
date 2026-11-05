@@ -11,6 +11,10 @@ import { AppError, check } from "../domain/errors.js";
 import type { SourceFiles, StreamEvent } from "../domain/types.js";
 import { digest, json } from "../persistence/files.js";
 import { SCHEMA_VERSION } from "../persistence/schema.js";
+import { SessionManager } from "../providers/session-manager.js";
+import { agentLimits } from "../providers/agent-limits.js";
+import { codexNativeAdapter } from "../providers/codex-app-server.js";
+import { piNativeAdapter } from "../providers/pi-rpc.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -23,8 +27,12 @@ function cursor(value: unknown) {
   check(typeof value === "string" && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)), "INVALID_CURSOR", "游标必须为非负整数");
   return Number(value);
 }
-export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
-  const providers = suppliedProviders ?? new ProviderRegistry(store).register(new CliProvider("codex-cli")).register(new CliProvider("pi-cli"));
+export function createApp(store: Store, suppliedProviders?: ProviderRegistry, sessionManager?: SessionManager) {
+  // 常驻会话连接管理器：全局进程配额、空闲回收与连接代次（§23.1）。
+  const manager = sessionManager ?? new SessionManager(agentLimits());
+  const providers = suppliedProviders ?? new ProviderRegistry(store, manager)
+    .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
+    .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
   const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers);
   const app = Fastify({ bodyLimit: 6 * 1024 * 1024, logger: false });
   const connections = new Set<() => void>();
@@ -47,7 +55,14 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
   });
   app.setErrorHandler((error, _request, reply) => {
     const known = error instanceof AppError;
-    const status = known ? /CONFLICT|BUSY|IDENTITY_CHANGED/.test(error.code) ? 409 : error.code === "NOT_FOUND" ? 404 : error.statusCode : (error as { statusCode?: number }).statusCode ?? 500;
+    // §22.3：除 NOT_FOUND 外优先使用 AppError.statusCode；新增代码显式设置正确状态码，
+    // 旧代码缺少显式状态码时沿用字符串匹配兼容。
+    const status = known
+      ? error.code === "NOT_FOUND" ? 404
+        : error.statusCode !== 400 ? error.statusCode
+          : /CONFLICT|BUSY|IDENTITY_CHANGED/.test(error.code) ? 409
+            : error.statusCode
+      : (error as { statusCode?: number }).statusCode ?? 500;
     reply.code(status).send({ code: known ? error.code : "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) });
   });
   app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount }));
@@ -77,13 +92,24 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
     return authoring.create(input.workflowId, input.requestId);
   });
   app.get<{ Params: { id: string } }>("/api/drafts/:id", async request => authoring.snapshot(request.params.id));
+  app.get<{ Params: { id: string } }>("/api/drafts/:id/conversations", async request => authoring.conversations.list(request.params.id));
+  app.post<{ Params: { id: string } }>("/api/drafts/:id/conversations", async request => {
+    const input = body<{ providerId: string; modelId: string; mode?: "single" | "multi"; expectedRevision: number; requestId: string; rebuildFromId?: string | null }>(request.body,
+      { providerId: { type: "string", minLength: 1 }, modelId: { type: "string", minLength: 1 }, mode: { enum: ["single", "multi"] }, expectedRevision, requestId, rebuildFromId: { type: ["string", "null"] } },
+      ["providerId", "modelId", "expectedRevision", "requestId"]);
+    const result = await authoring.conversations.create(request.params.id, input); return result;
+  });
+  app.get<{ Params: { id: string }; Querystring: { conversationId?: string } }>("/api/drafts/:id/messages", async request => {
+    authoring.store.draft(request.params.id);
+    return { items: authoring.store.messages(request.params.id, request.query.conversationId) };
+  });
   app.delete<{ Params: { id: string } }>("/api/drafts/:id", async request => authoring.deleteDraft(request.params.id));
   app.patch<{ Params: { id: string } }>("/api/drafts/:id", async request => {
     const input = body<{ expectedRevision: number; files: SourceFiles }>(request.body, { expectedRevision, files: { type: "object", additionalProperties: { type: "string" } } }, ["expectedRevision", "files"]);
     return authoring.update(request.params.id, input.expectedRevision, input.files);
   });
   app.post<{ Params: { id: string } }>("/api/drafts/:id/turns", async (request, reply) => {
-    const input = body<{ providerId: string; modelId: string; prompt: string; requestId: string; expectedRevision: number }>(request.body, { providerId: { type: "string", minLength: 1 }, modelId: { type: "string", minLength: 1 }, prompt: { type: "string", minLength: 1 }, requestId, expectedRevision }, ["providerId", "modelId", "prompt", "requestId", "expectedRevision"]);
+    const input = body<{ providerId: string; modelId: string; prompt: string; requestId: string; expectedRevision: number; conversationId?: string; mode?: "single" | "multi" }>(request.body, { providerId: { type: "string", minLength: 1 }, modelId: { type: "string", minLength: 1 }, prompt: { type: "string", minLength: 1 }, requestId, expectedRevision, conversationId: { type: "string" }, mode: { enum: ["single", "multi"] } }, ["providerId", "modelId", "prompt", "requestId", "expectedRevision"]);
     const result = await authoring.start(request.params.id, input); reply.code(202); return result;
   });
   app.post<{ Params: { id: string; turnId: string } }>("/api/drafts/:id/turns/:turnId/cancel", async request => authoring.cancel(request.params.id, request.params.turnId));
@@ -169,6 +195,8 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry) {
     app.setNotFoundHandler((request, reply) => request.url.startsWith("/api/") ? reply.code(404).send({ code: "NOT_FOUND", message: "接口不存在" }) : reply.sendFile("index.html"));
   }
   app.addHook("preClose", async () => { for (const close of connections) close(); await providers.closeVerifications(); });
-  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); store.close(); });
+  // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
+  // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
+  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); await manager.close().catch(() => {}); store.close(); });
   return { app, store, providers, authoring, runner };
 }

@@ -51,6 +51,8 @@ export interface ProviderCapabilities {
   tools: boolean;
   nativeResume: boolean;
   textStream: boolean;
+  /** 会话能力；旧 Provider 可缺省，由 registry 规范化为 "none"。 */
+  sessions?: "none" | "memory" | "persistent";
 }
 export interface Model { id: string; name: string; source: "configured" | "discovered"; enabled?: boolean; deleted?: boolean }
 export interface ModelVerification {
@@ -70,7 +72,34 @@ export interface ProviderSetting {
 }
 export interface ProviderView extends ProviderSetting {
   name: string; capabilities: ProviderCapabilities; configSchema: JsonSchema;
-  readiness: { state: "ready" | "unavailable" | "unknown"; reason?: string; version?: string };
+  readiness: { state: "ready" | "unavailable" | "unknown"; reason?: string; version?: string; transport?: "legacy" | "native"; errorCode?: string };
+}
+// ---- Agent 对话契约（设计文档 §18.1）；持久化实施待数据库审核 ----
+export type ConversationMode = "single" | "multi";
+export type ContextMode = "isolated" | "native" | "reconstructed";
+export type ConversationStatus = "current" | "archived" | "needs_rebuild";
+export type ConnectionState = "absent" | "starting" | "ready" | "stopping" | "broken";
+export type AuthoringTurnStatus =
+  | "queued" | "running" | "cancel_requested"
+  | "succeeded" | "failed" | "cancelled" | "interrupted";
+export type SubmissionState = "not_sent" | "sending" | "accepted" | "settled";
+export interface ConversationView {
+  id: string;
+  draftId: string;
+  mode: ConversationMode;
+  contextMode: ContextMode;
+  status: ConversationStatus;
+  providerId: string;
+  providerRevision: number;
+  modelId: string;
+  transport: "native" | "legacy";
+  cliVersion: string | null;
+  syncedRevision: number | null;
+  rebuildFromId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+  connectionState: ConnectionState;
 }
 export interface Version {
   id: string; workflowId: string; number: number; definition: Workflow; layout: Layout;
@@ -95,5 +124,13 @@ export interface NodeRun {
 export interface Turn {
   id: string; draftId: string; providerId: string; modelId: string; providerRevision: number;
   status: string; baseRevision: number; error?: Failure; createdAt: number; endedAt: number | null;
+  conversationId?: string | null;
+  backendTurnId?: string | null;
+  connectionGeneration?: number | null;
+  submissionState?: SubmissionState;
 }
-export interface Message { id: string; draftId: string; turnId: string | null; sequence: number; role: string; content: unknown; createdAt: number }
+export interface Message { id: string; draftId: string; turnId: string | null; sequence: number; role: string; content: unknown; createdAt: number; conversationId?: string | null }
+// 后端引用为内部类型，不直接包含在公开 DTO（§18.1）。
+export type BackendRef =
+  | { version: 1; kind: "codex"; threadId: string; cwd: string }
+  | { version: 1; kind: "pi"; sessionId: string; sessionFile: string; cwd: string };

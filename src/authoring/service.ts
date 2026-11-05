@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { Store } from "../persistence/store.js";
 import { checkFiles, compileScripts, json, readDefinition, readLayout, safeFile, validateFiles } from "../persistence/files.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import { check, failure } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import type { SourceFiles, Workflow, AgentChoice } from "../domain/types.js";
-import { isModelEnabled } from "../domain/models.js";
+import { transportOf } from "../providers/registry.js";
+import { ConversationService } from "./conversations.js";
+import { ACTIVE_TURN_STATUSES } from "../domain/turns.js";
+import { buildAuthoringContext, composeAuthoringPrompt, type ContextHistoryMessage } from "./context.js";
 
 export const AUTHORING_SCHEMA = {
   type: "object", required: ["summary", "changes"], properties: {
@@ -13,6 +17,33 @@ export const AUTHORING_SCHEMA = {
     changes: { type: "array", maxItems: 100, items: { type: "object", required: ["operation", "path"], properties: { operation: { enum: ["create", "update", "delete"] }, path: { type: "string" }, content: { type: "string" } }, additionalProperties: false } },
   }, additionalProperties: false,
 };
+
+/** AUTHORING_SCHEMA 的 changes 项形状。 */
+export interface AuthoringChange { operation: string; path: string; content?: string }
+
+/**
+ * 纯准备阶段（设计 §19.3）：把后端文件变更应用到草稿副本并做全部静态检查，
+ * 不产生副作用、不写库；保持 generate() 原有语义：
+ * 重复路径、safeFile、create/update/delete 与原文件状态、文件树校验。
+ */
+export function applyAuthoringChanges(before: SourceFiles, changes: AuthoringChange[]): SourceFiles {
+  const files = { ...before }, seen = new Set<string>();
+  for (const change of changes) {
+    safeFile(change.path);
+    check(!seen.has(change.path), "INVALID_CHANGES", "文件操作重复");
+    seen.add(change.path);
+    const exists = Object.hasOwn(files, change.path);
+    check(change.operation === "create" ? !exists : exists, "INVALID_CHANGES", "文件操作与草稿状态不一致");
+    if (change.operation === "delete") delete files[change.path];
+    else {
+      check(typeof change.content === "string", "INVALID_CHANGES", "缺少完整文件内容");
+      files[change.path] = change.content;
+    }
+  }
+  checkFiles(files);
+  return files;
+}
+
 export function initialFiles(id: string): SourceFiles {
   const workflow: Workflow = {
     formatVersion: 1, id, name: "未命名工作流", inputSchema: true, outputSchema: true, entryNodeId: "start",
@@ -23,7 +54,9 @@ export function initialFiles(id: string): SourceFiles {
 }
 export class AuthoringService {
   private readonly jobs = new Map<string, { controller: AbortController; promise: Promise<void> }>();
-  constructor(readonly store: Store, readonly providers: ProviderRegistry) {}
+  private readonly sessionHandles = new Map<string, { providerId: string; handle: import("../providers/session.js").ProviderSessionHandle }>();
+  readonly conversations: ConversationService;
+  constructor(readonly store: Store, readonly providers: ProviderRegistry) { this.conversations = new ConversationService(store, providers); }
   private ensureDeletable(draftIds: string[]) {
     check(![...this.jobs.keys()].some(id => draftIds.includes(this.store.turn(id).draftId)), "WORKFLOW_BUSY", "创作任务尚未结束，请等待取消或生成完成后再删除");
   }
@@ -77,13 +110,13 @@ export class AuthoringService {
     });
   }
   snapshot(id: string) {
-    const draft = this.store.draft(id), tree = this.store.files.readTree(draft.artifactPath);
-    return { ...draft, files: tree.files, messages: this.store.messages(id), turns: this.store.turns(id) };
+    const draft = this.store.draft(id), tree = this.store.files.readTree(draft.artifactPath), conversations = this.conversations.list(id);
+    return { ...draft, files: tree.files, messages: this.store.messages(id), turns: this.store.turns(id), conversations: conversations.items, currentConversation: conversations.currentId };
   }
   private ensureEditable(id: string, revision: number, allowTurn = false) {
     const draft = this.store.draft(id);
     check(draft.revision === revision, "REVISION_CONFLICT", "草稿已更新，请刷新后重试");
-    check(draft.status === "draft" && (allowTurn || !this.store.turns(id).some(t => t.status === "running")), "DRAFT_BUSY", "草稿正在生成或发布，或已经发布");
+    check(draft.status === "draft" && (allowTurn || !this.store.turns(id).some(t => (ACTIVE_TURN_STATUSES as readonly string[]).includes(t.status))), "DRAFT_BUSY", "草稿正在生成或发布，或已经发布");
     return draft;
   }
   private identity(files: SourceFiles) {
@@ -100,37 +133,46 @@ export class AuthoringService {
     });
     return this.snapshot(id);
   }
-  async start(id: string, input: AgentChoice & { prompt: string; expectedRevision: number; requestId: string }) {
+  async start(id: string, input: AgentChoice & { prompt: string; expectedRevision: number; requestId: string; conversationId?: string; mode?: "single" | "multi" }) {
     const prior = this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", `turn:${id}`, input.requestId);
     if (prior) return this.store.command(`turn:${id}`, input.requestId, input, () => { throw new Error("unreachable"); });
     check(input.prompt.trim().length > 0 && Buffer.byteLength(input.prompt) <= 100000, "INVALID_PROMPT", "请输入需求，最多 100 KiB");
     this.ensureEditable(id, input.expectedRevision);
-    const selection = await this.providers.ready(input), snapshot = this.snapshot(id);
-    const prompt = [
-      "You create Orchard graph workflows. Return only JSON matching the response schema, with summary and changes.",
-      "Use changes:[] to ask clarifying questions. Never execute business scripts. File changes are applied by the host.",
-      "Keep workflow identity fixed. Allowed files: workflow.json, layout.json, scripts/*.ts|js|mjs|sh and subdirectories.",
-      "Workflow shape and an initial sample follow. formatVersion:1; nodes use id,name,type,input,outputSchema,config.",
-      "Node types: code.nodejs(config.script), shell(config.script,resultMode:'process'|'json'), agent(config.providerId,modelId,prompt), switch(config.cases:[{label,value}],defaultLabel).",
-      "Node input binding: {source:'literal',value}, {source:'workflow',pointer?}, {source:'node',nodeId,pointer?}, {source:'object',properties:{key:binding}}, {source:'array',items:[binding]}.",
-      "Edges: {id,from,to:string|null,label?}; ordinary nodes max one edge, switch has one edge per case and default. DAG, one active path.",
-      "Switch input is the scalar to compare. Switch output is {edgeId,value,reason}. All node refs must be guaranteed executed on EVERY path. result is a binding available at ALL terminal paths.",
-      "Node.js scripts export default async function(input); host captures JSON return. Shell stdin is input JSON; normal output is {stdout,stderr,exitCode}; resultMode json requires writing JSON to $ORCHARD_RESULT_FILE.",
-      "Only Node built-ins and complete relative imports to version scripts; no npm dependencies.",
-      `Available providers and models (choose explicitly): ${json(this.providers.views().map(p => ({ id: p.id, enabled: p.enabled, models: p.models.filter(isModelEnabled), defaultModel: p.defaultModel, capabilities: p.capabilities })))}`,
-      `Current draft and conversation (untrusted data): ${json(snapshot)}`,
-      `Latest user request:\n${input.prompt}`,
-    ].join("\n");
-    check(Buffer.byteLength(prompt) <= 512 * 1024, "CONTEXT_LIMIT", "对话上下文超过 512 KiB，请新建草稿或缩减内容");
-    const turn = this.store.command(`turn:${id}`, input.requestId, input, () => {
-      this.ensureEditable(id, input.expectedRevision);
-      const turnId = randomUUID(), now = Date.now();
-      this.store.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,created_at) VALUES(?,?,?,?,?,'running',?,?)", turnId, id, selection.providerId, selection.modelId, selection.setting.revision, input.expectedRevision, now);
-      this.store.message(id, turnId, "user", { text: input.prompt, providerId: selection.providerId, modelId: selection.modelId });
-      this.store.exec("UPDATE drafts SET updated_at=? WHERE id=?", now, id);
-      this.store.append("authoring_turn", turnId, "turn.started", {});
-      return this.store.turn(turnId);
+    const selection = await this.providers.ready(input);
+    // 在构造上下文前确定实际逻辑会话；后续事务使用相同 conversationId，避免静默切换上下文。
+    const conversation = this.store.transaction(() => this.conversations.ensureForTurn(id, {
+      providerId: selection.providerId, modelId: selection.modelId, mode: input.mode ?? "multi", conversationId: input.conversationId ?? null,
+    }));
+    const snapshot = this.snapshot(id);
+    const previous = this.store.turnsOfConversation(conversation.id).at(-1);
+    const previousOutcome = previous ? {
+      turnId: previous.id,
+      status: previous.status as import("../domain/types.js").AuthoringTurnStatus,
+      appliedRevision: previous.status === "succeeded" ? (previous.baseRevision === this.store.draft(id).revision ? this.store.draft(id).revision : null) : null,
+      errorCode: previous.error?.code ?? null,
+    } : null;
+    const history: ContextHistoryMessage[] = conversation.contextMode === "reconstructed" ? this.store.messages(id, conversation.id).map(message => ({ sequence: message.sequence, role: message.role, content: message.content })) : [];
+    const context = buildAuthoringContext({
+      kind: conversation.backendRef === null ? "initial" : "continuation", draftId: id, baseRevision: input.expectedRevision,
+      files: snapshot.files, providers: this.providers.views(), previousOutcome,
+      history: conversation.contextMode === "reconstructed" ? history : undefined,
+      historySource: conversation.rebuildFromId ? "explicit_rebuild" : "legacy", userRequest: input.prompt,
     });
+    const prompt = composeAuthoringPrompt(this.providers.views(), context);
+    const turn = this.store.command(`turn:${id}`, input.requestId, input, () => this.store.transaction(() => {
+      this.ensureEditable(id, input.expectedRevision);
+      const conversation = this.conversations.ensureForTurn(id, {
+        providerId: selection.providerId, modelId: selection.modelId, mode: input.mode ?? "multi", conversationId: input.conversationId ?? null,
+      });
+      const turnId = randomUUID(), now = Date.now();
+      this.store.insertTurn({ id: turnId, draftId: id, providerId: selection.providerId, modelId: selection.modelId, providerRevision: selection.setting.revision, baseRevision: input.expectedRevision, conversationId: conversation.id, status: "queued", createdAt: now });
+      this.store.transitionTurn(turnId, ["queued"], { status: "running", connectionGeneration: 0 });
+      this.store.message(id, turnId, "user", { text: input.prompt, providerId: selection.providerId, modelId: selection.modelId }, conversation.id);
+      this.store.exec("UPDATE drafts SET updated_at=? WHERE id=?", now, id);
+      this.store.append("authoring_turn", turnId, "turn.queued", { conversationId: conversation.id, mode: conversation.mode, contextMode: conversation.contextMode });
+      this.store.append("authoring_turn", turnId, "turn.started", { conversationId: conversation.id, connectionGeneration: 0 });
+      return this.store.turn(turnId);
+    }));
     if (this.jobs.has(turn.id)) return turn;
     const controller = new AbortController();
     const promise = this.generate(turn.id, prompt, snapshot.files, controller).finally(() => this.jobs.delete(turn.id));
@@ -139,22 +181,49 @@ export class AuthoringService {
   private async generate(turnId: string, prompt: string, before: SourceFiles, controller: AbortController) {
     const turn = this.store.turn(turnId);
     try {
-      const result = await this.providers.run({ providerId: turn.providerId, modelId: turn.modelId }, {
-        prompt, schema: AUTHORING_SCHEMA, cwd: this.store.root, signal: controller.signal, timeoutMs: 600000,
-        emit: event => { if (this.store.turn(turnId).status === "running" && !controller.signal.aborted) this.store.append("authoring_turn", turnId, event.type, event.payload); },
-      });
-      assertSchema(result.output, AUTHORING_SCHEMA, "创作输出");
-      const response = result.output as { summary: string; changes: { operation: string; path: string; content?: string }[] };
-      const files = { ...before }, seen = new Set<string>();
-      for (const change of response.changes) {
-        safeFile(change.path);
-        check(!seen.has(change.path), "INVALID_CHANGES", "文件操作重复"); seen.add(change.path);
-        const exists = Object.hasOwn(files, change.path);
-        check(change.operation === "create" ? !exists : exists, "INVALID_CHANGES", "文件操作与草稿状态不一致");
-        if (change.operation === "delete") delete files[change.path];
-        else { check(typeof change.content === "string", "INVALID_CHANGES", "缺少完整文件内容"); files[change.path] = change.content; }
+      const emit = (event: { type: string; payload: unknown }) => {
+        const current = this.store.turn(turnId);
+        if ((current.status === "running" || current.status === "cancel_requested") && !controller.signal.aborted) this.store.append("authoring_turn", turnId, event.type, event.payload);
+      };
+      const conversation = turn.conversationId ? this.store.conversation(turn.conversationId) : undefined;
+      const setting = this.providers.setting(turn.providerId);
+      const adapter = this.providers.adapter(turn.providerId);
+      const useNativeConversation = !!conversation && conversation.mode === "multi" && transportOf(setting.config) === "native" && !!adapter.sessionProvider;
+      let result;
+      if (useNativeConversation) {
+        const workspace = this.store.files.path(`agent-workspaces/${conversation!.id}`);
+        mkdirSync(workspace, { recursive: true, mode: 0o700 });
+        const handle = await adapter.sessionProvider!.openSession(setting, {
+          key: conversation!.id, modelId: turn.modelId, cwd: workspace, persistent: true,
+          signal: controller.signal, resumeRef: conversation!.backendRef ?? undefined,
+        });
+        this.sessionHandles.set(conversation!.id, { providerId: turn.providerId, handle });
+        check(handle.ref !== null, "PROTOCOL_STATE_INVALID", "原生会话未返回后端引用");
+        check(this.store.saveBackendRef(conversation!.id, handle.ref, handle.generation), "CONVERSATION_CONFLICT", "会话后端引用保存失败", 409);
+        this.store.transitionTurn(turnId, ["running"], { submissionState: "sending", connectionGeneration: handle.generation });
+        this.store.append("authoring_turn", turnId, "provider.session", { conversationId: conversation!.id, state: conversation!.backendRef ? "resuming" : "creating" });
+        this.store.append("authoring_turn", turnId, "provider.started", { providerId: turn.providerId, requestedModel: turn.modelId, revision: turn.providerRevision, transport: "native" });
+        result = await adapter.sessionProvider!.sendTurn(handle, {
+          modelId: turn.modelId, prompt, schema: AUTHORING_SCHEMA, cwd: workspace, signal: controller.signal, timeoutMs: 600000,
+          hostTurnId: turnId, emit,
+          onAccepted: async backendTurnId => {
+            check(this.store.transitionTurn(turnId, ["running"], { submissionState: "accepted", backendTurnId }), "TURN_INTERRUPTED", "轮次在后端接受前已结束");
+            this.store.append("authoring_turn", turnId, "provider.accepted", { conversationId: conversation!.id, backendTurnId });
+          },
+        });
+        this.store.transitionTurn(turnId, ["running"], { submissionState: "settled" });
+        this.store.append("authoring_turn", turnId, "provider.session", { conversationId: conversation!.id, state: "ready" });
+        this.store.touchConversation(conversation!.id, turn.baseRevision);
+        this.store.append("authoring_turn", turnId, "provider.completed", result);
+      } else {
+        result = await this.providers.run({ providerId: turn.providerId, modelId: turn.modelId }, {
+          prompt, schema: AUTHORING_SCHEMA, cwd: this.store.root, signal: controller.signal, timeoutMs: 600000, emit,
+        });
       }
-      checkFiles(files);
+      assertSchema(result.output, AUTHORING_SCHEMA, "创作输出");
+      const response = result.output as { summary: string; changes: AuthoringChange[] };
+      // 纯准备阶段（§19.3）：应用文件变更并静态检查；后续 validateFiles 诊断不通过仍可保存待修复草稿。
+      const files = applyAuthoringChanges(before, response.changes);
       check(this.identity(files) === this.identity(before), "IDENTITY_CHANGED", "不能修改工作流 ID");
       const validation = await validateFiles(files), tree = this.store.files.saveTree(files);
       this.store.transaction(() => {
@@ -162,27 +231,31 @@ export class AuthoringService {
         check(this.store.turn(turnId).status === "running", "TURN_CANCELLED", "本轮已取消");
         this.ensureEditable(turn.draftId, turn.baseRevision, true);
         if (response.changes.length) this.store.exec("UPDATE drafts SET artifact_path=?,validation_json=?,revision=revision+1,updated_at=? WHERE id=?", tree.path, json(validation), Date.now(), turn.draftId);
-        this.store.message(turn.draftId, turnId, "assistant", { text: response.summary, files: response.changes.map(c => c.path), validation, providerId: result.providerId, modelId: result.modelId });
-        this.store.exec("UPDATE authoring_turns SET status='succeeded',ended_at=? WHERE id=?", Date.now(), turnId);
+        this.store.message(turn.draftId, turnId, "assistant", { text: response.summary, files: response.changes.map(c => c.path), validation, providerId: result.providerId, modelId: result.modelId }, turn.conversationId ?? null);
+        this.store.transitionTurn(turnId, ["running"], { status: "succeeded", submissionState: "settled", end: true });
         this.store.append("authoring_turn", turnId, "turn.succeeded", { summary: response.summary, validation });
       });
     } catch (error) {
-      if (this.store.turn(turnId).status === "running") this.store.transaction(() => {
-        const detail = failure(error);
-        this.store.exec("UPDATE authoring_turns SET status='failed',error_json=?,ended_at=? WHERE id=?", json(detail), Date.now(), turnId);
-        this.store.message(turn.draftId, turnId, "error", detail);
-        this.store.append("authoring_turn", turnId, "turn.failed", detail);
+      if (ACTIVE_TURN_STATUSES.includes(this.store.turn(turnId).status as typeof ACTIVE_TURN_STATUSES[number])) this.store.transaction(() => {
+        const current = this.store.turn(turnId), detail = failure(error);
+        const cancelled = current.status === "cancel_requested" || controller.signal.aborted;
+        const finalDetail = cancelled ? { code: "CANCELLED", message: "已取消生成" } : detail;
+        if (!cancelled && turn.conversationId && ["PROCESS_EXITED_UNEXPECTEDLY", "SESSION_REBUILD_REQUIRED", "TURN_INTERRUPTED", "INTERRUPT_UNCONFIRMED"].includes(detail.code)) {
+          this.store.markConversation(turn.conversationId, "needs_rebuild");
+        }
+        this.store.transitionTurn(turnId, [current.status], { status: cancelled ? "cancelled" : "failed", error: finalDetail, end: true });
+        this.store.message(turn.draftId, turnId, "error", finalDetail, turn.conversationId ?? null);
+        this.store.append("authoring_turn", turnId, cancelled ? "turn.cancelled" : "turn.failed", finalDetail);
       });
     }
   }
   cancel(id: string, turnId: string) {
     const turn = this.store.turn(turnId);
     check(turn.draftId === id, "NOT_FOUND", "此草稿没有该轮次");
-    if (turn.status === "running") {
+    if (turn.status === "queued" || turn.status === "running") {
       this.store.transaction(() => {
-        this.store.exec("UPDATE authoring_turns SET status='cancelled',ended_at=? WHERE id=?", Date.now(), turnId);
-        this.store.message(id, turnId, "error", { code: "CANCELLED", message: "已取消生成" });
-        this.store.append("authoring_turn", turnId, "turn.cancelled", {});
+        this.store.transitionTurn(turnId, [turn.status], { status: turn.status === "queued" ? "cancelled" : "cancel_requested" , end: turn.status === "queued" });
+        this.store.append("authoring_turn", turnId, turn.status === "queued" ? "turn.cancelled" : "turn.cancel_requested", { reason: "user" });
       });
       this.jobs.get(turnId)?.controller.abort();
     }
@@ -227,5 +300,9 @@ export class AuthoringService {
   async close() {
     for (const [id] of this.jobs) this.cancel(this.store.turn(id).draftId, id);
     await Promise.all([...this.jobs.values()].map(job => job.promise));
+    for (const [conversationId, entry] of this.sessionHandles) {
+      try { await this.providers.adapter(entry.providerId).sessionProvider?.releaseSession(entry.handle); } catch { /* 关闭时继续清理其他资源 */ }
+      this.sessionHandles.delete(conversationId);
+    }
   }
 }

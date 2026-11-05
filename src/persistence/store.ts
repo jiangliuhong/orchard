@@ -1,18 +1,44 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { resolve, join } from "node:path";
-import { existsSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
+import { isAbsolute, relative, resolve, join } from "node:path";
+import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { MIGRATE_V1_TO_V2, SCHEMA, SCHEMA_VERSION } from "./schema.js";
+import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, SCHEMA, SCHEMA_VERSION } from "./schema.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
-import type { Draft, Message, NodeRun, ProviderSetting, Run, StreamEvent, Turn, Version, Workflow } from "../domain/types.js";
+import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
+import { ACTIVE_TURN_STATUSES, assertSubmissionState, assertTurnStatus, assertTurnTransition, isActiveTurn } from "../domain/turns.js";
+export { ACTIVE_TURN_STATUSES };
+
+/** 对话持久化记录（§11）：公开视图不含 backendRef，内部决策使用完整记录。 */
+export interface ConversationRecord {
+  id: string;
+  draftId: string;
+  mode: ConversationMode;
+  contextMode: ContextMode;
+  status: ConversationStatus;
+  providerId: string;
+  providerRevision: number;
+  modelId: string;
+  transport: "legacy" | "native";
+  connectionFingerprint: string;
+  cliVersion: string | null;
+  backendRef: BackendRef | null;
+  backendGeneration: number;
+  syncedRevision: number | null;
+  rebuildFromId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+}
 
 type Row = Record<string, unknown>;
 const parsed = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(value) as T : undefined as T;
 export class Store {
   readonly db!: DatabaseSync;
+  /** 自动升级前的完整数据库备份；不含认证或用户配置。 */
+  readonly migrationBackupPath?: string;
   readonly files: FileStore;
   readonly root: string;
   readonly events = new EventEmitter();
@@ -40,12 +66,44 @@ export class Store {
         check(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length === 0, "UNKNOWN_DATABASE", "拒绝初始化未知数据库");
         this.db.exec(`BEGIN; ${SCHEMA} COMMIT;`);
       } else {
-        check([1, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
-        if (version === 1) {
+        // §20.3：接受所有受支持旧版本（1、2），顺序执行增量迁移至当前版本。
+        check([1, 2, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
+        if (version < SCHEMA_VERSION) {
+          // 服务尚未启动且已持有独占数据目录锁。先完成 WAL checkpoint，关闭连接后
+          // 再复制主文件，绝不复制正在写入的 WAL 数据库。备份失败则拒绝迁移。
+          const checkpoint = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()!;
+          check(Number(checkpoint.busy) === 0, "MIGRATION_BACKUP_FAILED", "数据库正被其他连接占用，无法安全备份");
+          this.db.close();
+          const directory = this.files.path("backups");
+          mkdirSync(directory, { recursive: true, mode: 0o700 });
+          const backup = this.files.path(`backups/workbench-v${version}-${randomUUID()}.db`);
+          copyFileSync(databasePath, backup, constants.COPYFILE_EXCL);
+          chmodSync(backup, 0o600);
+          const fd = openSync(backup, "r");
+          try { fsyncSync(fd); } finally { closeSync(fd); }
+          const snapshot = new DatabaseSync(backup, { readOnly: true });
+          try {
+            check(snapshot.prepare("PRAGMA quick_check").get()!.quick_check === "ok"
+              && Number(snapshot.prepare("PRAGMA user_version").get()!.user_version) === version,
+            "MIGRATION_BACKUP_FAILED", "数据库备份完整性校验失败");
+          } finally { snapshot.close(); }
+          this.migrationBackupPath = backup;
+          this.db = new DatabaseSync(databasePath);
           this.db.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;");
           try {
-            this.db.exec(MIGRATE_V1_TO_V2);
+            // 升级期间不丢失旧行；终态恢复在迁移提交后独立执行。
+            const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
+            const counts = tables.map(row => {
+              const name = String(row.name).replaceAll('"', '""');
+              return { name, count: this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n };
+            });
+            if (version === 1) this.db.exec(MIGRATE_V1_TO_V2);
+            this.db.exec(MIGRATE_V2_TO_V3);
             check(this.db.prepare("PRAGMA foreign_key_check").all().length === 0, "MIGRATION_FAILED", "数据库升级外键校验失败");
+            for (const { name, count } of counts) {
+              check(this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n === count,
+                "MIGRATION_FAILED", "数据库升级行数校验失败");
+            }
             this.db.exec("COMMIT;");
           } catch (error) { this.db.exec("ROLLBACK;"); throw error; }
         }
@@ -53,7 +111,7 @@ export class Store {
       this.db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
       rmSync(this.files.path("staging"), { force: true, recursive: true });
       this.recover();
-    } catch (error) { this.db!?.close(); unlinkSync(this.lock); throw error; }
+    } catch (error) { if (this.db?.isOpen) this.db.close(); unlinkSync(this.lock); throw error; }
   }
   close() { this.db.close(); if (existsSync(this.lock)) unlinkSync(this.lock); }
   one<T = Row>(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).get(...params) as T | undefined; }
@@ -149,7 +207,7 @@ export class Store {
     for (const draftId of draftIds) {
       const draft = this.draft(draftId);
       check(draft.status !== "publishing", "WORKFLOW_BUSY", "工作流正在发布，请完成后再删除");
-      check(!this.turns(draftId).some(turn => turn.status === "running"), "WORKFLOW_BUSY", "工作流正在生成，请取消或完成后再删除");
+      check(!this.turns(draftId).some(turn => (ACTIVE_TURN_STATUSES as readonly string[]).includes(turn.status)), "WORKFLOW_BUSY", "工作流正在生成，请取消或完成后再删除");
       for (const run of this.all<{ id: string; status: string }>("SELECT id,status FROM runs WHERE draft_id=?", draftId)) runs.set(run.id, run);
     }
     check(![...runs.values()].some(run => ["queued", "running", "cancel_requested"].includes(run.status)), "WORKFLOW_BUSY", "工作流有排队或执行中的运行，请取消或完成后再删除");
@@ -161,10 +219,13 @@ export class Store {
       this.exec("DELETE FROM runs WHERE id=?", run.id);
     }
     for (const draftId of draftIds) {
-      this.exec("DELETE FROM command_receipts WHERE json_extract(result_json,'$.id') IN (SELECT id FROM authoring_turns WHERE draft_id=?) OR scope IN (?,?,?)", draftId, `turn:${draftId}`, `publish:${draftId}`, `draft-run:${draftId}`);
+      this.exec("DELETE FROM command_receipts WHERE json_extract(result_json,'$.id') IN (SELECT id FROM authoring_turns WHERE draft_id=?) OR scope IN (?,?,?,?)", draftId, `turn:${draftId}`, `publish:${draftId}`, `draft-run:${draftId}`, `conversation:${draftId}`);
       this.exec("DELETE FROM stream_events WHERE stream_type='authoring_turn' AND stream_id IN (SELECT id FROM authoring_turns WHERE draft_id=?)", draftId);
       this.exec("DELETE FROM authoring_messages WHERE draft_id=?", draftId);
       this.exec("DELETE FROM authoring_turns WHERE draft_id=?", draftId);
+      // §20.2 删除顺序：先清理会话自引用，再删会话，最后删草稿。
+      this.exec("UPDATE agent_conversations SET rebuild_from_id=NULL WHERE draft_id=?", draftId);
+      this.exec("DELETE FROM agent_conversations WHERE draft_id=?", draftId);
       this.exec("DELETE FROM command_receipts WHERE json_extract(result_json,'$.id')=?", draftId);
       this.exec("DELETE FROM drafts WHERE id=?", draftId);
     }
@@ -197,15 +258,159 @@ export class Store {
   drafts() { return this.all<{ id: string }>("SELECT id FROM drafts ORDER BY updated_at DESC").map(r => this.draft(r.id)); }
   turn(id: string): Turn {
     const r = this.one("SELECT * FROM authoring_turns WHERE id=?", id); check(r, "NOT_FOUND", "轮次不存在");
-    return { id: String(r.id), draftId: String(r.draft_id), providerId: String(r.provider_id), modelId: String(r.model_id), providerRevision: Number(r.provider_revision), status: String(r.status), baseRevision: Number(r.base_revision), error: parsed(r.error_json), createdAt: Number(r.created_at), endedAt: r.ended_at as number | null };
+    return {
+      id: String(r.id), draftId: String(r.draft_id), providerId: String(r.provider_id), modelId: String(r.model_id), providerRevision: Number(r.provider_revision),
+      status: String(r.status), baseRevision: Number(r.base_revision), error: parsed(r.error_json), createdAt: Number(r.created_at), endedAt: r.ended_at as number | null,
+      conversationId: (r.conversation_id as string | null) ?? null,
+      backendTurnId: (r.backend_turn_id as string | null) ?? null,
+      connectionGeneration: r.connection_generation === null || r.connection_generation === undefined ? null : Number(r.connection_generation),
+      submissionState: (r.submission_state as SubmissionState) ?? "not_sent",
+    };
   }
   turns(draftId: string) { return this.all<{ id: string }>("SELECT id FROM authoring_turns WHERE draft_id=? ORDER BY created_at", draftId).map(r => this.turn(r.id)); }
-  message(draftId: string, turnId: string | null, role: string, content: unknown) {
+  turnsOfConversation(conversationId: string) { return this.all<{ id: string }>("SELECT id FROM authoring_turns WHERE conversation_id=? ORDER BY created_at", conversationId).map(r => this.turn(r.id)); }
+  /** 新轮次必须通过此方法检查草稿、对话归属；迁移保留旧 NULL 关联。 */
+  insertTurn(input: { id: string; draftId: string; providerId: string; modelId: string; providerRevision: number; baseRevision: number; conversationId?: string | null; status?: AuthoringTurnStatus; createdAt?: number }): Turn {
+    const status = input.status ?? "queued", conversationId = input.conversationId ?? null;
+    assertTurnStatus(status);
+    if (conversationId !== null) {
+      const conversation = this.conversation(conversationId);
+      check(conversation?.draftId === input.draftId, "CONVERSATION_CONFLICT", "会话不属于该草稿", 409);
+      check(conversation.providerId === input.providerId && conversation.modelId === input.modelId, "CONVERSATION_CONFLICT", "模型与会话快照不一致", 409);
+    }
+    this.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,conversation_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+      input.id, input.draftId, input.providerId, input.modelId, input.providerRevision, status, input.baseRevision, conversationId, input.createdAt ?? Date.now());
+    return this.turn(input.id);
+  }
+  /** §19.2：合法状态校验 + 带当前状态条件的 UPDATE；终态不可再次修改。 */
+  transitionTurn(id: string, expected: readonly string[], patch: { status?: string; submissionState?: SubmissionState; backendTurnId?: string | null; connectionGeneration?: number; error?: unknown; end?: boolean }): boolean {
+    expected.forEach(assertTurnStatus);
+    if (patch.status !== undefined) assertTurnStatus(patch.status);
+    if (patch.submissionState !== undefined) assertSubmissionState(patch.submissionState);
+    if (patch.connectionGeneration !== undefined) check(Number.isSafeInteger(patch.connectionGeneration) && patch.connectionGeneration >= 0, "INVALID_GENERATION", "连接代次无效");
+    const current = this.turn(id);
+    if (!expected.includes(current.status) || !isActiveTurn(current.status)) return false;
+    assertTurnStatus(current.status);
+    if (patch.status !== undefined && patch.status !== current.status) assertTurnTransition(current.status, patch.status as AuthoringTurnStatus);
+    if (patch.submissionState !== undefined) {
+      const order = ["not_sent", "sending", "accepted", "settled"];
+      check(order.indexOf(patch.submissionState) >= order.indexOf(current.submissionState ?? "not_sent"), "INVALID_SUBMISSION_STATE", "提交状态不能回退");
+    }
+    const assignments: string[] = [];
+    const values: SQLInputValue[] = [];
+    if (patch.status !== undefined) { assignments.push("status=?"); values.push(patch.status); }
+    if (patch.submissionState !== undefined) { assignments.push("submission_state=?"); values.push(patch.submissionState); }
+    if (patch.backendTurnId !== undefined) { assignments.push("backend_turn_id=?"); values.push(patch.backendTurnId); }
+    if (patch.connectionGeneration !== undefined) { assignments.push("connection_generation=?"); values.push(patch.connectionGeneration); }
+    if (patch.error !== undefined) { assignments.push("error_json=?"); values.push(patch.error === null ? null : json(patch.error)); }
+    if (patch.end) { assignments.push("ended_at=?"); values.push(Date.now()); }
+    check(assignments.length > 0, "INVALID_ARGUMENT", "状态更新不能为空");
+    const placeholders = expected.map(() => "?").join(",");
+    const result = this.exec(`UPDATE authoring_turns SET ${assignments.join(",")} WHERE id=? AND status IN (${placeholders})`, ...values, id, ...expected);
+    return Number(result.changes) === 1;
+  }
+  message(draftId: string, turnId: string | null, role: string, content: unknown, conversationId: string | null = null) {
+    // §20.2：跨表同属草稿强制校验；保留旧 null 关联。
+    if (conversationId !== null) {
+      const conversation = this.one("SELECT draft_id FROM agent_conversations WHERE id=?", conversationId);
+      check(conversation && String(conversation.draft_id) === draftId, "CONVERSATION_CONFLICT", "会话不属于该草稿");
+    }
+    if (turnId !== null) {
+      const turn = this.one("SELECT conversation_id FROM authoring_turns WHERE id=? AND draft_id=?", turnId, draftId);
+      check(turn, "NOT_FOUND", "轮次不存在");
+      check((turn.conversation_id as string | null) === conversationId, "CONVERSATION_CONFLICT", "消息会话与轮次会话不一致");
+    }
     const id = randomUUID();
     const sequence = Number(this.one("SELECT coalesce(max(sequence),0)+1 AS n FROM authoring_messages WHERE draft_id=?", draftId)!.n);
-    this.exec("INSERT INTO authoring_messages VALUES(?,?,?,?,?,?,?)", id, draftId, turnId, sequence, role, json(content), Date.now());
+    this.exec("INSERT INTO authoring_messages(id,draft_id,turn_id,sequence,role,content_json,created_at,conversation_id) VALUES(?,?,?,?,?,?,?,?)", id, draftId, turnId, sequence, role, json(content), Date.now(), conversationId);
   }
-  messages(draftId: string): Message[] { return this.all("SELECT * FROM authoring_messages WHERE draft_id=? ORDER BY sequence", draftId).map(r => ({ id: String(r.id), draftId, turnId: r.turn_id as string | null, sequence: Number(r.sequence), role: String(r.role), content: parsed(r.content_json), createdAt: Number(r.created_at) })); }
+  messages(draftId: string, conversationId?: string | null): Message[] {
+    // undefined → 全量（旧客户端语义）；null → 旧版历史；字符串 → 指定会话。
+    const filter = conversationId === undefined ? "" : conversationId === null ? " AND conversation_id IS NULL" : " AND conversation_id=?";
+    const params = conversationId === undefined || conversationId === null ? [draftId] : [draftId, conversationId];
+    return this.all(`SELECT * FROM authoring_messages WHERE draft_id=?${filter} ORDER BY sequence`, ...params as SQLInputValue[]).map(r => ({
+      id: String(r.id), draftId, turnId: r.turn_id as string | null, sequence: Number(r.sequence), role: String(r.role), content: parsed(r.content_json), createdAt: Number(r.created_at),
+      conversationId: (r.conversation_id as string | null) ?? null,
+    }));
+  }
+  conversation(id: string): ConversationRecord | undefined {
+    const r = this.one("SELECT * FROM agent_conversations WHERE id=?", id);
+    return r ? this.mapConversation(r) : undefined;
+  }
+  conversations(draftId: string): ConversationRecord[] {
+    return this.all("SELECT * FROM agent_conversations WHERE draft_id=? ORDER BY created_at,id", draftId).map(r => this.mapConversation(r));
+  }
+  currentConversation(draftId: string): ConversationRecord | undefined {
+    const r = this.one("SELECT * FROM agent_conversations WHERE draft_id=? AND status IN ('current','needs_rebuild') ORDER BY created_at DESC LIMIT 1", draftId);
+    return r ? this.mapConversation(r) : undefined;
+  }
+  private mapConversation(r: Row): ConversationRecord {
+    return {
+      id: String(r.id), draftId: String(r.draft_id), mode: String(r.mode) as ConversationMode, contextMode: String(r.context_mode) as ContextMode,
+      status: String(r.status) as ConversationStatus, providerId: String(r.provider_id), providerRevision: Number(r.provider_revision),
+      modelId: String(r.model_id), transport: String(r.transport) as "legacy" | "native", connectionFingerprint: String(r.connection_fingerprint),
+      cliVersion: (r.cli_version as string | null) ?? null, backendRef: parsed<BackendRef>(r.backend_ref_json) ?? null,
+      backendGeneration: Number(r.backend_generation ?? 0), syncedRevision: r.synced_revision === null || r.synced_revision === undefined ? null : Number(r.synced_revision),
+      rebuildFromId: (r.rebuild_from_id as string | null) ?? null, createdAt: Number(r.created_at), updatedAt: Number(r.updated_at),
+      lastUsedAt: r.last_used_at === null || r.last_used_at === undefined ? null : Number(r.last_used_at),
+    };
+  }
+  /** 插入新对话；不处理归档（由调用方在同一事务内先 archiveCurrentConversations）。 */
+  insertConversation(record: Omit<ConversationRecord, "updatedAt"> & { updatedAt?: number }): void {
+    const now = record.updatedAt ?? Date.now();
+    check(this.one("SELECT id FROM drafts WHERE id=?", record.draftId), "NOT_FOUND", "草稿不存在");
+    if (record.rebuildFromId !== null) check(this.conversation(record.rebuildFromId)?.draftId === record.draftId,
+      "CONVERSATION_CONFLICT", "重建来源不属于该草稿", 409);
+    if (record.backendRef !== null) this.validateBackendRef(record.backendRef);
+    this.exec(
+      "INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,transport,connection_fingerprint,cli_version,backend_ref_json,backend_generation,synced_revision,rebuild_from_id,created_at,updated_at,last_used_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      record.id, record.draftId, record.mode, record.contextMode, record.status, record.providerId, record.providerRevision, record.modelId,
+      record.transport, record.connectionFingerprint, record.cliVersion, record.backendRef === null ? null : json(record.backendRef),
+      record.backendGeneration, record.syncedRevision, record.rebuildFromId, record.createdAt, now, record.lastUsedAt,
+    );
+  }
+  /** 将草稿当前（current/needs_rebuild）对话归档；返回受影响行数。 */
+  archiveCurrentConversations(draftId: string): number {
+    return Number(this.exec("UPDATE agent_conversations SET status='archived',updated_at=? WHERE draft_id=? AND status IN ('current','needs_rebuild')", Date.now(), draftId).changes);
+  }
+  markConversation(id: string, status: "needs_rebuild" | "archived"): boolean {
+    return Number(this.exec(`UPDATE agent_conversations SET status=?,updated_at=? WHERE id=? AND status IN (${status === "needs_rebuild" ? "'current'" : "'current','needs_rebuild'"})`, status, Date.now(), id).changes) === 1;
+  }
+  /** 显式列举公开字段，后端 ID / 文件路径 / 连接指纹不出现在 API DTO。 */
+  conversationView(id: string, connectionState: ConversationView["connectionState"] = "absent"): ConversationView {
+    const row = this.conversation(id);
+    check(row, "NOT_FOUND", "会话不存在", 404);
+    const { draftId, mode, contextMode, status, providerId, providerRevision, modelId, transport, cliVersion,
+      syncedRevision, rebuildFromId, createdAt, updatedAt, lastUsedAt } = row;
+    return { id, draftId, mode, contextMode, status, providerId, providerRevision, modelId, transport, cliVersion,
+      syncedRevision, rebuildFromId, createdAt, updatedAt, lastUsedAt, connectionState };
+  }
+  private validateBackendRef(ref: BackendRef): void {
+    check(ref.version === 1 && (ref.kind === "codex" || ref.kind === "pi"), "INVALID_BACKEND_REF", "后端引用类型或版本无效");
+    check(typeof ref.cwd === "string" && isAbsolute(ref.cwd) && !ref.cwd.includes("\0"), "INVALID_BACKEND_REF", "后端工作目录无效");
+    const id = ref.kind === "codex" ? ref.threadId : ref.sessionId;
+    check(typeof id === "string" && id.length > 0 && !id.includes("\0"), "INVALID_BACKEND_REF", "后端会话标识无效");
+    if (ref.kind === "pi") {
+      check(typeof ref.sessionFile === "string" && isAbsolute(ref.sessionFile) && !ref.sessionFile.includes("\0"), "INVALID_BACKEND_REF", "Pi 会话文件引用无效");
+      // 允许首轮前的预分配（不存在）文件；检查所有已存在祖先，拒绝 symlink。
+      const path = relative(this.root, ref.sessionFile);
+      check(path.startsWith("agent-sessions/pi/"), "INVALID_BACKEND_REF", "Pi 会话文件超出宿主管理目录");
+      this.files.path(path);
+    }
+  }
+  /** 获得后尽快持久化；拒绝旧代次覆盖新引用或修改已归档/需重建的会话。 */
+  saveBackendRef(id: string, ref: BackendRef | null, generation: number): boolean {
+    check(Number.isSafeInteger(generation) && generation >= 0, "INVALID_GENERATION", "连接代次无效");
+    if (ref !== null) this.validateBackendRef(ref);
+    return Number(this.exec("UPDATE agent_conversations SET backend_ref_json=?,backend_generation=?,updated_at=? WHERE id=? AND status='current' AND backend_generation<=?",
+      ref === null ? null : json(ref), generation, Date.now(), id, generation).changes) === 1;
+  }
+  touchConversation(id: string, syncedRevision?: number): void {
+    const now = Date.now();
+    check(syncedRevision === undefined || Number.isSafeInteger(syncedRevision) && syncedRevision >= 0, "INVALID_REVISION", "同步修订号无效");
+    this.exec("UPDATE agent_conversations SET last_used_at=?,updated_at=?" + (syncedRevision === undefined ? "" : ",synced_revision=?") + " WHERE id=?",
+      ...(syncedRevision === undefined ? [now, now, id] : [now, now, syncedRevision, id]));
+  }
   run(id: string): Run {
     const r = this.one("SELECT * FROM runs WHERE id=?", id); check(r, "NOT_FOUND", "运行不存在");
     return { id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
@@ -230,10 +435,16 @@ export class Store {
         this.exec("UPDATE node_runs SET status='skipped',skip_reason='run_terminated',ended_at=? WHERE run_id=? AND status='pending'", Date.now(), r.id);
         this.append("run", r.id, "run.interrupted", parsed(error));
       }
-      for (const r of this.all<{ id: string; draft_id: string }>("SELECT id,draft_id FROM authoring_turns WHERE status='running'")) {
-        this.exec("UPDATE authoring_turns SET status='interrupted',ended_at=? WHERE id=?", Date.now(), r.id);
-        this.message(r.draft_id, r.id, "error", { code: "TURN_INTERRUPTED", message: "服务重启中断了生成，已保留草稿。" });
-        this.append("authoring_turn", r.id, "turn.interrupted", {});
+      // §19.4 保守恢复：所有未结束轮次变为 interrupted，绝不重发；
+      // sending/accepted 且无 settled 边界的会话标 needs_rebuild（not_sent 的会话可继续）。
+      for (const r of this.all<{ id: string; draft_id: string; submission_state: string; conversation_id: string | null }>("SELECT id,draft_id,submission_state,conversation_id FROM authoring_turns WHERE status IN ('queued','running','cancel_requested')")) {
+        const error = { code: "TURN_INTERRUPTED", message: "服务重启中断了生成，已保留草稿，不会自动重新调用模型。" };
+        if (!this.transitionTurn(r.id, ACTIVE_TURN_STATUSES, { status: "interrupted", error, end: true })) continue;
+        this.message(r.draft_id, r.id, "error", error, r.conversation_id);
+        this.append("authoring_turn", r.id, "turn.interrupted", { ...error, conversationId: r.conversation_id });
+        if (r.conversation_id !== null && (r.submission_state === "sending" || r.submission_state === "accepted")) {
+          this.exec("UPDATE agent_conversations SET status='needs_rebuild',updated_at=? WHERE id=? AND status='current'", Date.now(), r.conversation_id);
+        }
       }
     });
   }
