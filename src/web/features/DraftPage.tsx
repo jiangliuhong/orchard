@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, GitBranch, MessageSquare, Save, Send, Square, Sparkles } from "lucide-react";
+import { Check, GitBranch, MessageSquare, RefreshCw, Save, Send, Square, Sparkles } from "lucide-react";
 import type { AgentChoice, ConversationView, Draft, Layout, Message, ProviderView, SourceFiles, Turn, Version, Workflow } from "../../domain/types.js";
 import { api, pretty, requestId, send, useResource, useStream } from "../lib/api";
 import { Button } from "../components/ui/button";
@@ -21,21 +21,21 @@ export function DraftPage({ id }: { id: string }) {
   const [files, setFiles] = useState<SourceFiles>({}), [dirty, setDirty] = useState(false), [selected, setSelected] = useState(""), [filePath, setFilePath] = useState("workflow.json");
   const [prompt, setPrompt] = useState(""), [choice, setChoice] = useState<AgentChoice>(() => { try { return JSON.parse(localStorage.getItem("orchard-workbench-agent") ?? "{}"); } catch { return {}; } });
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [delta, setDelta] = useState(""), [mobileTab, setMobileTab] = useState("chat");
-  const [detailTab, setDetailTab] = useState("config");
+  const [detailTab, setDetailTab] = useState("config"), [previewKey, setPreviewKey] = useState(0);
   const bottom = useRef<HTMLDivElement>(null), draft = resource.data, activeTurn = draft?.turns.find(t => ["queued", "running", "cancel_requested"].includes(t.status));
   const callbackTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => { if (draft) { setFiles(draft.files); setDirty(false); } }, [draft?.revision, draft?.status, draft?.id]);
+  useEffect(() => { if (draft) { setFiles(draft.files); setDirty(false); setPreviewKey(key => key + 1); } }, [draft?.revision, draft?.status, draft?.id]);
   useEffect(() => () => clearTimeout(callbackTimer.current), []);
   useEffect(() => { bottom.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }); }, [draft?.messages.length, delta]);
   useStream("turns", activeTurn?.id, event => {
     if (event.type === "provider.text") setDelta(text => (text + (event.payload as { text: string }).text).slice(-4000));
-    if (/turn\.(succeeded|failed|cancelled|interrupted)/.test(event.type)) { setDelta(""); resource.reload(); }
+    if (/turn\.(succeeded|failed|cancelled|interrupted)/.test(event.type)) { setDelta(""); resource.reload(); setPreviewKey(key => key + 1); }
   });
   // A short poll also handles a turn finishing before its subscription is established.
   useEffect(() => { if (!activeTurn) return; const timer = setInterval(resource.reload, 1500); return () => clearInterval(timer); }, [activeTurn?.id]);
   let graph: Workflow | undefined, layout: Layout = {};
   try { const candidate: unknown = JSON.parse(files["workflow.json"] ?? "null"); if (renderableWorkflow(candidate)) graph = candidate; layout = JSON.parse(files["layout.json"] ?? "{}"); } catch { /* The editor can temporarily contain invalid JSON. */ }
-  const node = graph?.nodes?.find(n => n.id === selected) ?? graph?.nodes?.[0], providers = providerResource.data?.items ?? [];
+  const node = selected && selected !== "__end" ? graph?.nodes?.find(n => n.id === selected) : undefined, providers = providerResource.data?.items ?? [];
   const selectedProvider = providers.find(provider => provider.id === choice.providerId);
   const modelAvailable = selectedProvider?.enabled && selectedProvider.models.some(model => model.id === choice.modelId && isModelEnabled(model));
   const currentConversation = draft?.conversations?.find(conversation => conversation.id === draft.currentConversation);
@@ -47,13 +47,12 @@ export function DraftPage({ id }: { id: string }) {
   };
   const selectNode = (nodeId: string) => {
     setSelected(nodeId);
-    if (nodeId === "__end") { setDetailTab("output"); setMobileTab("details"); }
-    else if (detailTab === "output") setDetailTab("config");
+    setDetailTab(nodeId === "__end" ? "config" : "node");
+    setMobileTab("details");
   };
   const selectDetailTab = (tab: string) => {
     setDetailTab(tab);
-    if (tab === "output") setSelected("__end");
-    else if (selected === "__end") setSelected(graph?.entryNodeId ?? "");
+    if (tab === "config") setSelected("");
   };
   const act = async (name: string, action: () => Promise<void>) => { setBusy(name); setError(""); try { await action(); } catch (e) { setError((e as Error).message); } finally { setBusy(""); resource.reload(); } };
   const save = () => act("save", async () => { await api(`/drafts/${id}`, { method: "PATCH", body: JSON.stringify({ expectedRevision: draft!.revision, files }) }); resource.reload(); });
@@ -79,13 +78,21 @@ export function DraftPage({ id }: { id: string }) {
         {draft.messages.map(message => <article className={`message message-${message.role}`} key={message.id}><span className="message-role">{message.role === "user" ? "你" : message.role === "error" ? "执行诊断" : "Agent"}</span><p>{typeof message.content === "object" && message.content ? String((message.content as { text?: string; message?: string }).text ?? (message.content as { message?: string }).message ?? "") : String(message.content)}</p>{message.content && typeof message.content === "object" && "files" in message.content ? <div className="changed-files">{(message.content as { files: string[] }).files.map(name => <button key={name} onClick={() => { setFilePath(name); setDetailTab("source"); setMobileTab("details"); }}>{name}</button>)}</div> : null}</article>)}
         {activeTurn && <article className="message message-assistant"><span className="message-role">Agent · 生成中</span><p>{delta || "正在分析流程与上下文…"}</p></article>}<div ref={bottom} />
       </div><div className="chat-compose"><ProviderPicker providers={providers} value={choice} onChange={choose} disabled={locked || !!busy} /><label className="sr-only" htmlFor="workflow-prompt">描述工作流需求</label><Textarea id="workflow-prompt" value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="描述需求，或继续修改流程…" disabled={locked || !!busy} rows={3} /><div className="compose-footer"><span>{dirty ? "先保存修改，再继续对话" : "工作流仅在手动运行时执行"}</span>{activeTurn ? <Button variant="outline" onClick={() => void act("cancel", async () => { await send(`/drafts/${id}/turns/${activeTurn.id}/cancel`); resource.reload(); })}><Square size={13} />{activeTurn.status === "cancel_requested" ? "正在停止…" : "取消生成"}</Button> : <Button disabled={!canSend} onClick={() => void generate()}><Send size={14} />发送</Button>}</div></div></section>
-      <section className="canvas-panel"><div className="panel-bar"><span><GitBranch size={15} />流程预览</span><span>{graph?.nodes?.length ?? 0} 个节点</span></div>{graph?.nodes && Array.isArray(graph.edges) ? <FlowCanvas workflow={graph} layout={layout} onSelect={selectNode} /> : <div className="empty">流程定义暂时无法展示，请修复 JSON。</div>}</section>
-      <aside className="node-panel"><div className="panel-bar">{graph && node ? <NodePicker nodes={graph.nodes} value={selected === "__end" ? "__end" : node.id} onChange={selectNode} includeOutput /> : <strong>流程详情</strong>}<span>{selected === "__end" ? "OUTPUT" : node?.type}</span></div><Tabs value={detailTab} onValueChange={selectDetailTab}><TabsList><TabsTrigger value="config">配置</TabsTrigger><TabsTrigger value="source">源码</TabsTrigger><TabsTrigger value="output">最终输出</TabsTrigger></TabsList><TabsContent value="config"><div className="detail-stack">
+      <section className="canvas-panel"><div className="panel-bar"><span><GitBranch size={15} />流程预览</span><span className="panel-bar-actions"><span>{graph?.nodes?.length ?? 0} 个节点</span><Button variant="ghost" size="icon" aria-label="重新渲染流程预览" title="重新渲染流程预览" disabled={!!busy || !!dirty} onClick={() => { resource.reload(); setPreviewKey(key => key + 1); }}><RefreshCw size={15} /></Button></span></div>{graph?.nodes && Array.isArray(graph.edges) ? <FlowCanvas key={previewKey} workflow={graph} layout={layout} onSelect={selectNode} /> : <div className="empty">流程定义暂时无法展示，请修复 JSON。</div>}</section>
+      <aside className="node-panel"><div className="panel-bar"><NodePicker nodes={graph?.nodes ?? []} value={selected || "__global"} onChange={value => value === "__global" ? setSelected("") : selectNode(value)} includeGlobal includeOutput /><span>{selected === "__end" ? "全局输出" : node?.type ?? "全局配置"}</span></div><Tabs value={detailTab} onValueChange={selectDetailTab}><TabsList><TabsTrigger value="config">全局配置</TabsTrigger><TabsTrigger value="node">节点配置</TabsTrigger></TabsList><TabsContent value="config"><div className="detail-stack">
         <div className="field"><label htmlFor="workflow-name">工作流名称</label><Input id="workflow-name" value={graph?.name ?? ""} disabled={locked} onChange={e => editGraph(g => { g.name = e.target.value; })} /></div>
-        <details><summary>工作流默认 Agent</summary><ProviderPicker providers={providers} value={graph?.defaults?.agent ?? {}} disabled={locked} onChange={value => editGraph(g => { g.defaults = { ...g.defaults, agent: value }; })} /></details>
-        {node?.type === "agent" && <><label>此节点使用的 Agent</label><ProviderPicker providers={providers} value={{ providerId: node.config.providerId ?? graph?.defaults?.agent?.providerId, modelId: node.config.modelId ?? graph?.defaults?.agent?.modelId }} disabled={locked} onChange={value => editGraph(g => { const target = g.nodes.find(n => n.id === node.id)!; target.config.providerId = value.providerId; target.config.modelId = value.modelId; })} /><div className="field"><label htmlFor="agent-prompt">节点提示词</label><Textarea id="agent-prompt" value={node.config.prompt ?? ""} disabled={locked} onChange={e => editGraph(g => { g.nodes.find(n => n.id === node.id)!.config.prompt = e.target.value; })} rows={5} /></div></>}
-        <label>输入绑定</label><Payload value={node?.input} /><label>输出约束</label><Payload value={node?.outputSchema} />{node?.config.script && <Button variant="outline" onClick={() => { setFilePath(node.config.script!); setDetailTab("source"); }}>源码文件：{node.config.script}</Button>}<details><summary>节点配置</summary><Payload value={node?.config} /></details>
-      </div></TabsContent><TabsContent value="source"><SourceTabs files={files} path={filePath} onPath={setFilePath} onChange={locked ? undefined : (value, path) => { setFiles(current => ({ ...current, [path]: value })); setDirty(true); }} /></TabsContent><TabsContent value="output">{graph ? <WorkflowOutputEditor workflow={graph} disabled={locked || !!busy} onApply={(result, outputSchema) => editGraph(workflow => { workflow.result = result; workflow.outputSchema = outputSchema; })} /> : <p className="field-hint">请先修复流程定义 JSON。</p>}</TabsContent></Tabs></aside>
+        <div className="field"><label>Agent 默认配置</label><ProviderPicker providers={providers} value={graph?.defaults?.agent ?? {}} disabled={locked} onChange={value => editGraph(g => { g.defaults = { ...g.defaults, agent: value }; })} /></div>
+        <label>全局输入</label><Payload value={graph?.inputSchema} />
+        <label>全局输出</label>{graph ? <WorkflowOutputEditor workflow={graph} disabled={locked || !!busy} onApply={(result, outputSchema) => editGraph(workflow => { workflow.result = result; workflow.outputSchema = outputSchema; })} /> : <p className="field-hint">请先修复流程定义 JSON。</p>}
+      </div></TabsContent><TabsContent value="node"><div className="detail-stack">{!node ? <p className="field-hint">请选择一个节点查看节点配置。</p> : <>
+        <div className="field"><label htmlFor="node-name">节点名称</label><Input id="node-name" value={node.name} disabled={locked} onChange={e => editGraph(g => { g.nodes.find(item => item.id === node.id)!.name = e.target.value; })} /></div>
+        <div className="field"><label>节点类型</label><span className="field-hint">{node.type}</span></div>
+        {node.type === "agent" && <><label>Agent 配置</label><ProviderPicker providers={providers} value={{ providerId: node.config.providerId ?? graph?.defaults?.agent?.providerId, modelId: node.config.modelId ?? graph?.defaults?.agent?.modelId }} disabled={locked} onChange={value => editGraph(g => { const target = g.nodes.find(n => n.id === node.id)!; target.config.providerId = value.providerId; target.config.modelId = value.modelId; })} /><div className="field"><label htmlFor="agent-prompt">节点提示词</label><Textarea id="agent-prompt" value={node.config.prompt ?? ""} disabled={locked} onChange={e => editGraph(g => { g.nodes.find(n => n.id === node.id)!.config.prompt = e.target.value; })} rows={5} /></div></>}
+        <label>节点输入</label><Payload value={node.input} /><label>节点输出</label><Payload value={node.outputSchema} />
+        {node.config.script && <Button variant="outline" onClick={() => { setFilePath(node.config.script!); }}>打开源码：{node.config.script}</Button>}
+        <details><summary>节点其他配置</summary><Payload value={node.config} /></details>
+        <SourceTabs files={files} path={filePath} onPath={setFilePath} onChange={locked ? undefined : (value, path) => { setFiles(current => ({ ...current, [path]: value })); setDirty(true); }} />
+      </>}</div></TabsContent></Tabs></aside>
     </div>
   </div>;
 }

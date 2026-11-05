@@ -323,8 +323,9 @@ summary { cursor: pointer; }
 .flow-skipped { opacity: 0.65; border-style: dashed; }
 .react-flow__handle { background: var(--control-fg); border: 2px solid var(--card); width: 7px; height: 7px; }
 .node-panel { border-left: 1px solid var(--border); background: var(--card); overflow-y: auto; min-width: 0; }
+.node-panel > .panel-bar { position: sticky; top: 0; z-index: 5; background: var(--card); }
 .node-panel > [data-slot=tabs] { display: flex; flex-direction: column; min-height: 0; padding: 12px; }
-.node-panel [data-slot=tabs-list] { width: 100%; flex-shrink: 0; }
+.node-panel [data-slot=tabs-list] { position: sticky; top: 44px; z-index: 4; width: 100%; flex-shrink: 0; padding-top: 4px; padding-bottom: 4px; background: var(--card); }
 .node-picker { color: var(--text-secondary); font-size: 12px; font-weight: 500; border: 0; border-radius: 5px; background: transparent; max-width: 185px; padding: 3px; }
 .detail-stack { display: grid; gap: 11px; padding: 7px 1px; }
 .detail-stack details { padding: 9px 0; font-size: 12px; border-top: 1px solid var(--border-soft); }

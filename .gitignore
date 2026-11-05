@@ -16,3 +16,4 @@ dist/
 *.db-shm
 workbench.lock
 *.tsbuildinfo
+.orchard

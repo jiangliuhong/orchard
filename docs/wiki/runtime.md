@@ -2,6 +2,8 @@
 
 正式运行绑定不可变发布版本；草稿测试绑定不可变草稿快照，不创建发布版本。两者先验证输入并创建该次执行的全部节点记录。首版一个 Run 活动，其余排队；每个 Run 沿唯一选中路径串行执行。
 
+正式运行默认使用 `~/.orchard`；执行 `pnpm dev` 时使用仓库目录下的 `.orchard`。两者都可以通过 `--data-dir` 显式覆盖。
+
 运行状态：queued → running → succeeded / failed；活动取消经过 cancel_requested → cancelled。排队取消直接 cancelled。异常退出后遗留活动状态在下次启动时标记 interrupted，排队记录保留。成功和取消竞争按先提交者确定结果，取消获胜后不接受迟到成功。
 
 节点状态：pending、running、succeeded、failed、cancelled、skipped、interrupted。未选中分支在流程终结时标记 skipped / branch_not_selected；上游失败使用 upstream_failed；取消或中断使用 run_terminated。共享后继不在初次选路时提前跳过。
@@ -12,7 +14,7 @@ Switch 记录匹配值、选中连线和理由。Agent 输出必须满足声明�
 
 ## 数据
 
-新数据目录包含 `workbench.db`、`workbench.lock`、`artifacts/trees`、`artifacts/blobs` 和每次运行的 `runs/` 工作目录。结构有十二张表；初始结构批准于 OpenSpec 设计 D10，草稿测试字段变更批准于 2026-11-04 并记录在 `docs/draft-testing-design.md`。数据库只接受新工作台 application_id 与 schema version 2，自动在事务中升级 v1 并保留运行、节点、事件、产物和请求回执；不迁移旧 Orchard 库。
+新数据目录包含 `workbench.db`、`workbench.lock`、`artifacts/trees`、`artifacts/blobs` 和每次运行的 `runs/` 工作目录。结构有十二张表；初始结构批准于 OpenSpec 设计 D10，草稿测试字段变更批准于 2026-11-04 并记录在 `docs/wiki/draft-testing-design.md`。数据库只接受新工作台 application_id 与 schema version 2，自动在事务中升级 v1 并保留运行、节点、事件、产物和请求回执；不迁移旧 Orchard 库。
 
 流程文件和编译产物以完整摘要固化；节点启动前验证。较大 JSON 结果写入摘要产物，API 返回引用，完整结果由产物端点显式读取。结果超过 16 MiB、进程输出超过 8 MiB 会失败。日志分块保存，事件按 stream 分配单调 sequence，事务提交后才通知订阅者。
 

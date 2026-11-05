@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "node --import tsx --watch src/server/main.ts",
+    "dev": "ORCHARD_DEV=1 node --import tsx --watch src/server/main.ts",
     "dev:web": "vite",
     "build": "tsc -p tsconfig.server.json && vite build",
     "start": "node dist/server/main.js",

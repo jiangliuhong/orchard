@@ -7,7 +7,8 @@ function option(name: string, fallback: string) { const at = process.argv.indexO
 if (!["darwin", "linux"].includes(process.platform)) throw new Error("第一版仅支持 macOS 和 Linux 本地进程管理");
 const port = Number(option("--port", "7441"));
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("端口必须为 1–65535");
-const root = resolve(option("--data-dir", join(homedir(), ".orchard-workbench")));
+const defaultDataDir = process.env.ORCHARD_DEV === "1" ? join(process.cwd(), ".orchard") : join(homedir(), ".orchard");
+const root = resolve(option("--data-dir", defaultDataDir));
 const { app } = createApp(new Store(root));
 try {
   await app.listen({ host: "127.0.0.1", port });

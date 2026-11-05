@@ -2,7 +2,7 @@
 
 本地 AI 工作流工作台。通过本机 Codex CLI / Pi CLI 对话创建流程，发布不可变版本，再用不同输入多次运行并检查各节点结果。
 
-已验证的工作台现已提升为仓库根项目。默认端口 `7441`，默认数据目录 `~/.orchard-workbench`，沿用工作台已有设置、草稿、版本和运行记录。第一版面向 macOS / Linux，Node.js 24+。
+已验证的工作台现已提升为仓库根项目。默认端口 `7441`，正式运行默认数据目录 `~/.orchard`，本地开发使用仓库目录下的 `.orchard`。第一版面向 macOS / Linux，Node.js 24+。
 
 ## 安装与启动
 
@@ -20,7 +20,7 @@ pnpm start
 pnpm start --port 7441 --data-dir /tmp/orchard-workbench-demo
 ```
 
-不要将新应用指向旧应用数据目录；默认旧目录 `~/.orchard` 会被拒绝。一个数据目录只允许一个活动服务。
+一个数据目录只允许一个活动服务。`--data-dir` 会覆盖默认目录。
 
 ## 开发
 
@@ -64,12 +64,12 @@ UI：React / TypeScript / Vite、shadcn/ui / Tailwind CSS、React Flow；Monaco 
 
 ## 文档
 
-- [流程格式和脚本协议](docs/workflow-format.md)
-- [Provider 扩展与配置](docs/providers.md)
-- [对话创作与发布](docs/authoring.md)
-- [运行状态与数据生命周期](docs/runtime.md)
-- [API 与事件](docs/api.md)
-- [页面使用说明](docs/interface.md)
-- [开发验证与后续验收](docs/verification.md)
+- [流程格式和脚本协议](docs/wiki/workflow-format.md)
+- [Provider 扩展与配置](docs/wiki/providers.md)
+- [对话创作与发布](docs/wiki/authoring.md)
+- [运行状态与数据生命周期](docs/wiki/runtime.md)
+- [API 与事件](docs/wiki/api.md)
+- [页面使用说明](docs/wiki/interface.md)
+- [开发验证与后续验收](docs/wiki/verification.md)
 
 本项目初始数据库结构已于 2026-11-04 由用户批准，依据 `openspec/changes/rebuild-ai-workflow-workbench/design.md` D10；后续结构变更仍需审核。

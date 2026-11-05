@@ -15,7 +15,7 @@ Pi 转发真实 text_delta；Codex 首版报告开始、诊断、usage 和最终
 内建 Provider 配置增加可选 `transport` 字段（枚举 `legacy` / `native`），仍禁止任意 argv。旧配置缺少该字段时一律按 `legacy` 读取，升级不自动切换。设置保存合并现有 config，不会因只提交 executable 而丢失 transport。
 
 - `legacy`（默认）：一次性 CLI 调用，行为与历史版本一致；多轮能力为宿主历史重建，`sessions` 能力为 `none`。
-- `native`：常驻协议进程（Codex `app-server` stdio JSON-RPC；Pi `--mode rpc` JSONL）。节点与模型验证使用临时专属句柄（Codex ephemeral thread、Pi `--no-session`），结束后释放；创作多轮接入待持久化审核通过后启用，见 [agent-conversations 实施状态](./features/agent-conversations/implementation-status.md)。能力声明按配置计算（`sessions: "persistent"`、`nativeResume: true`）。
+- `native`：常驻协议进程（Codex `app-server` stdio JSON-RPC；Pi `--mode rpc` JSONL）。节点与模型验证使用临时专属句柄（Codex ephemeral thread、Pi `--no-session`），结束后释放；创作多轮接入待持久化审核通过后启用，见 [agent-conversations 实施状态](../features/agent-conversations/implementation-status.md)。能力声明按配置计算（`sessions: "persistent"`、`nativeResume: true`）。
 - 原生模式就绪检测在 `--version` 之外增加无模型握手探测（缓存 60 秒，配置变化立即失效）；探测失败返回具体错误码（PROTOCOL_UNSUPPORTED / TIMEOUT），可切回兼容模式，不自动回退或静默重试。握手成功不等于账号或模型可用，真实模型验证仍是显式触发的独立调用。
 - 原生与 legacy 的单次进程都受全局进程配额与队列限制（见下节），禁止绕过限额。
 
