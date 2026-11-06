@@ -311,7 +311,7 @@ Orchard 启动本机 `pi --mode rpc`，使用 Pi 自定义 JSONL 命令、响应
 ```ts
 type ConversationMode = "single" | "multi";
 type ContextMode = "isolated" | "native" | "reconstructed";
-type ConversationStatus = "current" | "archived" | "needs_rebuild";
+type ConversationStatus = "current" | "archived" | "needs_rebuild"; // 已扩展 "idle"（history-feature.md，v4 迁移已实施）
 type ConnectionState = "absent" | "starting" | "ready" | "stopping" | "broken";
 type AuthoringTurnStatus =
   | "queued" | "running" | "cancel_requested"
@@ -480,6 +480,8 @@ interface SessionProvider {
 ## 20. 精确持久化提案与迁移
 
 本节为待审核 DDL 提案，不能仅凭存在于文档就执行。总体方案已确认不代表已执行或已验收结构迁移。
+
+更新：本节 v3 方案已审核通过并实施（`SCHEMA_VERSION=3`）；历史对话 feature 的 v4 增量（`idle` 状态、`title`、`archived_at`，含唯一索引谓词收窄为仅 `current`）已另行审核并实施，见 [history-schema-proposal.md](./history-schema-proposal.md)。
 
 ### 20.1 新表与列
 
@@ -714,7 +716,7 @@ Pi 的会话目录限制必须在 realpath 层校验，并拒绝越界 symlink�
 
 DraftPage 的 activeTurn 判定从仅 running 改为 queued/running/cancel_requested；这些状态均锁定编辑、发布、测试、新对话和重复发送。
 
-增加“单次／多轮”模式展示、“新对话”“重建上下文”“历史对话”操作；模式变更创建新对话，不直接 PATCH 旧行。历史只读，第一版不支持重新激活旧对话。
+增加“单次／多轮”模式展示、“新对话”“重建上下文”“历史对话”操作；模式变更创建新对话，不直接 PATCH 旧行。历史对话默认只读展示；继续、恢复与归档行为由 [history-feature.md](./history-feature.md) 扩展（`idle` 状态已随 v4 迁移实施）。
 
 未保存修改时先保存再创建／重建；不得丢弃编辑器内容。模型选择变化在发送前创建新对话并明确提示上下文重新开始。无需向用户展示后端文件路径或 JSON-RPC 参数。
 

@@ -144,6 +144,7 @@ function handle(msg) {
   if (msg.method === "thread/start") { send({ id: msg.id, result: { thread: { id: THREAD }, model: msg.params?.model } }); return; }
   if (msg.method === "thread/resume") {
     if (scenario === "resume-missing") { send({ id: msg.id, error: { code: -32001, message: "Thread not found: does-not-exist" } }); return; }
+    if (scenario === "resume-invalid") { send({ id: msg.id, error: { code: -32602, message: "invalid session id: invalid character: expected an optional prefix of `urn:uuid:` followed by [0-9a-fA-F-]" } }); return; }
     send({ id: msg.id, result: { thread: { id: msg.params?.threadId ?? THREAD } } });
     return;
   }

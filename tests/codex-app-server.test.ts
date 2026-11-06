@@ -161,6 +161,13 @@ test("thread resume failure for a missing thread requires a rebuild instead of a
   })), { code: "SESSION_REBUILD_REQUIRED" });
 });
 
+test("malformed thread ids are permanent failures and also require a rebuild (codex 0.165.0 wording)", async t => {
+  const { provider, setting } = nativeSetup(t, "resume-invalid");
+  await assert.rejects(provider.openSession(setting, open("conv-invalid", {
+    resumeRef: { version: 1, kind: "codex", threadId: "bogus-thread", cwd: "/tmp" },
+  })), { code: "SESSION_REBUILD_REQUIRED" });
+});
+
 test("a hanging initialize fails with an explicit protocol error", async t => {
   const { provider, setting } = nativeSetup(t, "hang-init", { initializeTimeoutMs: 500 });
   await assert.rejects(provider.openSession(setting, open("conv-hang")), error => {
@@ -282,4 +289,30 @@ test("legacy transport keeps using the one-shot CLI path unchanged", async t => 
     cwd: store.root, prompt: "anything", signal: new AbortController().signal, emit: () => {},
   }));
   assert.equal(nativeUsed, false);
+});
+
+test("outputSchema is only sent when the host schema satisfies codex strict structured output", async t => {
+  const { provider, setting, logPath } = nativeSetup(t, "default");
+  const handle = await provider.openSession(setting, open("conv-strict"));
+  // 可选属性（required 未覆盖 properties）→ 省略 outputSchema，仅宿主校验。
+  const optional = turn('RETURN:{"summary":"ok","changes":[]}', { schema: {
+    type: "object", required: ["summary", "changes"], properties: {
+      summary: { type: "string" }, changes: { type: "array", items: { type: "object", required: ["operation", "path"], properties: { operation: { type: "string" }, path: { type: "string" }, content: { type: "string" } } } },
+    }, additionalProperties: false,
+  } });
+  assert.deepEqual((await provider.sendTurn(handle, optional.request)).output, { summary: "ok", changes: [] });
+  // maxLength 等不支持关键字同样省略。
+  const limited = turn('RETURN:{"a":"b"}', { schema: { type: "object", required: ["a"], properties: { a: { type: "string", maxLength: 5 } } } });
+  assert.deepEqual((await provider.sendTurn(handle, limited.request)).output, { a: "b" });
+  // 完全严格的 schema 仍随请求发送。
+  const strict = turn('RETURN:{"answer":7}', { schema: { type: "object", required: ["answer"], properties: { answer: { type: "number" } } } });
+  assert.deepEqual((await provider.sendTurn(handle, strict.request)).output, { answer: 7 });
+  await provider.releaseSession(handle);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const turns = readLog(logPath).lines.map(line => JSON.parse(line) as { method?: string; params?: { outputSchema?: unknown } })
+    .filter(entry => entry.method === "turn/start");
+  assert.equal(turns.length, 3);
+  assert.equal(turns[0]!.params!.outputSchema, undefined, "可选属性 schema 不应发送 outputSchema");
+  assert.equal(turns[1]!.params!.outputSchema, undefined, "不支持关键字 schema 不应发送 outputSchema");
+  assert.deepEqual(turns[2]!.params!.outputSchema, { type: "object", required: ["answer"], properties: { answer: { type: "number" } } });
 });

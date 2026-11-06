@@ -487,3 +487,19 @@ summary { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+
+/* 与 Agent 创作：对话选择器（history-feature.md） */
+.conversation-panel { display: grid; gap: 7px; max-height: 172px; overflow-y: auto; padding: 10px 12px; border-bottom: 1px solid var(--border-soft); background: var(--card); align-content: start; }
+.conversation-group-label { font-size: 10px; color: var(--muted-foreground); letter-spacing: 0.04em; text-transform: uppercase; margin-top: 3px; }
+.conversation-item { display: grid; gap: 4px; padding: 7px 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); }
+.conversation-item[data-viewed=true] { border-color: var(--primary); }
+.conversation-item-title { font-size: 12px; font-weight: 550; color: var(--foreground); text-align: left; background: none; border: none; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.conversation-item-title:hover { color: var(--primary); }
+.conversation-item-meta { font-size: 10px; color: var(--muted-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-item-excerpt { font-size: 11px; color: var(--muted-foreground); line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-item-excerpt.warning { color: var(--danger); white-space: normal; }
+.conversation-item-actions { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.conversation-rename { display: flex; gap: 4px; align-items: center; }
+.conversation-rename input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--foreground); }
+.conversation-archived > summary { font-size: 10px; color: var(--muted-foreground); cursor: pointer; padding: 2px 0; }
+.conversation-archived[open] > summary { margin-bottom: 5px; }

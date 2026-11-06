@@ -25,6 +25,25 @@ import type { ProviderResult } from "./registry.js";
  */
 
 const DISABLED_FEATURES = ["shell_tool", "unified_exec", "apps", "plugins", "hooks", "multi_agent", "browser_use", "computer_use", "in_app_browser", "image_generation"];
+
+/** Codex 严格结构化输出仅支持的关键字；其余（maxLength、anyOf、$ref 等）一律视为不兼容。 */
+const STRICT_KEYWORDS = new Set(["type", "description", "enum", "properties", "required", "items", "additionalProperties", "format"]);
+/** 仅当 schema 完全满足 Codex response_format 严格限制时才随 turn/start 发送。 */
+function strictOutputSchema(schema: unknown): boolean {
+  if (typeof schema !== "object" || schema === null || Array.isArray(schema)) return false;
+  const node = schema as Record<string, unknown>;
+  if (typeof node.type !== "string" || !["object", "array", "string", "number", "integer", "boolean"].includes(node.type)) return false;
+  if (Object.keys(node).some(key => !STRICT_KEYWORDS.has(key))) return false;
+  if (node.additionalProperties === true) return false;
+  if (node.type === "object") {
+    if (typeof node.properties !== "object" || node.properties === null || Array.isArray(node.properties)) return false;
+    const required = Array.isArray(node.required) ? node.required.map(String) : [];
+    if (Object.keys(node.properties).some(key => !required.includes(key))) return false;
+    return Object.values(node.properties).every(strictOutputSchema);
+  }
+  if (node.type === "array") return typeof node.items !== "undefined" && strictOutputSchema(node.items);
+  return true;
+}
 const TOOL_POLICY_ARGS: string[] = [
   "-c", "mcp_servers={}",
   "-c", "notify=[]",
@@ -399,7 +418,9 @@ export class CodexAppServerProvider implements SessionProvider {
       request.signal.addEventListener("abort", onAbort, { once: true });
       if (request.signal.aborted) onAbort();
       const params: Record<string, unknown> = { threadId: session.threadId, input: [{ type: "text", text: request.prompt, text_elements: [] }] };
-      if (request.schema !== undefined && typeof request.schema === "object") params.outputSchema = request.schema;
+      // Codex response_format 为严格结构化输出：required 需覆盖全部 properties，且仅支持少数关键字。
+      // 宿主 schema 常含可选属性或 maxLength 等（如 AUTHORING_SCHEMA），不兼容时省略，仅依赖宿主校验。
+      if (request.schema !== undefined && strictOutputSchema(request.schema)) params.outputSchema = request.schema;
       let backendTurnId: string | null = null;
       try {
         const response = await this.request(session, "turn/start", params, "turn/start");
@@ -511,7 +532,8 @@ export class CodexAppServerProvider implements SessionProvider {
 function classifyResumeError(error: unknown): AppError {
   if (error instanceof AppError && error.code === "TIMEOUT") return error;
   const message = error instanceof Error ? error.message : String(error);
-  if (/not\s*found|unknown\s*thread|no\s*such\s*thread|不存在|无法找到/i.test(message)) {
+  // 实测 codex-cli 0.165.0：不存在与格式非法的 threadId 均为永久性错误（后者报 "invalid session id"）。
+  if (/not\s*found|unknown\s*thread|no\s*such\s*thread|invalid\s+(session|thread)|不存在|无法找到|非法/i.test(message)) {
     return new AppError("SESSION_REBUILD_REQUIRED", "Codex 线程不存在或已不兼容，需要重建上下文", 409);
   }
   return error instanceof AppError ? error : new AppError("PROVIDER_FAILED", message);

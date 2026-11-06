@@ -40,12 +40,43 @@
 - §22.3 错误状态码：`check()` 支持可选 statusCode；app.ts 错误处理器优先 AppError.statusCode（NOT_FOUND 除外，旧码字符串匹配兼容）；PROVIDER_UNAVAILABLE / PROTOCOL_UNSUPPORTED 显式 503，AGENT_QUEUE_FULL 503，SESSION_REBUILD_REQUIRED 409。
 - `tests/context.test.ts`：UTF-8 截断边界、摘录预算与顺序/条数/角色过滤、initial/continuation/single 形状、512 KiB 拒绝、纯准备阶段语义回归。
 
+## 已交付（Phase G 历史对话，2026-11-06）
+
+数据库结构变更已按 [history-schema-proposal.md](./history-schema-proposal.md) 审核通过并实施（`SCHEMA_VERSION=4`：`idle` 状态、`title`、`archived_at`；存量 `archived` 映射为 `idle`，`archived_at` 取迁移前 `updated_at` 近似；`one_current_conversation` 谓词收窄为仅 `current`，`needs_rebuild` 重建后保留为诊断历史）：
+
+- **Store**：`demoteCurrentConversation` / `resumeConversation` / `archiveConversation` / `restoreConversation` / `renameConversation` / `setTitleIfUnset` / `userMessageText` / `lastTurnStatus` / `activeTurnId`；`currentConversation` 仅返回 `current`；列约束（archived 必有 archived_at、标题 1–200 字符）。
+- **ConversationService**：resume / rebuild / archive / restore / rename 命令（receipt scope `conversation:<draftId>`，事务内校验草稿修订号、可编辑与无活动轮次）；`ensureForTurn` 新语义（空草稿懒创建、无 current 且最新对话 needs_rebuild → `SESSION_REBUILD_REQUIRED`、无 current 且有存量对话 → `CONVERSATION_CONFLICT`、显式 idle/archived 提交拒绝）；标题确定性生成（80 码点截断）与首条用户消息回填。
+- **API**：`/api/drafts/:id/conversations/:cid/{resume,rebuild,archive,restore,rename}`；列表按最近活动倒序并携带派生字段（title/archivedAt/lastUserMessage/lastTurnStatus/activeTurnId）。
+- **UI**：DraftPage 对话选择器（当前/历史/需要重建/已归档分组、继续/归档二次确认/恢复/重建/内联改名、按选中会话过滤消息、无 current 禁用发送、重建提示条）。
+- **测试**：`tests/conversations.test.ts`（状态机、幂等、活动轮次阻塞、跨草稿 404、ensureForTurn 语义、标题回填、HTTP 错误码）；`tests/store.test.ts`（v3→v4 迁移映射、结构等价、状态机与约束）；`tests/interface.test.ts`（面板交互、重建横幅、发送锁定）。
+- 已知存量失败（与本 feature 无关，clean HEAD 同样失败）：`draft output configuration applies to workflow.json…`。
+
+## 真实 Provider 验收（Phase G，2026-11-06）
+
+环境：codex-cli 0.165.0、transport `native`、模型 `gpt-6-luna`、真实账号付费调用（共 6 次成功轮次 + 1 次 resume 失败，无重试发费）。脚本：`/tmp/orchard-accept/acceptance.py` + `scenario5.py`（临时，未入库；场景与断言与 `tests/conversations.test.ts` 模拟版一一对应）。
+
+| 场景 | 结果 |
+| --- | --- |
+| 同一对话多轮原生上下文续接（暗号记忆） | ✅ 两轮均召回暗号 |
+| 新对话上下文隔离（不引用旧对话） | ✅ 回复“不知道” |
+| 归档 → 消息仍可查询 → 恢复 → resume 历史 | ✅ 消息完整，状态机正确 |
+| 服务重启后 current 可继续、thread/resume 上下文保持 | ✅ 重启后继续且仍召回暗号 |
+| 失效引用懒发现：resume 永久失败 → SESSION_REBUILD_REQUIRED → 会话 needs_rebuild → 409 拒直接提交 → 重建新 current + 诊断历史保留 + 全新上下文 | ✅ 全链路 |
+
+验收中发现并修复两个真实环境问题（模拟测试无法覆盖）：
+
+1. **Codex 严格结构化输出拒绝宿主 schema**：`response_format` 要求 `required` 覆盖全部 `properties` 且不支持 `maxLength` 等关键字，`AUTHORING_SCHEMA` 被拒（`PROVIDER_FAILED: Invalid schema for response_format`）。修复：`codex-app-server.ts` 新增 `strictOutputSchema()` 兼容性检查，仅完全兼容时随 `turn/start` 发送 `outputSchema`，否则省略并依赖宿主 `assertSchema`（与 `capabilities.structuredOutput: "validated"` 一致）。新增契约测试。
+2. **永久性 resume 失败误分类**：codex-cli 0.165.0 对格式非法 threadId 报 `"invalid session id: …"`，原 `classifyResumeError` 只识别 "not found" 类文本，被归为临时 `PROVIDER_FAILED`。修复：正则扩展 `invalid (session|thread)`，归为 `SESSION_REBUILD_REQUIRED`（§19.4 明确不存在或不兼容）。新增 fixture 场景与契约测试。
+
+Pi 后端本机无认证，未做真实调用；模拟协议测试已覆盖同一状态机与消息契约，待有账号时按同样场景补录（Phase F 双后端专项仍待做）。
+
 ## 待实施
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | E 完整语义 | 完整受理事务幂等/崩溃窗口、全部 SSE payload 字段、事件批量持久化与断线补读细化 | 继续完善 |
-| F UI 与验收 | 历史对话筛选/连接状态细化、真实双后端三轮/取消/重启恢复专项验收 | 待真实环境验收 |
+| F UI 与验收 | 连接状态细化、真实双后端三轮/取消/重启恢复专项验收 | 待真实环境验收（Codex 已过，Pi 待账号） |
+| G 历史对话 | 历史管理、上下文隔离、归档恢复、重启恢复、needs_rebuild 重建 | **完成**（模拟测试 + Codex 真实验收均通过，2026-11-06） |
 
 数据库方案已在本次会话获审核通过后实施；若后续调整字段或约束，先同步 design.md。
 

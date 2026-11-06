@@ -99,6 +99,32 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
       ["providerId", "modelId", "expectedRevision", "requestId"]);
     const result = await authoring.conversations.create(request.params.id, input); return result;
   });
+  // 历史管理命令（history-feature.md）：resume / rebuild / archive / restore / rename。
+  // 路由层只做参数解析；草稿归属、状态机与幂等在 ConversationService。
+  const conversationCommand = { expectedRevision, requestId };
+  app.post<{ Params: { id: string; cid: string } }>("/api/drafts/:id/conversations/:cid/resume", async request => {
+    const input = body<{ expectedRevision: number; requestId: string }>(request.body, conversationCommand, ["expectedRevision", "requestId"]);
+    return authoring.conversations.resume(request.params.id, request.params.cid, input);
+  });
+  app.post<{ Params: { id: string; cid: string } }>("/api/drafts/:id/conversations/:cid/rebuild", async request => {
+    const input = body<{ providerId: string; modelId: string; mode?: "single" | "multi"; expectedRevision: number; requestId: string }>(request.body,
+      { providerId: { type: "string", minLength: 1 }, modelId: { type: "string", minLength: 1 }, mode: { enum: ["single", "multi"] }, expectedRevision, requestId },
+      ["providerId", "modelId", "expectedRevision", "requestId"]);
+    return authoring.conversations.rebuild(request.params.id, request.params.cid, input);
+  });
+  app.post<{ Params: { id: string; cid: string } }>("/api/drafts/:id/conversations/:cid/archive", async request => {
+    const input = body<{ expectedRevision: number; requestId: string }>(request.body, conversationCommand, ["expectedRevision", "requestId"]);
+    return authoring.conversations.archive(request.params.id, request.params.cid, input);
+  });
+  app.post<{ Params: { id: string; cid: string } }>("/api/drafts/:id/conversations/:cid/restore", async request => {
+    const input = body<{ expectedRevision: number; requestId: string }>(request.body, conversationCommand, ["expectedRevision", "requestId"]);
+    return authoring.conversations.restore(request.params.id, request.params.cid, input);
+  });
+  app.post<{ Params: { id: string; cid: string } }>("/api/drafts/:id/conversations/:cid/rename", async request => {
+    const input = body<{ title: string; expectedRevision: number; requestId: string }>(request.body,
+      { title: { type: "string", minLength: 1, maxLength: 200 }, expectedRevision, requestId }, ["title", "expectedRevision", "requestId"]);
+    return authoring.conversations.rename(request.params.id, request.params.cid, input);
+  });
   app.get<{ Params: { id: string }; Querystring: { conversationId?: string } }>("/api/drafts/:id/messages", async request => {
     authoring.store.draft(request.params.id);
     return { items: authoring.store.messages(request.params.id, request.query.conversationId) };

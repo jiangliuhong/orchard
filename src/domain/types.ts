@@ -74,10 +74,10 @@ export interface ProviderView extends ProviderSetting {
   name: string; capabilities: ProviderCapabilities; configSchema: JsonSchema;
   readiness: { state: "ready" | "unavailable" | "unknown"; reason?: string; version?: string; transport?: "legacy" | "native"; errorCode?: string };
 }
-// ---- Agent 对话契约（设计文档 §18.1）；持久化实施待数据库审核 ----
+// ---- Agent 对话契约（设计文档 §18.1）；历史管理扩展见 history-feature.md ----
 export type ConversationMode = "single" | "multi";
 export type ContextMode = "isolated" | "native" | "reconstructed";
-export type ConversationStatus = "current" | "archived" | "needs_rebuild";
+export type ConversationStatus = "current" | "idle" | "archived" | "needs_rebuild";
 export type ConnectionState = "absent" | "starting" | "ready" | "stopping" | "broken";
 export type AuthoringTurnStatus =
   | "queued" | "running" | "cancel_requested"
@@ -100,6 +100,13 @@ export interface ConversationView {
   updatedAt: number;
   lastUsedAt: number | null;
   connectionState: ConnectionState;
+  /** 历史管理追加：落库标题（null 时由首条用户消息确定性推导展示）。 */
+  title: string | null;
+  archivedAt: number | null;
+  /** 以下为查询推导字段，不落库。 */
+  lastUserMessage: string | null;
+  lastTurnStatus: string | null;
+  activeTurnId: string | null;
 }
 export interface Version {
   id: string; workflowId: string; number: number; definition: Workflow; layout: Layout;

@@ -103,7 +103,9 @@
 | `needs_rebuild` | 后端上下文不可安全恢复 | 否 | 通过重建 |
 | `deleted` | 已随草稿清理 | 否 | 否 |
 
-轮次状态仍沿用现有 `queued`、`running`、`cancel_requested`、`completed`、`failed`、`interrupted`。轮次状态不能替代对话状态；例如对话可以是 `current`，但当前没有活动轮次。
+轮次状态仍沿用现有 `queued`、`running`、`cancel_requested`、`succeeded`、`failed`、`cancelled`、`interrupted`（以 `design.md` §18.1 为准）。轮次状态不能替代对话状态；例如对话可以是 `current`，但当前没有活动轮次。
+
+`deleted` 不是落库状态：删除草稿时对话、轮次和消息在同一事务中物理删除（沿用现有清理流程），`deleted` 仅用于描述"不可恢复"的领域语义，不扩展 `status` CHECK。
 
 ## API 约定
 
@@ -117,6 +119,7 @@ API 以草稿为边界，所有写操作都需要幂等请求 ID 和草稿修订
 | `POST` | `/api/drafts/:draftId/conversations/:id/rebuild` | 创建重建上下文 |
 | `POST` | `/api/drafts/:draftId/conversations/:id/archive` | 归档对话 |
 | `POST` | `/api/drafts/:draftId/conversations/:id/restore` | 恢复已归档对话 |
+| `POST` | `/api/drafts/:draftId/conversations/:id/rename` | 手动修改对话标题（不影响消息和上下文） |
 | `GET` | `/api/drafts/:draftId/messages?conversationId=:id` | 查询指定对话消息 |
 
 服务端约束：
@@ -125,7 +128,8 @@ API 以草稿为边界，所有写操作都需要幂等请求 ID 和草稿修订
 - 已归档或需要重建的对话直接提交创作轮次时返回 `409 CONVERSATION_CONFLICT` 或 `409 SESSION_REBUILD_REQUIRED`。
 - 同一 `requestId` 重复请求返回第一次受理结果；相同请求 ID 携带不同请求体时返回 `409 REQUEST_CONFLICT`。
 - 未传 `conversationId` 的旧客户端请求继续解析草稿当前对话，不得隐式创建多个对话。
-- 消息查询默认按草稿过滤；新 UI 显式传入对话 ID，旧消息未关联对话时归入“旧版历史”。
+- `POST .../conversations/:id/rebuild` 复用 `POST /conversations`（携带 `rebuildFromId`）的事务与幂等语义，receipt scope 同为 `conversation:<draftId>`，不另建第二条实现路径。
+- 消息查询默认按草稿过滤；新 UI 显式传入对话 ID，旧消息未关联对话时归入"旧版历史"。
 
 ## 页面验收
 
@@ -150,6 +154,8 @@ API 以草稿为边界，所有写操作都需要幂等请求 ID 和草稿修订
 
 本 feature 依赖现有 Agent 会话设计中的 `agent_conversations`、轮次和消息关联能力。若需要新增或调整数据库表、字段、索引或外键，必须先完成数据库结构审核，审核通过后再执行迁移；产品交互和 API 文档可以先行更新。
 
+本 feature 的结构变更提案（v3→v4：`idle` 状态、`title`、`archived_at`）见 [history-schema-proposal.md](./history-schema-proposal.md)。**该提案审核通过是 Store 及以下层实施的前置条件**；审核期间可先行文档与不依赖新列的前端类型工作。
+
 实现应同步更新：
 
 - `docs/wiki/interface.md`：补充对话选择器、新对话、继续对话和归档的页面说明。
@@ -173,22 +179,31 @@ API 以草稿为边界，所有写操作都需要幂等请求 ID 和草稿修订
 ### 建议数据契约
 
 ```ts
+// 在 design.md §18.1 ConversationView 基础上追加历史字段；
+// 既有枚举（contextMode / connectionState 等）以底层设计为准，不重复定义。
 type ConversationView = {
   id: string;
   draftId: string;
-  title: string | null;
-  status: "current" | "idle" | "archived" | "needs_rebuild";
   mode: "single" | "multi";
+  contextMode: "isolated" | "native" | "reconstructed";
+  status: "current" | "idle" | "archived" | "needs_rebuild";
   providerId: string;
+  providerRevision: number;
   modelId: string;
-  contextMode: "native" | "legacy";
-  createdAt: string;
-  updatedAt: string;
-  archivedAt: string | null;
-  lastUserMessage: string | null;
-  lastTurnStatus: string | null;
-  connectionState: "disconnected" | "connecting" | "ready" | "needs_rebuild";
-  activeTurnId: string | null;
+  transport: "native" | "legacy";
+  cliVersion: string | null;
+  syncedRevision: number | null;
+  rebuildFromId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+  connectionState: "absent" | "starting" | "ready" | "stopping" | "broken";
+  // —— 本 feature 追加 ——
+  title: string | null;           // null 时按确定性规则由首条用户消息推导展示
+  archivedAt: number | null;      // 最近一次归档时间，恢复后保留作审计
+  lastUserMessage: string | null; // 查询推导，不落库
+  lastTurnStatus: string | null;  // 查询推导，不落库
+  activeTurnId: string | null;    // 查询推导，不落库
 };
 ```
 

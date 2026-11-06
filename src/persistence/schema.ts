@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const RUN_SCHEMA = `
 CREATE TABLE runs (
  id TEXT PRIMARY KEY, workflow_version_id TEXT REFERENCES workflow_versions(id),
@@ -69,6 +69,61 @@ CREATE INDEX turns_by_conversation ON authoring_turns(conversation_id,created_at
 CREATE INDEX messages_by_conversation ON authoring_messages(conversation_id,sequence);
 PRAGMA user_version = 3;
 `;
+/** 历史对话 feature（已审核，见 docs/features/agent-conversations/history-schema-proposal.md）：
+ * 重建 agent_conversations 增加 idle 状态、title 与 archived_at；存量 archived 为轮换产物，映射为 idle。
+ * 唯一索引收窄为仅 current：needs_rebuild 重建后保留为诊断历史，不再占用当前对话名额。 */
+export const MIGRATE_V3_TO_V4 = `
+CREATE TABLE agent_conversations_v4 (
+ id TEXT PRIMARY KEY,
+ draft_id TEXT NOT NULL REFERENCES drafts(id),
+ mode TEXT NOT NULL CHECK(mode IN ('single','multi')),
+ context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native','reconstructed')),
+ status TEXT NOT NULL CHECK(status IN ('current','idle','archived','needs_rebuild')),
+ provider_id TEXT NOT NULL REFERENCES provider_settings(id),
+ provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),
+ model_id TEXT NOT NULL,
+ transport TEXT NOT NULL CHECK(transport IN ('legacy','native')),
+ connection_fingerprint TEXT NOT NULL,
+ cli_version TEXT,
+ backend_ref_json TEXT,
+ backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),
+ synced_revision INTEGER CHECK(synced_revision >= 0),
+ rebuild_from_id TEXT REFERENCES agent_conversations_v4(id),
+ title TEXT CHECK(title IS NULL OR (length(title) BETWEEN 1 AND 200)),
+ archived_at INTEGER,
+ created_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL,
+ last_used_at INTEGER,
+ CHECK (
+  (mode='single' AND context_mode='isolated')
+  OR (mode='multi' AND transport='native' AND context_mode='native')
+  OR (mode='multi' AND transport='legacy' AND context_mode='reconstructed')
+ ),
+ CHECK (status != 'archived' OR archived_at IS NOT NULL)
+);
+INSERT INTO agent_conversations_v4(
+ id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,
+ transport,connection_fingerprint,cli_version,backend_ref_json,backend_generation,
+ synced_revision,rebuild_from_id,title,archived_at,created_at,updated_at,last_used_at)
+ SELECT id,draft_id,mode,context_mode,
+   CASE status WHEN 'archived' THEN 'idle' ELSE status END,
+   provider_id,provider_revision,model_id,transport,connection_fingerprint,cli_version,
+   backend_ref_json,backend_generation,synced_revision,rebuild_from_id,
+   NULL,
+   CASE status WHEN 'archived' THEN updated_at ELSE NULL END,
+   created_at,updated_at,last_used_at
+ FROM agent_conversations;
+DROP TABLE agent_conversations;
+ALTER TABLE agent_conversations_v4 RENAME TO agent_conversations;
+CREATE UNIQUE INDEX one_current_conversation
+ ON agent_conversations(draft_id)
+ WHERE status = 'current';
+CREATE INDEX conversations_by_draft
+ ON agent_conversations(draft_id,created_at,id);
+CREATE INDEX conversations_by_activity
+ ON agent_conversations(draft_id,updated_at DESC,id);
+PRAGMA user_version = 4;
+`;
 export const SCHEMA = `
 CREATE TABLE provider_settings (
  id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), config_json TEXT NOT NULL,
@@ -113,7 +168,7 @@ CREATE TABLE agent_conversations (
  draft_id TEXT NOT NULL REFERENCES drafts(id),
  mode TEXT NOT NULL CHECK(mode IN ('single','multi')),
  context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native','reconstructed')),
- status TEXT NOT NULL CHECK(status IN ('current','archived','needs_rebuild')),
+ status TEXT NOT NULL CHECK(status IN ('current','idle','archived','needs_rebuild')),
  provider_id TEXT NOT NULL REFERENCES provider_settings(id),
  provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),
  model_id TEXT NOT NULL,
@@ -124,6 +179,8 @@ CREATE TABLE agent_conversations (
  backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),
  synced_revision INTEGER CHECK(synced_revision >= 0),
  rebuild_from_id TEXT REFERENCES agent_conversations(id),
+ title TEXT CHECK(title IS NULL OR (length(title) BETWEEN 1 AND 200)),
+ archived_at INTEGER,
  created_at INTEGER NOT NULL,
  updated_at INTEGER NOT NULL,
  last_used_at INTEGER,
@@ -131,13 +188,16 @@ CREATE TABLE agent_conversations (
   (mode='single' AND context_mode='isolated')
   OR (mode='multi' AND transport='native' AND context_mode='native')
   OR (mode='multi' AND transport='legacy' AND context_mode='reconstructed')
- )
+ ),
+ CHECK (status != 'archived' OR archived_at IS NOT NULL)
 );
 CREATE UNIQUE INDEX one_current_conversation
  ON agent_conversations(draft_id)
- WHERE status IN ('current','needs_rebuild');
+ WHERE status = 'current';
 CREATE INDEX conversations_by_draft
  ON agent_conversations(draft_id,created_at,id);
+CREATE INDEX conversations_by_activity
+ ON agent_conversations(draft_id,updated_at DESC,id);
 CREATE UNIQUE INDEX one_active_turn
  ON authoring_turns(draft_id)
  WHERE status IN ('queued','running','cancel_requested');

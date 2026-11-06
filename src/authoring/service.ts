@@ -7,7 +7,7 @@ import { check, failure } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import type { SourceFiles, Workflow, AgentChoice } from "../domain/types.js";
 import { transportOf } from "../providers/registry.js";
-import { ConversationService } from "./conversations.js";
+import { ConversationService, titleFromPrompt } from "./conversations.js";
 import { ACTIVE_TURN_STATUSES } from "../domain/turns.js";
 import { buildAuthoringContext, composeAuthoringPrompt, type ContextHistoryMessage } from "./context.js";
 
@@ -168,6 +168,8 @@ export class AuthoringService {
       this.store.insertTurn({ id: turnId, draftId: id, providerId: selection.providerId, modelId: selection.modelId, providerRevision: selection.setting.revision, baseRevision: input.expectedRevision, conversationId: conversation.id, status: "queued", createdAt: now });
       this.store.transitionTurn(turnId, ["queued"], { status: "running", connectionGeneration: 0 });
       this.store.message(id, turnId, "user", { text: input.prompt, providerId: selection.providerId, modelId: selection.modelId }, conversation.id);
+      // 首条用户消息确定性生成标题；用户已手动命名则不覆盖。
+      this.store.setTitleIfUnset(conversation.id, titleFromPrompt(input.prompt));
       this.store.exec("UPDATE drafts SET updated_at=? WHERE id=?", now, id);
       this.store.append("authoring_turn", turnId, "turn.queued", { conversationId: conversation.id, mode: conversation.mode, contextMode: conversation.contextMode });
       this.store.append("authoring_turn", turnId, "turn.started", { conversationId: conversation.id, connectionGeneration: 0 });

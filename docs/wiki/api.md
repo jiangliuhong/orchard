@@ -14,6 +14,7 @@
 | 草稿列表 / 创建 | `GET /drafts` / `POST /drafts` |
 | 草稿快照 / 保存文件 | `GET /drafts/:id` / `PATCH /drafts/:id` |
 | 对话列表 / 创建重置 | `GET /drafts/:id/conversations` / `POST /drafts/:id/conversations` |
+| 对话历史管理 | `POST /drafts/:id/conversations/:cid/resume` / `rebuild` / `archive` / `restore` / `rename` |
 | 对话消息 | `GET /drafts/:id/messages?conversationId=...` |
 | 删除草稿 | `DELETE /drafts/:id` |
 | 发起创作 | `POST /drafts/:id/turns` |
@@ -39,7 +40,7 @@
 }
 ```
 
-创建草稿时省略 workflowId 即创建新工作流候选。轮次请求包含 requestId、expectedRevision、providerId、modelId、prompt，可选 `conversationId` 与 `mode`（single/multi）；缺省时使用当前对话，配置/模型快照变化会原子轮换。创建/重置对话请求包含 providerId、modelId、expectedRevision、requestId，可选 mode 与 rebuildFromId；操作不调用模型、不提高草稿 revision。手动保存文件包含 expectedRevision 和完整 files 字典。发布包含 requestId 和 expectedRevision。草稿测试包含 requestId、expectedRevision 和 input；测试前校验草稿修订，冻结定义、模型配置、布局与编译脚本为不可变快照，不创建 workflow_versions 记录，也不改变草稿状态或当前发布版本。运行包含 requestId、input、可选 versionId，省略版本时选当前发布版本。
+创建草稿时省略 workflowId 即创建新工作流候选。轮次请求包含 requestId、expectedRevision、providerId、modelId、prompt，可选 `conversationId` 与 `mode`（single/multi）；缺省时使用当前对话，配置/模型快照变化会原子轮换（旧对话转 idle 历史）。创建/重置对话请求包含 providerId、modelId、expectedRevision、requestId，可选 mode 与 rebuildFromId；操作不调用模型、不提高草稿 revision。对话状态机为 current（当前，每草稿至多一个）/ idle（可继续历史）/ archived（用户归档，archived_at 记录归档时间）/ needs_rebuild（后端上下文不可恢复，保留作诊断历史，不占当前名额）；历史管理命令均携带 requestId 与 expectedRevision，存在活动轮次（queued/running/cancel_requested）时拒绝并返回 409 / DRAFT_BUSY；跨草稿会话 ID 统一 404。resume 将 idle 设为当前（原当前转 idle）；rebuild 等价于携带 rebuildFromId 的创建，原会话保留；archive 需二次确认且仅限 current/idle；restore 将 archived 设为当前；rename 修改标题（1–200 字符，不影响消息与上下文）。对话无 current 时隐式提交轮次：最新对话为 needs_rebuild 返回 409 / SESSION_REBUILD_REQUIRED，存在其他存量对话返回 409 / CONVERSATION_CONFLICT，空草稿首轮懒创建。对话列表按最近活动倒序，条目含 title（缺省由首条用户消息确定性生成）、archivedAt、lastUserMessage、lastTurnStatus、activeTurnId 等派生字段。手动保存文件包含 expectedRevision 和完整 files 字典。发布包含 requestId 和 expectedRevision。草稿测试包含 requestId、expectedRevision 和 input；测试前校验草稿修订，冻结定义、模型配置、布局与编译脚本为不可变快照，不创建 workflow_versions 记录，也不改变草稿状态或当前发布版本。运行包含 requestId、input、可选 versionId，省略版本时选当前发布版本。
 
 同 scope/requestId 和相同内容返回原结果，同键不同内容拒绝。自动重试请求应复用标识；用户发起新的运行使用新标识。
 

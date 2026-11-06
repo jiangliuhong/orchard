@@ -21,8 +21,8 @@
 | --- | --- | --- |
 | `initialize` | 请求 `{id, method:"initialize", params:{clientInfo:{name,version}}}`；响应 `{id, result:{userAgent, codexHome, ...}}` | clientInfo 必填；握手完成后发送 `initialized` 通知 |
 | `thread/start` | 参数含 `model`、`cwd`、`ephemeral`、`sandbox`、`approvalPolicy`、`config`(object)；响应 `result.thread.id` | ephemeral thread 用于单次调用 |
-| `thread/resume` | 必填 `threadId`；可重新指定 model / cwd / sandbox / approvalPolicy / config；响应 `result.thread.id` | 失败时按错误文本分类：明确 not found → SESSION_REBUILD_REQUIRED |
-| `turn/start` | 必填 `threadId`、`input: [{type:"text", text, text_elements:[]}]`；可选 `outputSchema`；响应 `result.turn.id`、`turn.status`（inProgress） | 响应前到达的通知先暂存 |
+| `thread/resume` | 必填 `threadId`；可重新指定 model / cwd / sandbox / approvalPolicy / config；响应 `result.thread.id` | 失败时按错误文本分类：明确 not found → SESSION_REBUILD_REQUIRED。**2026-11-06 实测**：格式非法 threadId 报 `invalid session id: invalid character…`，同为永久性错误，已归入 SESSION_REBUILD_REQUIRED |
+| `turn/start` | 必填 `threadId`、`input: [{type:"text", text, text_elements:[]}]`；可选 `outputSchema`；响应 `result.turn.id`、`turn.status`（inProgress） | 响应前到达的通知先暂存。**2026-11-06 实测**：`outputSchema` 走 OpenAI 严格结构化输出校验，`required` 必须覆盖全部 `properties`、仅支持 type/description/enum/properties/required/items/additionalProperties/format；不满足时请求被拒（`Invalid schema for response_format`）。实现仅对完全兼容的 schema 透传（`strictOutputSchema()`），否则省略并由宿主校验 |
 | `turn/completed` | `{threadId, turn:{id, status, error?, items[]}}`；`status ∈ completed/interrupted/failed/inProgress` | items 中 `type:"agentMessage"` 带 `{id, text}` 为最终消息 |
 | `item/agentMessage/delta` | `{threadId, turnId, itemId, delta}` 全必填 | 增量仅展示；completed item 覆盖增量缓冲 |
 | `item/completed` | `{threadId, turnId, item:{id, type, text}}` | agentMessage 完整文本以此为准 |

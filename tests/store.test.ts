@@ -6,7 +6,7 @@ import { canonicalJson, digest, FileStore } from "../src/persistence/files.js";
 import { Store } from "../src/persistence/store.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { join } from "node:path";
-import { RUN_SCHEMA } from "../src/persistence/schema.js";
+import { RUN_SCHEMA, MIGRATE_V2_TO_V3 } from "../src/persistence/schema.js";
 
 const legacyRunSchema = `
 CREATE TABLE runs (
@@ -139,7 +139,7 @@ test("schema v1 upgrades atomically and preserves runs, node references, events,
   insert("INSERT INTO command_receipts(scope,request_id,request_hash,result_json,created_at) VALUES('migration-test','request',?,?,?)", digest(canonicalJson({})), JSON.stringify({ id: runId }), now);
   database.close();
   const upgraded = new Store(root);
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 3);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 4);
   assert.equal(upgraded.one("PRAGMA foreign_keys")!.foreign_keys, 1);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   assert.deepEqual(upgraded.run(runId), { id: runId, workflowVersionId: versionId, draftId: null, draftRevision: null, snapshotPath: null, status: "succeeded", input, output: { done: true }, activeNodeId: null, error: undefined, createdAt: now, startedAt: now, endedAt: now });
@@ -182,7 +182,7 @@ const turnColumns = (store: Store) =>
 const indexNames = (store: Store) =>
   store.all("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).sort();
 
-test("v2 databases upgrade to an equivalent v3 schema and old rows keep NULL associations", t => {
+test("v2 databases upgrade to an equivalent v4 schema and old rows keep NULL associations", t => {
   const root = temporary(t), now = Date.now();
   const legacyTurnId = randomUUID();
   const legacy = new DatabaseSync(join(root, "workbench.db"));
@@ -196,7 +196,7 @@ test("v2 databases upgrade to an equivalent v3 schema and old rows keep NULL ass
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 3);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 4);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // 旧行保留且关联为 NULL；不自动创建对话。
   assert.equal(upgraded.one("SELECT conversation_id FROM authoring_turns WHERE id=?", legacyTurnId)!.conversation_id, null);
@@ -231,7 +231,7 @@ test("conversation writes validate cross-draft and turn ownership, deletion clea
   const draftB = await authoring.create(undefined, randomUUID());
   const now = Date.now();
   const conversationId = randomUUID();
-  store.insertConversation({ id: conversationId, draftId: draftA.id, mode: "multi", contextMode: "reconstructed", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, createdAt: now, lastUsedAt: null });
+  store.insertConversation({ id: conversationId, draftId: draftA.id, mode: "multi", contextMode: "reconstructed", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
   const turnId = randomUUID();
   store.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,conversation_id,created_at) VALUES(?,?,?,'m',1,'succeeded',0,?,?)", turnId, draftA.id, "test-provider", conversationId, now);
   store.message(draftA.id, turnId, "user", { text: "ok" }, conversationId);
@@ -245,8 +245,8 @@ test("conversation writes validate cross-draft and turn ownership, deletion clea
   assert.equal(store.messages(draftA.id, null).length, 0);
   // 自引用重建链：删除草稿时置 NULL 后删除，不触发外键失败。
   const rebuildId = randomUUID();
-  store.archiveCurrentConversations(draftA.id);
-  store.insertConversation({ id: rebuildId, draftId: draftA.id, mode: "multi", contextMode: "reconstructed", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: conversationId, createdAt: now, lastUsedAt: null });
+  store.demoteCurrentConversation(draftA.id);
+  store.insertConversation({ id: rebuildId, draftId: draftA.id, mode: "multi", contextMode: "reconstructed", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: conversationId, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
   assert.doesNotThrow(() => store.deleteDraft(draftA.id));
   assert.equal(store.one("SELECT id FROM agent_conversations WHERE draft_id=?", draftA.id), undefined);
 });
@@ -258,7 +258,7 @@ test("recovery interrupts active turns and marks uncertain conversations needs_r
     const draftId = randomUUID(), conversationId = randomUUID();
     store.exec("INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES(?,NULL,NULL,0,'unused','{}','draft',?,?)", draftId, now, now);
     if (withConversation) {
-      store.insertConversation({ id: conversationId, draftId, mode: "multi", contextMode: "native", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "m", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, createdAt: now, lastUsedAt: null });
+      store.insertConversation({ id: conversationId, draftId, mode: "multi", contextMode: "native", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "m", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
     }
     store.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,conversation_id,submission_state,created_at) VALUES(?,?,?,'m',1,?,?,?,?,?)", turnId, draftId, "test-provider", status, 0, withConversation ? conversationId : null, submission, now);
     return conversationId;
@@ -281,4 +281,103 @@ test("recovery interrupts active turns and marks uncertain conversations needs_r
   // 恢复后同草稿可再次提交（活动名额已释放）。
   const draftId = recovered.one<{ draft_id: string }>("SELECT draft_id FROM authoring_turns WHERE id='t-settled'")!.draft_id;
   assert.doesNotThrow(() => recovered.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,created_at) VALUES(?,?,'test-provider','m',1,'queued',0,?)", randomUUID(), draftId, Date.now()));
+});
+
+test("v3 databases upgrade to v4: rotation archived rows become idle, archived_at approximates, diagnostics coexist with current", t => {
+  const root = temporary(t), now = Date.now();
+  const legacy = new DatabaseSync(join(root, "workbench.db"));
+  legacy.exec(SCHEMA_V2);
+  legacy.exec(MIGRATE_V2_TO_V3);
+  legacy.exec("INSERT INTO provider_settings(id,enabled,config_json,models_json,default_model,revision,updated_at) VALUES('test-provider',1,'{}','[]','',1,0)");
+  const insert = (sql: string, ...params: SQLInputValue[]) => legacy.prepare(sql).run(...params);
+  insert("INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('draft-v3',NULL,NULL,0,'unused','{}','draft',?,?)", now, now);
+  const conv = (id: string, status: string, contextMode: string, updatedAt: number) => insert(
+    "INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,transport,connection_fingerprint,backend_generation,created_at,updated_at) VALUES(?,?,'multi',?,?,'test-provider',1,'m','legacy','fp',0,?,?)",
+    id, "draft-v3", contextMode, status, now, updatedAt);
+  conv("c-archived", "archived", "reconstructed", now + 5000);
+  conv("c-current", "current", "reconstructed", now + 7000);
+  // v3 语义下 needs_rebuild 占用当前名额，不可能与 current 并存；诊断并存是 v4 能力，迁移后验证。
+  insert("INSERT INTO authoring_messages(id,draft_id,turn_id,sequence,role,content_json,created_at,conversation_id) VALUES('m1','draft-v3',NULL,1,'user',?,?,'c-archived')", JSON.stringify({ text: "旧会话首条" }), now);
+  legacy.close();
+  const upgraded = new Store(root);
+  t.after(() => upgraded.close());
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 4);
+  assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
+  // §4.1/§4.2：存量 archived 为轮换产物 → idle；archived_at 取迁移前 updated_at 近似。
+  const archived = upgraded.conversation("c-archived")!;
+  assert.equal(archived.status, "idle");
+  assert.equal(archived.title, null);
+  assert.equal(archived.archivedAt, now + 5000);
+  assert.equal(upgraded.conversation("c-current")!.status, "current");
+  assert.equal(upgraded.conversation("c-current")!.archivedAt, null);
+  // needs_rebuild 诊断历史与 current 并存（索引谓词收窄为仅 current）。
+  upgraded.insertConversation({ id: "c-needs", draftId: "draft-v3", mode: "multi", contextMode: "reconstructed", status: "needs_rebuild", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
+  assert.equal(upgraded.conversation("c-needs")!.status, "needs_rebuild");
+  assert.equal(upgraded.currentConversation("draft-v3")!.id, "c-current");
+  assert.equal(upgraded.userMessageText("c-archived", "first"), "旧会话首条");
+  // 新库与升级库结构等价。
+  const freshRoot = temporary(t), fresh = new Store(freshRoot); t.after(() => fresh.close());
+  assert.deepEqual(conversationTableColumns(upgraded), conversationTableColumns(fresh));
+  assert.deepEqual(indexNames(upgraded).filter(name => name !== "queued_runs"), indexNames(fresh).filter(name => name !== "queued_runs"));
+});
+
+test("conversation history state machine: demote, resume, archive, restore, rename and column constraints", async t => {
+  const { store, authoring } = setup(t); t.after(() => store.close());
+  const draft = await authoring.create(undefined, randomUUID());
+  const insert = (id: string, status: "current" | "idle" | "archived" | "needs_rebuild") => store.insertConversation({
+    id, draftId: draft.id, mode: "multi", contextMode: "reconstructed", status, providerId: "test-provider", providerRevision: 1,
+    modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0,
+    syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: Date.now(), lastUsedAt: null,
+  });
+  insert("c1", "current");
+  // 唯一 current：第二个 current 拒绝；needs_rebuild 不占当前名额。
+  assert.throws(() => insert("c2", "current"), /UNIQUE/);
+  insert("c2", "idle");
+  insert("c3", "needs_rebuild");
+  // 轮换：仅 current 转 idle。
+  assert.equal(store.demoteCurrentConversation(draft.id), 1);
+  assert.equal(store.conversation("c1")!.status, "idle");
+  assert.equal(store.conversation("c3")!.status, "needs_rebuild");
+  // 继续：c2 成为唯一 current。
+  assert.equal(store.resumeConversation(draft.id, "c2").status, "current");
+  assert.equal(store.conversation("c1")!.status, "idle");
+  // 归档：current → archived 且写入 archived_at；needs_rebuild 不可归档。
+  const archived = store.archiveConversation(draft.id, "c2");
+  assert.equal(archived.status, "archived");
+  assert.ok(archived.archivedAt !== null);
+  assert.equal(store.currentConversation(draft.id), undefined);
+  assert.throws(() => store.transaction(() => store.archiveConversation(draft.id, "c3")), /仅可归档/);
+  assert.equal(store.conversation("c3")!.status, "needs_rebuild");
+  // 恢复：archived → current，archived_at 保留作审计；idle 继续时原 current 转 idle。
+  insert("c4", "current");
+  const restored = store.restoreConversation(draft.id, "c2");
+  assert.equal(restored.status, "current");
+  assert.equal(restored.archivedAt, archived.archivedAt);
+  assert.equal(store.conversation("c4")!.status, "idle");
+  // 改名与标题回填。
+  assert.equal(store.renameConversation(draft.id, "c2", "  手动标题  ").title, "手动标题");
+  assert.throws(() => store.renameConversation(draft.id, "c2", "   "), /标题长度/);
+  assert.throws(() => store.renameConversation(draft.id, "c2", "x".repeat(201)), /标题长度/);
+  store.setTitleIfUnset("c2", "自动标题");
+  assert.equal(store.conversation("c2")!.title, "手动标题");
+  store.setTitleIfUnset("c4", "自动标题");
+  assert.equal(store.conversation("c4")!.title, "自动标题");
+  // 非法状态转换（须在事务中调用，抛出即回滚）。
+  assert.throws(() => store.transaction(() => store.resumeConversation(draft.id, "c2")), /仅可继续 idle/);
+  assert.throws(() => store.transaction(() => store.restoreConversation(draft.id, "c4")), /仅可恢复已归档/);
+  // 列约束：archived 必有 archived_at；标题长度上限。
+  assert.throws(() => store.exec("UPDATE agent_conversations SET status='archived' WHERE id='c4'"), /CHECK/);
+  assert.throws(() => store.exec(`UPDATE agent_conversations SET title='${"x".repeat(201)}' WHERE id='c4'`), /CHECK/);
+  // 派生查询：首条/末条用户消息、最后轮次状态、活动轮次。
+  store.message(draft.id, null, "user", { text: "第一条" }, "c2");
+  store.message(draft.id, null, "user", { text: "第二条" }, "c2");
+  assert.equal(store.userMessageText("c2", "first"), "第一条");
+  assert.equal(store.userMessageText("c2", "last"), "第二条");
+  assert.equal(store.userMessageText("c1", "first"), null);
+  const turnId = randomUUID();
+  store.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,conversation_id,created_at) VALUES(?,?,?,'m',1,'succeeded',0,?,?)", turnId, draft.id, "test-provider", "c2", Date.now());
+  assert.equal(store.lastTurnStatus("c2"), "succeeded");
+  assert.equal(store.activeTurnId(draft.id), null);
+  store.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,conversation_id,created_at) VALUES(?,?,?,'m',1,'running',0,'c2',?)", randomUUID(), draft.id, "test-provider", Date.now());
+  assert.equal(store.activeTurnId(draft.id) !== null, true);
 });

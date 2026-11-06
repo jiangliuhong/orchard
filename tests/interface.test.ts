@@ -2,7 +2,7 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { JSDOM } from "jsdom";
-import type { Binding, ProviderView, NodeRun, StreamEvent, Workflow } from "../src/domain/types.js";
+import type { Binding, ConversationView, ProviderView, NodeRun, StreamEvent, Workflow } from "../src/domain/types.js";
 import { projectGraph, applyEventStatus, renderableWorkflow } from "../src/web/features/graph.js";
 import { mergeEvents } from "../src/web/lib/api.js";
 import { exampleFiles } from "./helpers.js";
@@ -623,4 +623,103 @@ test("final result copies and downloads the displayed text or JSON without alter
     if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard); else Reflect.deleteProperty(navigator, "clipboard");
     URL.createObjectURL = createURL; URL.revokeObjectURL = revokeURL; dom.window.HTMLAnchorElement.prototype.click = click;
   }
+});
+
+test("conversation panel lists history groups and wires resume, archive, rename and message filtering", async () => {
+  const originalFetch = globalThis.fetch;
+  const files = exampleFiles("conversation-draft");
+  const conversations: ConversationView[] = [
+    { id: "c-hist", draftId: "conversation-draft", mode: "multi", contextMode: "reconstructed", status: "idle", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 1, updatedAt: 1, lastUsedAt: null, connectionState: "absent", title: "历史对话标题", archivedAt: null, lastUserMessage: "历史摘要", lastTurnStatus: "succeeded", activeTurnId: null },
+    { id: "c-cur", draftId: "conversation-draft", mode: "multi", contextMode: "reconstructed", status: "current", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 2, updatedAt: 2, lastUsedAt: null, connectionState: "absent", title: "当前对话标题", archivedAt: null, lastUserMessage: "当前摘要", lastTurnStatus: null, activeTurnId: null },
+    { id: "c-arch", draftId: "conversation-draft", mode: "multi", contextMode: "reconstructed", status: "archived", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 3, updatedAt: 3, lastUsedAt: null, connectionState: "absent", title: "归档对话标题", archivedAt: 3, lastUserMessage: null, lastTurnStatus: null, activeTurnId: null },
+  ];
+  const messages = [
+    { id: "m1", draftId: "conversation-draft", turnId: null, sequence: 1, role: "user", content: { text: "当前消息内容" }, createdAt: 1, conversationId: "c-cur" },
+    { id: "m2", draftId: "conversation-draft", turnId: null, sequence: 2, role: "assistant", content: { text: "历史回复内容" }, createdAt: 2, conversationId: "c-hist" },
+  ];
+  let state = { id: "conversation-draft", workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft", publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files, turns: [] as { id: string; status: string }[], conversations, currentConversation: "c-cur" as string | null, messages };
+  const calls: { method: string; url: string; body: Record<string, unknown> }[] = [];
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  globalThis.fetch = async (url, options) => {
+    const path = String(url), method = options?.method ?? "GET";
+    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+    if (options?.method === "POST") {
+      const body = JSON.parse(String(options.body));
+      calls.push({ method: "POST", url: path, body });
+      const cid = path.match("/conversations/([^/]+)/(resume|rebuild|archive|restore|rename)")?.[1] ?? null;
+      if (path.endsWith("/resume")) { state = { ...state, currentConversation: cid!, conversations: state.conversations.map(c => ({ ...c, status: c.id === cid ? "current" : c.id === state.currentConversation ? "idle" : c.status })) }; }
+      if (path.endsWith("/archive")) { state = { ...state, currentConversation: state.currentConversation === cid ? null : state.currentConversation, conversations: state.conversations.map(c => ({ ...c, status: c.id === cid ? "archived" : c.status, archivedAt: c.id === cid ? 9 : c.archivedAt })) }; }
+      if (path.endsWith("/restore")) { state = { ...state, currentConversation: cid!, conversations: state.conversations.map(c => ({ ...c, status: c.id === cid ? "current" : c.status === "current" ? "idle" : c.status })) }; }
+      if (path.endsWith("/rename")) { state = { ...state, conversations: state.conversations.map(c => ({ ...c, title: c.id === cid ? String(body.title) : c.title })) }; }
+    }
+    return Response.json(state);
+  };
+  try {
+    render(createElement(DraftPage, { id: state.id }));
+    // 分组与条目：当前默认展示，历史分组可见；消息默认按当前对话过滤。
+    assert.ok(await screen.findByText("历史对话标题"));
+    assert.ok(screen.getByText("当前对话标题"));
+    assert.ok(screen.getByText("当前消息内容"));
+    assert.equal(screen.queryByText("历史回复内容"), null);
+    // 查看历史对话：点击标题切换消息视图，再点返回当前。
+    fireEvent.click(screen.getByRole("button", { name: "历史对话标题" }));
+    assert.ok(await screen.findByText("历史回复内容"));
+    assert.equal(screen.queryByText("当前消息内容"), null);
+    fireEvent.click(screen.getByRole("button", { name: "历史对话标题" }));
+    assert.ok(await screen.findByText("当前消息内容"));
+    // 继续：POST resume 后视图切到新当前对话（c-hist），原当前 c-cur 转为历史。
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/resume"))));
+    await screen.findByText("历史回复内容");
+    // 改名当前对话：内联输入 + rename 请求。
+    fireEvent.click(screen.getByRole("button", { name: "重命名对话 历史对话标题" }));
+    fireEvent.change(screen.getByLabelText("对话标题"), { target: { value: "改名后的标题" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存标题" }));
+    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/rename") && call.body.title === "改名后的标题")));
+    // 归档当前：需要确认，确认后无 current、发送禁用。
+    fireEvent.click(await screen.findByRole("button", { name: "归档对话 改名后的标题" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
+    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/archive"))));
+    await waitFor(() => assert.ok(screen.getByText(/没有进行中的对话/)));
+    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
+    // 已归档分组默认折叠；展开后可恢复。
+    fireEvent.click(screen.getByText((content, element) => element?.tagName === "SUMMARY" && content.startsWith("已归档")));
+    fireEvent.click(screen.getAllByRole("button", { name: "恢复" })[0]!);
+    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/restore"))));
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+});
+
+test("needs rebuild banner blocks sending and rebuild opens a fresh current conversation", async () => {
+  const originalFetch = globalThis.fetch;
+  const files = exampleFiles("rebuild-draft");
+  const broken: ConversationView = { id: "c-broken", draftId: "rebuild-draft", mode: "multi", contextMode: "native", status: "needs_rebuild", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "native", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 1, updatedAt: 1, lastUsedAt: null, connectionState: "broken", title: "中断对话标题", archivedAt: null, lastUserMessage: null, lastTurnStatus: "interrupted", activeTurnId: null };
+  let state = { id: "rebuild-draft", workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft", publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files, turns: [] as { id: string; status: string }[], conversations: [broken], currentConversation: null as string | null, messages: [] as unknown[] };
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+    if (options?.method === "POST") {
+      const body = JSON.parse(String(options.body));
+      calls.push({ url: path, body });
+      if (path.endsWith("/rebuild")) {
+        const fresh: ConversationView = { ...broken, id: "c-fresh", status: "current", rebuildFromId: "c-broken", title: null, connectionState: "absent" };
+        state = { ...state, conversations: [broken, fresh], currentConversation: "c-fresh" };
+      }
+    }
+    return Response.json(state);
+  };
+  try {
+    render(createElement(DraftPage, { id: state.id }));
+    assert.ok(await screen.findByText(/对话「中断对话标题」的后端上下文已中断/));
+    assert.ok(screen.getByText("需要重建"));
+    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
+    fireEvent.change(screen.getByLabelText("描述工作流需求"), { target: { value: "继续需求" } });
+    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(screen.getAllByRole("button", { name: "重建上下文" })[0]!);
+    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-broken/rebuild"))));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await waitFor(() => assert.equal(screen.queryByText(/对话「中断对话标题」/), null));
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
 });

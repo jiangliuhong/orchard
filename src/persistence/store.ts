@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, join } from "node:path";
 import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, SCHEMA, SCHEMA_VERSION } from "./schema.js";
+import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, SCHEMA, SCHEMA_VERSION } from "./schema.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
 import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
@@ -28,6 +28,8 @@ export interface ConversationRecord {
   backendGeneration: number;
   syncedRevision: number | null;
   rebuildFromId: string | null;
+  title: string | null;
+  archivedAt: number | null;
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
@@ -66,8 +68,8 @@ export class Store {
         check(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length === 0, "UNKNOWN_DATABASE", "拒绝初始化未知数据库");
         this.db.exec(`BEGIN; ${SCHEMA} COMMIT;`);
       } else {
-        // §20.3：接受所有受支持旧版本（1、2），顺序执行增量迁移至当前版本。
-        check([1, 2, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
+        // §20.3：接受所有受支持旧版本（1、2、3），顺序执行增量迁移至当前版本。
+        check([1, 2, 3, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
         if (version < SCHEMA_VERSION) {
           // 服务尚未启动且已持有独占数据目录锁。先完成 WAL checkpoint，关闭连接后
           // 再复制主文件，绝不复制正在写入的 WAL 数据库。备份失败则拒绝迁移。
@@ -98,7 +100,8 @@ export class Store {
               return { name, count: this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n };
             });
             if (version === 1) this.db.exec(MIGRATE_V1_TO_V2);
-            this.db.exec(MIGRATE_V2_TO_V3);
+            if (version <= 2) this.db.exec(MIGRATE_V2_TO_V3);
+            if (version <= 3) this.db.exec(MIGRATE_V3_TO_V4);
             check(this.db.prepare("PRAGMA foreign_key_check").all().length === 0, "MIGRATION_FAILED", "数据库升级外键校验失败");
             for (const { name, count } of counts) {
               check(this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n === count,
@@ -341,7 +344,7 @@ export class Store {
     return this.all("SELECT * FROM agent_conversations WHERE draft_id=? ORDER BY created_at,id", draftId).map(r => this.mapConversation(r));
   }
   currentConversation(draftId: string): ConversationRecord | undefined {
-    const r = this.one("SELECT * FROM agent_conversations WHERE draft_id=? AND status IN ('current','needs_rebuild') ORDER BY created_at DESC LIMIT 1", draftId);
+    const r = this.one("SELECT * FROM agent_conversations WHERE draft_id=? AND status='current' ORDER BY created_at DESC LIMIT 1", draftId);
     return r ? this.mapConversation(r) : undefined;
   }
   private mapConversation(r: Row): ConversationRecord {
@@ -351,11 +354,13 @@ export class Store {
       modelId: String(r.model_id), transport: String(r.transport) as "legacy" | "native", connectionFingerprint: String(r.connection_fingerprint),
       cliVersion: (r.cli_version as string | null) ?? null, backendRef: parsed<BackendRef>(r.backend_ref_json) ?? null,
       backendGeneration: Number(r.backend_generation ?? 0), syncedRevision: r.synced_revision === null || r.synced_revision === undefined ? null : Number(r.synced_revision),
-      rebuildFromId: (r.rebuild_from_id as string | null) ?? null, createdAt: Number(r.created_at), updatedAt: Number(r.updated_at),
+      rebuildFromId: (r.rebuild_from_id as string | null) ?? null, title: (r.title as string | null) ?? null,
+      archivedAt: r.archived_at === null || r.archived_at === undefined ? null : Number(r.archived_at),
+      createdAt: Number(r.created_at), updatedAt: Number(r.updated_at),
       lastUsedAt: r.last_used_at === null || r.last_used_at === undefined ? null : Number(r.last_used_at),
     };
   }
-  /** 插入新对话；不处理归档（由调用方在同一事务内先 archiveCurrentConversations）。 */
+  /** 插入新对话；不处理轮换（由调用方在同一事务内先 demoteCurrentConversation）。 */
   insertConversation(record: Omit<ConversationRecord, "updatedAt"> & { updatedAt?: number }): void {
     const now = record.updatedAt ?? Date.now();
     check(this.one("SELECT id FROM drafts WHERE id=?", record.draftId), "NOT_FOUND", "草稿不存在");
@@ -363,27 +368,84 @@ export class Store {
       "CONVERSATION_CONFLICT", "重建来源不属于该草稿", 409);
     if (record.backendRef !== null) this.validateBackendRef(record.backendRef);
     this.exec(
-      "INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,transport,connection_fingerprint,cli_version,backend_ref_json,backend_generation,synced_revision,rebuild_from_id,created_at,updated_at,last_used_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      "INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,transport,connection_fingerprint,cli_version,backend_ref_json,backend_generation,synced_revision,rebuild_from_id,title,archived_at,created_at,updated_at,last_used_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
       record.id, record.draftId, record.mode, record.contextMode, record.status, record.providerId, record.providerRevision, record.modelId,
       record.transport, record.connectionFingerprint, record.cliVersion, record.backendRef === null ? null : json(record.backendRef),
-      record.backendGeneration, record.syncedRevision, record.rebuildFromId, record.createdAt, now, record.lastUsedAt,
+      record.backendGeneration, record.syncedRevision, record.rebuildFromId, record.title, record.archivedAt, record.createdAt, now, record.lastUsedAt,
     );
   }
-  /** 将草稿当前（current/needs_rebuild）对话归档；返回受影响行数。 */
-  archiveCurrentConversations(draftId: string): number {
-    return Number(this.exec("UPDATE agent_conversations SET status='archived',updated_at=? WHERE draft_id=? AND status IN ('current','needs_rebuild')", Date.now(), draftId).changes);
+  /** 轮换：将当前对话转为 idle 历史状态；needs_rebuild 诊断历史不受影响。返回受影响行数。 */
+  demoteCurrentConversation(draftId: string): number {
+    return Number(this.exec("UPDATE agent_conversations SET status='idle',updated_at=? WHERE draft_id=? AND status='current'", Date.now(), draftId).changes);
   }
-  markConversation(id: string, status: "needs_rebuild" | "archived"): boolean {
-    return Number(this.exec(`UPDATE agent_conversations SET status=?,updated_at=? WHERE id=? AND status IN (${status === "needs_rebuild" ? "'current'" : "'current','needs_rebuild'"})`, status, Date.now(), id).changes) === 1;
+  markConversation(id: string, status: "needs_rebuild"): boolean {
+    return Number(this.exec("UPDATE agent_conversations SET status=?,updated_at=? WHERE id=? AND status='current'", status, Date.now(), id).changes) === 1;
+  }
+  /** idle → current 继续；原 current（若存在）先转为 idle，由唯一索引保证至多一个 current。 */
+  resumeConversation(draftId: string, id: string): ConversationRecord {
+    const target = this.conversation(id);
+    check(target !== undefined && target.draftId === draftId, "NOT_FOUND", "会话不属于该草稿", 404);
+    check(target.status === "idle", "CONVERSATION_CONFLICT", "仅可继续 idle 状态的历史对话", 409);
+    this.demoteCurrentConversation(draftId);
+    const changed = Number(this.exec("UPDATE agent_conversations SET status='current',updated_at=? WHERE id=? AND draft_id=? AND status='idle'", Date.now(), id, draftId).changes);
+    check(changed === 1, "CONVERSATION_CONFLICT", "仅可继续 idle 状态的历史对话", 409);
+    return this.conversation(id)!;
+  }
+  /** current/idle → archived（用户主动归档）；消息、轮次与审计数据保留。 */
+  archiveConversation(draftId: string, id: string): ConversationRecord {
+    const now = Date.now();
+    const changed = Number(this.exec("UPDATE agent_conversations SET status='archived',archived_at=?,updated_at=? WHERE id=? AND draft_id=? AND status IN ('current','idle')", now, now, id, draftId).changes);
+    check(changed === 1, "CONVERSATION_CONFLICT", "仅可归档当前或历史对话", 409);
+    return this.conversation(id)!;
+  }
+  /** archived → current 恢复；原 current（若存在）转为 idle；archived_at 保留作审计。 */
+  restoreConversation(draftId: string, id: string): ConversationRecord {
+    const target = this.conversation(id);
+    check(target !== undefined && target.draftId === draftId, "NOT_FOUND", "会话不属于该草稿", 404);
+    check(target.status === "archived", "CONVERSATION_CONFLICT", "仅可恢复已归档对话", 409);
+    this.demoteCurrentConversation(draftId);
+    const changed = Number(this.exec("UPDATE agent_conversations SET status='current',updated_at=? WHERE id=? AND draft_id=? AND status='archived'", Date.now(), id, draftId).changes);
+    check(changed === 1, "CONVERSATION_CONFLICT", "仅可恢复已归档对话", 409);
+    return this.conversation(id)!;
+  }
+  renameConversation(draftId: string, id: string, title: string): ConversationRecord {
+    const trimmed = title.trim();
+    check(trimmed.length > 0 && trimmed.length <= 200, "INVALID_TITLE", "标题长度须在 1 到 200 字符之间");
+    const changed = Number(this.exec("UPDATE agent_conversations SET title=?,updated_at=? WHERE id=? AND draft_id=?", trimmed, Date.now(), id, draftId).changes);
+    check(changed === 1, "NOT_FOUND", "会话不存在", 404);
+    return this.conversation(id)!;
+  }
+  /** 首条用户消息落库时回填确定性标题；用户已命名（或已回填）则不覆盖。 */
+  setTitleIfUnset(id: string, title: string): void {
+    this.exec("UPDATE agent_conversations SET title=? WHERE id=? AND title IS NULL", title, id);
+  }
+  /** 对话首条/最后一条用户消息文本（用于标题推导与列表摘要）；无则 null。 */
+  userMessageText(conversationId: string, position: "first" | "last"): string | null {
+    const order = position === "first" ? "ASC" : "DESC";
+    const row = this.one(`SELECT content_json FROM authoring_messages WHERE conversation_id=? AND role='user' ORDER BY sequence ${order} LIMIT 1`, conversationId);
+    if (!row) return null;
+    const content = parsed<{ text?: unknown }>(row.content_json);
+    return typeof content?.text === "string" ? content.text : null;
+  }
+  /** 对话最后一条轮次状态；无轮次则 null。 */
+  lastTurnStatus(conversationId: string): string | null {
+    const row = this.one("SELECT status FROM authoring_turns WHERE conversation_id=? ORDER BY created_at DESC, id DESC LIMIT 1", conversationId);
+    return row ? String(row.status) : null;
+  }
+  /** 草稿当前活动轮次（queued/running/cancel_requested）；无则 null。 */
+  activeTurnId(draftId: string): string | null {
+    const row = this.one("SELECT id FROM authoring_turns WHERE draft_id=? AND status IN ('queued','running','cancel_requested') LIMIT 1", draftId);
+    return row ? String(row.id) : null;
   }
   /** 显式列举公开字段，后端 ID / 文件路径 / 连接指纹不出现在 API DTO。 */
   conversationView(id: string, connectionState: ConversationView["connectionState"] = "absent"): ConversationView {
     const row = this.conversation(id);
     check(row, "NOT_FOUND", "会话不存在", 404);
     const { draftId, mode, contextMode, status, providerId, providerRevision, modelId, transport, cliVersion,
-      syncedRevision, rebuildFromId, createdAt, updatedAt, lastUsedAt } = row;
+      syncedRevision, rebuildFromId, title, archivedAt, createdAt, updatedAt, lastUsedAt } = row;
     return { id, draftId, mode, contextMode, status, providerId, providerRevision, modelId, transport, cliVersion,
-      syncedRevision, rebuildFromId, createdAt, updatedAt, lastUsedAt, connectionState };
+      syncedRevision, rebuildFromId, createdAt, updatedAt, lastUsedAt, connectionState,
+      title, archivedAt, lastUserMessage: null, lastTurnStatus: null, activeTurnId: null };
   }
   private validateBackendRef(ref: BackendRef): void {
     check(ref.version === 1 && (ref.kind === "codex" || ref.kind === "pi"), "INVALID_BACKEND_REF", "后端引用类型或版本无效");
