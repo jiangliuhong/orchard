@@ -6,11 +6,12 @@ export interface ProcessOptions {
   executable: string; args: string[]; cwd: string; input?: string; env?: Record<string, string>;
   signal?: AbortSignal; timeoutMs?: number; maxBytes?: number;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => void;
+  inheritEnv?: boolean;
 }
 export async function executeProcess(options: ProcessOptions): Promise<{ stdout: string; stderr: string; exitCode: number | null; durationMs: number }> {
   options.signal?.throwIfAborted();
   const started = Date.now(), maxBytes = options.maxBytes ?? 8 * 1024 * 1024;
-  const child = spawn(options.executable, options.args, { cwd: options.cwd, env: { ...process.env, ...options.env }, detached: process.platform !== "win32", shell: false, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(options.executable, options.args, { cwd: options.cwd, env: { ...(options.inheritEnv === false ? {} : process.env), ...options.env }, detached: process.platform !== "win32", shell: false, stdio: ["pipe", "pipe", "pipe"] });
   return new Promise((resolve, reject) => {
     let stdout = "", stderr = "", size = 0, stopped: AppError | undefined, settled = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;

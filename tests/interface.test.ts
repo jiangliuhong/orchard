@@ -33,14 +33,150 @@ const { ModelManager } = await import("../src/web/features/ModelManager.js");
 const { DraftPage } = await import("../src/web/features/DraftPage.js");
 const { RunPage } = await import("../src/web/features/RunPages.js");
 const { DeleteWorkflowButton } = await import("../src/web/features/DeleteWorkflowButton.js");
-const { WorkflowsPage } = await import("../src/web/features/WorkflowPages.js");
+const { WorkflowsPage, WorkflowPage } = await import("../src/web/features/WorkflowPages.js");
 const { SourceFileList } = await import("../src/web/features/SourceTabs.js");
 const { WorkflowOutputEditor } = await import("../src/web/features/WorkflowOutputEditor.js");
 const { FinalResult } = await import("../src/web/features/FinalResult.js");
 const { default: App } = await import("../src/web/App.js");
+const { ScriptsPage } = await import("../src/web/features/ScriptPages.js");
+const { ScriptNodePicker } = await import("../src/web/features/ScriptNodePicker.js");
+const { ScriptAgentPanel, ScriptAgentPreview } = await import("../src/web/features/ScriptAgentPanel.js");
+const { ScriptCleanup, ScriptReferences } = await import("../src/web/features/ScriptVersionPanels.js");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { ThemePicker, ThemeProvider, themeStorageKey } = await import("../src/web/lib/theme.js");
 afterEach(() => cleanup());
+test("script list filters request server pagination and exposes script creation", async () => {
+  const originalFetch = globalThis.fetch, requests: string[] = [];
+  globalThis.fetch = async url => {
+    requests.push(String(url));
+    return Response.json({ total: 1, items: [{ id: "normalize", name: "文本清洗", runtime: "nodejs", status: "published", currentDraftVersionId: "draft-id", currentPublishedVersionId: "version-id", publishedVersion: 2, updatedAt: 0 }] });
+  };
+  try {
+    render(createElement(ScriptsPage));
+    assert.ok(await screen.findByRole("link", { name: /文本清洗/ }));
+    assert.ok(screen.getByText(/发布版本 v2/));
+    fireEvent.change(screen.getByLabelText("搜索脚本"), { target: { value: "clean" } });
+    fireEvent.change(screen.getByLabelText("筛选运行时"), { target: { value: "shell" } });
+    await waitFor(() => assert.ok(requests.some(url => url.includes("q=clean") && url.includes("runtime=shell") && url.includes("offset=0"))));
+    fireEvent.click(screen.getByRole("button", { name: "新建脚本" }));
+    assert.ok(screen.getByLabelText("脚本 ID"));
+    assert.ok(screen.getByLabelText("运行时"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("workflow script picker applies a fixed published version and retains the input binding", async () => {
+  const originalFetch = globalThis.fetch;
+  const script = { id: "normalize", name: "文本清洗", runtime: "nodejs", status: "published", currentPublishedVersionId: "version-2" };
+  globalThis.fetch = async url => Response.json(String(url).includes("/scripts/normalize")
+    ? { ...script, versions: [{ id: "version-1", number: 1, status: "published", timeoutMs: 60000, inputSchema: true, outputSchema: { type: "object" } }, { id: "version-2", number: 2, status: "published", timeoutMs: 300000, inputSchema: true, outputSchema: true }], draft: null }
+    : { items: [script] });
+  try {
+    const node = JSON.parse(exampleFiles()["workflow.json"]).nodes[0], applied: unknown[] = [];
+    node.config.timeoutMs = 120000;
+    const view = render(createElement(ScriptNodePicker, { node, disabled: false, onApply: value => applied.push(value) }));
+    await screen.findByRole("option", { name: /文本清洗/ });
+    fireEvent.change(screen.getByLabelText("脚本"), { target: { value: "normalize" } });
+    await screen.findByRole("option", { name: "v1" });
+    fireEvent.change(screen.getByLabelText("固定发布版本"), { target: { value: "version-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "应用此脚本版本" }));
+    assert.deepEqual(applied, [{ ...node, type: "script", config: { scriptId: "normalize", scriptVersionId: "version-1", timeoutMs: 60000 }, outputSchema: { type: "object" } }]);
+    const shorter = { ...node, config: { ...node.config, timeoutMs: 5000 } };
+    view.rerender(createElement(ScriptNodePicker, { node: shorter, disabled: false, onApply: value => applied.push(value) }));
+    fireEvent.click(screen.getByRole("button", { name: "应用此脚本版本" }));
+    assert.equal((applied[1] as { config: { timeoutMs: number } }).config.timeoutMs, 5000);
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("script references link to the referenced historical workflow version", async () => {
+  const originalFetch = globalThis.fetch, requests: string[] = [], originalUrl = window.location.href;
+  const files = exampleFiles(), definition = JSON.parse(files["workflow.json"]!), old = { id: "old-version", workflowId: "example", number: 1, definition, layout: {}, files, createdAt: 0 };
+  globalThis.fetch = async url => {
+    requests.push(String(url));
+    if (String(url).endsWith("/references")) return Response.json({ items: [{ workflowId: "example", workflowName: "历史工作流", versionId: "old-version", version: 1, nodeId: "a", scriptVersionId: "script-version" }] });
+    if (String(url).includes("/versions/")) return Response.json(old);
+    return Response.json({ id: "example", name: "历史工作流", currentVersionId: "latest-version", versions: [old, { ...old, id: "latest-version", number: 2 }] });
+  };
+  try {
+    const reference = render(createElement(ScriptReferences, { scriptId: "normalize" }));
+    const link = await screen.findByRole("link", { name: /历史工作流/ });
+    assert.equal(link.getAttribute("href"), "/workflows/example?versionId=old-version");
+    reference.unmount();
+    window.history.replaceState({}, "", "/workflows/example?versionId=old-version");
+    render(createElement(WorkflowPage, { id: "example" }));
+    await waitFor(() => assert.ok(requests.some(url => url.endsWith("/versions/old-version"))));
+    assert.equal(requests.some(url => url.endsWith("/versions/latest-version")), false);
+  } finally { globalThis.fetch = originalFetch; window.history.replaceState({}, "", originalUrl); }
+});
+test("script Agent proposal requires explicit confirmation and saves one revision", async () => {
+  const originalFetch = globalThis.fetch, requests: unknown[] = [];
+  const script = { id: "normalize", currentDraftVersionId: "draft-v1", draft: { revision: 2 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
+  const turn = { id: "turn-id", status: "succeeded", scriptId: script.id, draftVersionId: "draft-v1", baseRevision: 2, appliedRevision: null as number | null, validation: { valid: true, diagnostics: [] }, proposal: { summary: "增加清洗功能", changes: [], metadata: { name: "清洗脚本" } } };
+  globalThis.fetch = async (_url, options) => {
+    if (options?.method === "POST") { requests.push(JSON.parse(String(options.body))); turn.appliedRevision = 3; return Response.json({ version: { revision: 3 } }); }
+    return Response.json(turn);
+  };
+  let applied = 0;
+  try {
+    render(createElement(ScriptAgentPreview, { script, turnId: turn.id, disabled: false, onApplied: () => applied++, onTestInput: () => {} }));
+    await screen.findByText("增加清洗功能");
+    assert.equal(requests.length, 0);
+    fireEvent.click(screen.getByRole("button", { name: "确认应用变更…" }));
+    assert.equal(requests.length, 0);
+    fireEvent.click(screen.getByRole("button", { name: "确认并保存草稿" }));
+    await waitFor(() => assert.equal(requests.length, 1));
+    assert.equal((requests[0] as { expectedRevision: number }).expectedRevision, 2);
+    await waitFor(() => assert.equal(applied, 1));
+    await screen.findByText("已应用为草稿修订 3。");
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("script Agent preview blocks stale revision application and retains readable proposal", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ id: "turn-id", status: "succeeded", draftVersionId: "old-draft", baseRevision: 0, appliedRevision: null, proposal: { summary: "历史提案", changes: [], metadata: { name: "new" } }, validation: { valid: true, diagnostics: [] } });
+  try {
+    const script = { id: "normalize", currentDraftVersionId: "new-draft", draft: { revision: 1 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
+    render(createElement(ScriptAgentPreview, { script, turnId: "turn-id", disabled: false, onApplied: () => assert.fail("must not apply"), onTestInput: () => {} }));
+    await screen.findByText(/草稿已改变/);
+    assert.equal(screen.queryByRole("button", { name: "确认应用变更…" }), null);
+    assert.ok(screen.getByText("历史提案"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("script cleanup previews a range before the destructive request", async () => {
+  const originalFetch = globalThis.fetch, requests: { url: string; body: unknown }[] = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), body: JSON.parse(String(options?.body)) });
+    return Response.json(String(url).endsWith("/preview") ? { count: 7, token: "preview-token" } : { deletedTests: 7, deletedArtifacts: 2 });
+  };
+  let cleaned = 0;
+  try {
+    render(createElement(ScriptCleanup, { scriptId: "normalize", onCleaned: () => cleaned++ }));
+    fireEvent.click(screen.getByText("测试数据保留与清理"));
+    assert.equal(requests.length, 0);
+    fireEvent.click(screen.getByRole("button", { name: "预览清理范围" }));
+    await screen.findByText(/将永久删除 7 条/);
+    assert.equal(requests.length, 1);
+    fireEvent.click(screen.getByRole("button", { name: "确认永久清理" }));
+    await waitFor(() => assert.equal(cleaned, 1));
+    assert.equal((requests[1]!.body as { token: string }).token, "preview-token");
+    assert.equal((requests[1]!.body as { keepLatest: number }).keepLatest, 100);
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("newly completed script tests become available as Agent repair context without reloading the page", async () => {
+  const originalFetch = globalThis.fetch;
+  let available = false;
+  globalThis.fetch = async url => {
+    if (String(url).includes("/tests?")) return Response.json({ items: available ? [{ id: "failed-test", status: "failed", createdAt: 0 }] : [] });
+    return Response.json({ items: [], total: 0, activeCount: 0 });
+  };
+  try {
+    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
+    const props = { script, dirty: false, onApplied: () => {}, onTestInput: () => {} };
+    const view = render(createElement(ScriptAgentPanel, { ...props, testRefresh: 0 }));
+    await waitFor(() => assert.ok(screen.getByLabelText("引用测试结果")));
+    assert.equal(screen.queryByRole("option", { name: /failed/ }), null);
+    available = true;
+    view.rerender(createElement(ScriptAgentPanel, { ...props, testRefresh: 1 }));
+    assert.ok(await screen.findByRole("option", { name: /failed/ }));
+  } finally { globalThis.fetch = originalFetch; }
+});
 function provider(overrides: Partial<ProviderView> = {}): ProviderView {
   return { id: "third-provider", name: "Third Agent", enabled: true, config: { executable: "/usr/local/bin/third" }, models: [], defaultModel: "", revision: 1, updatedAt: 0, configSchema: true, capabilities: { modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: false, textStream: false }, readiness: { state: "ready" }, ...overrides };
 }

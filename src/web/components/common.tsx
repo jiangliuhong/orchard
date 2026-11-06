@@ -4,7 +4,7 @@ import { Button } from "./ui/button";
 import { AlertCircle, LoaderCircle, Plus } from "lucide-react";
 import type { WorkflowNode } from "../../domain/types.js";
 
-export const statuses: Record<string, string> = { draft: "草稿", publishing: "发布中", published: "已发布", pending: "未执行", queued: "排队中", running: "运行中", cancel_requested: "正在取消", succeeded: "成功", failed: "失败", cancelled: "已取消", interrupted: "已中断", skipped: "已跳过" };
+export const statuses: Record<string, string> = { archived: "已归档", draft: "草稿", publishing: "发布中", published: "已发布", pending: "未执行", queued: "排队中", running: "运行中", cancel_requested: "正在取消", succeeded: "成功", failed: "失败", cancelled: "已取消", interrupted: "已中断", skipped: "已跳过" };
 export function Status({ value }: { value: string }) { return <Badge variant="outline" className={`status status-${value}`}><span className="status-dot" />{statuses[value] ?? value}</Badge>; }
 export function ErrorNotice({ message }: { message?: string }) { return message ? <div role="alert" className="notice error"><AlertCircle size={16} /><span>{message}</span></div> : null; }
 export function Loading() { return <div className="empty"><LoaderCircle className="animate-spin" /><span>正在加载…</span></div>; }

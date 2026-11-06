@@ -8,6 +8,7 @@ import { Textarea } from "../components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { BackButton, ErrorNotice, Loading, NodePicker, Payload, Status } from "../components/common";
 import { ProviderPicker } from "./ProviderPicker";
+import { ScriptNodePicker } from "./ScriptNodePicker";
 import FlowCanvas from "./FlowCanvas";
 import { RunButton, SourceTabs } from "./WorkflowPages";
 import { renderableWorkflow } from "./graph";
@@ -79,6 +80,7 @@ export function DraftPage({ id }: { id: string }) {
     <ErrorNotice message={error || resource.error || providerResource.error} />
     {dirty && <div className="notice">先保存修改，再运行测试或发布。</div>}{brokenConversation && !draft.currentConversation && <div className="notice warning">对话「{brokenConversation.title ?? "未命名对话"}」的后端上下文已中断，仅可阅读；重建会开启新上下文并保留原对话作诊断历史。<Button size="sm" disabled={!!busy} onClick={() => void act("rebuild", async () => { setViewedConversationId(null); await send(`/drafts/${id}/conversations/${brokenConversation.id}/rebuild`, { ...choice, mode: brokenConversation.mode, expectedRevision: draft.revision, requestId: requestId() }); })}>重建上下文</Button></div>}
     {!draft.validation.valid && <div className="notice warning"><span>流程尚未通过校验，可以继续对话修复。</span>{draft.validation.diagnostics.map((d, i) => <pre key={i}>{d}</pre>)}</div>}
+    {draft.validation.valid && !!draft.validation.diagnostics.length && <div className="notice"><div>{draft.validation.diagnostics.map((diagnostic, index) => <p key={index}>{diagnostic}</p>)}</div></div>}
     {draft.workflowId && !draft.publishedVersionId && <div className="notice">正在编辑已有工作流，发布后将新增版本，历史版本保留。</div>}
     {draft.publishedVersionId && <div className="notice success">此草稿已发布。<a href={`/workflows/${graph?.id}`}>查看工作流 →</a></div>}
     <div className="mobile-workspace-tabs"><Button variant={mobileTab === "chat" ? "secondary" : "ghost"} onClick={() => setMobileTab("chat")}>对话</Button><Button variant={mobileTab === "flow" ? "secondary" : "ghost"} onClick={() => setMobileTab("flow")}>流程</Button><Button variant={mobileTab === "details" ? "secondary" : "ghost"} onClick={() => setMobileTab("details")}>节点</Button></div>
@@ -98,6 +100,7 @@ export function DraftPage({ id }: { id: string }) {
       </div></TabsContent><TabsContent value="node"><div className="detail-stack">{!node ? <p className="field-hint">请选择一个节点查看节点配置。</p> : <>
         <div className="field"><label htmlFor="node-name">节点名称</label><Input id="node-name" value={node.name} disabled={locked} onChange={e => editGraph(g => { g.nodes.find(item => item.id === node.id)!.name = e.target.value; })} /></div>
         <div className="field"><label>节点类型</label><span className="field-hint">{node.type}</span></div>
+        {["script", "code.nodejs", "shell"].includes(node.type) && <ScriptNodePicker key={`${node.id}:${node.config.scriptId ?? ""}`} node={node} disabled={locked || !!busy} onApply={replacement => editGraph(workflow => { workflow.nodes[workflow.nodes.findIndex(item => item.id === node.id)] = replacement; })} />}
         {node.type === "agent" && <><label>Agent 配置</label><ProviderPicker providers={providers} value={{ providerId: node.config.providerId ?? graph?.defaults?.agent?.providerId, modelId: node.config.modelId ?? graph?.defaults?.agent?.modelId }} disabled={locked} onChange={value => editGraph(g => { const target = g.nodes.find(n => n.id === node.id)!; target.config.providerId = value.providerId; target.config.modelId = value.modelId; })} /><div className="field"><label htmlFor="agent-prompt">节点提示词</label><Textarea id="agent-prompt" value={node.config.prompt ?? ""} disabled={locked} onChange={e => editGraph(g => { g.nodes.find(n => n.id === node.id)!.config.prompt = e.target.value; })} rows={5} /></div></>}
         <label>节点输入</label><Payload value={node.input} /><label>节点输出</label><Payload value={node.outputSchema} />
         {node.config.script && <Button variant="outline" onClick={() => { setFilePath(node.config.script!); }}>打开源码：{node.config.script}</Button>}

@@ -65,13 +65,13 @@ function VersionBody({ version }: { version: Version & { files: SourceFiles } })
 }
 export function WorkflowPage({ id }: { id: string }) {
   const { data, error } = useResource<WorkflowSummary & { versions: Version[] }>(`/workflows/${id}`);
-  const [versionId, setVersionId] = useState(""), [actionError, setActionError] = useState(""), [busy, setBusy] = useState(false);
+  const [versionId, setVersionId] = useState(() => new URLSearchParams(window.location.search).get("versionId") ?? ""), [actionError, setActionError] = useState(""), [busy, setBusy] = useState(false);
   const openDraft = async (mode: "edit" | "copy" | "restore") => {
     setBusy(true); setActionError("");
     try { await newDraft(id, mode === "edit" ? undefined : versionId, mode); }
     catch (e) { setActionError((e as Error).message); setBusy(false); }
   };
   useEffect(() => { if (data && !versionId) setVersionId(data.currentVersionId); }, [data, versionId]);
-  const version = useResource<Version & { files: SourceFiles }>(`/workflows/${id}/versions/${versionId || "pending"}`);
+  const version = useResource<Version & { files: SourceFiles }>(`/workflows/${id}/versions/${encodeURIComponent(versionId || "pending")}`);
   return <><BackButton /><PageHeading eyebrow="WORKFLOW" title={data?.name ?? "工作流详情"} description={data?.id}><Select value={versionId} onValueChange={setVersionId}><SelectTrigger aria-label="选择工作流版本"><SelectValue placeholder="历史版本" /></SelectTrigger><SelectContent>{data?.versions.map(v => <SelectItem value={v.id} key={v.id}>v{v.number}{v.id === data.currentVersionId ? " · 当前发布" : ""} · {new Date(v.createdAt).toLocaleString("zh-CN")}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={busy || !data} onClick={() => void openDraft("edit")}><Sparkles size={15} />编辑 / 发布新版本</Button><Button variant="outline" disabled={busy || !versionId} onClick={() => void openDraft("copy")}>复制为新工作流</Button><Button variant="outline" disabled={busy || !versionId || versionId === data?.currentVersionId} onClick={() => void openDraft("restore")}>还原到草稿</Button>{versionId && <RunButton workflowId={id} versionId={versionId} />}{data && <DeleteWorkflowButton id={id} name={data.name} disabled={busy} />}</PageHeading><ErrorNotice message={error || actionError || (versionId ? version.error : "")} />{versionId && versionId !== data?.currentVersionId && <div className="notice">正在查看历史版本。还原会创建同一工作流的草稿，发布后生成新版本并保留全部历史。</div>}{version.data && version.data.id === versionId ? <VersionBody key={versionId} version={version.data} /> : <Loading />}</>;
 }

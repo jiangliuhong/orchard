@@ -207,11 +207,11 @@ export class GraphRunner {
   }
   private async libraryScript(node: WorkflowNode, input: unknown, signal: AbortSignal) {
     const script = this.store.script(node.config.scriptId!), version = this.store.scriptVersion(node.config.scriptVersionId!);
-    check((script.status === "published" || script.status === "archived") && version.status === "published" && version.scriptId === script.id, "SCRIPT_VERSION_INVALID", "工作流引用的脚本版本无效");
+    check(script.currentPublishedVersionId && version.status === "published" && version.scriptId === script.id, "SCRIPT_VERSION_INVALID", "工作流引用的脚本版本无效");
     assertSchema(input, version.inputSchema, `${node.id} 脚本输入`);
     const tree = this.store.files.readScriptTree(version.sourceRef);
     const timeoutMs = Math.min(version.timeoutMs, node.config.timeoutMs ?? version.timeoutMs);
-    const result = await executeScript({ runtime: script.runtime, entryFile: version.entryFile, files: tree.files, input, cwd: this.store.files.path("runs"), timeoutMs, signal });
+    const result = await executeScript({ runtime: script.runtime, entryFile: version.entryFile, files: tree.files, resultMode: tree.definition?.resultMode, input, cwd: this.store.files.path("runs"), timeoutMs, signal });
     assertSchema(result.output, version.outputSchema, `${node.id} 脚本输出`);
     return { output: result.output, execution: { scriptId: script.id, scriptVersionId: version.id, exitCode: result.exitCode, durationMs: result.durationMs } };
   }

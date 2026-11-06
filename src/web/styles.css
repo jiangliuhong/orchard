@@ -571,3 +571,35 @@ summary { cursor: pointer; }
   .web-bridge-management { grid-template-columns: 1fr; }
   .web-bridge-app-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--border-soft); }
 }
+.script-filters { display: flex; align-items: center; gap: 10px; margin: 18px 0; }
+.script-filters input { flex: 1; min-width: 0; }
+.script-list { display: grid; gap: 12px; }
+.script-card { display: flex; justify-content: space-between; gap: 24px; padding: 22px; color: inherit; text-decoration: none; }
+.script-card h2 { margin: 0 0 6px; font-size: 17px; }
+.script-card p { margin: 12px 0 0; color: var(--muted-foreground); }
+.script-pagination { margin: 20px 0; justify-content: flex-end; }
+.script-workspace { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 20px; margin-top: 20px; align-items: start; }
+.script-editor, .script-test-panel { padding: 20px; min-width: 0; }
+.script-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; border: 0; padding: 0; margin: 16px 0; min-width: 0; }
+.script-fields label { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.script-workspace select, .script-filters select, #script-version { padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); max-width: 100%; }
+.script-source { min-height: 360px; height: 480px; margin: 16px 0; }
+.script-source .source-view { height: 100%; }
+.script-test-panel { display: flex; flex-direction: column; gap: 12px; }
+.script-test-panel .payload { max-height: 320px; overflow: auto; }
+@media (max-width: 900px) {
+  .script-workspace { grid-template-columns: minmax(0, 1fr); }
+  .script-fields { grid-template-columns: minmax(0, 1fr); }
+  .script-filters, .script-card { flex-wrap: wrap; }
+}
+.script-agent-panel, .script-secondary-panel { padding: 20px; margin: 20px 0; }
+.script-agent-panel { display: flex; flex-direction: column; gap: 14px; }
+.script-agent-panel .provider-picker { max-width: 640px; }
+.script-agent-history { display: grid; gap: 6px; }
+.script-agent-history button { display: flex; align-items: center; gap: 12px; padding: 10px; text-align: left; border: 1px solid var(--border); border-radius: 6px; }
+.script-agent-history button.is-active { background: var(--primary-soft); }
+.script-agent-history button span { overflow-wrap: anywhere; }
+.script-agent-history button small { margin-left: auto; white-space: nowrap; color: var(--muted-foreground); }
+.script-secondary-panel summary { cursor: pointer; font-weight: 600; margin-bottom: 12px; }
+.script-diff { height: 460px; }
+.script-agent-panel select, .script-secondary-panel select { max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); }

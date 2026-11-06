@@ -7,6 +7,7 @@ import { build } from "esbuild";
 import { check } from "../domain/errors.js";
 import { validateWorkflow } from "../domain/validation.js";
 import type { SourceFiles, Layout, Workflow } from "../domain/types.js";
+import type { ScriptDefinition } from "../domain/scripts.js";
 
 export const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 export const json = (value: unknown) => JSON.stringify(value ?? null);
@@ -41,14 +42,14 @@ export function readLayout(files: SourceFiles): Layout {
   }), "INVALID_LAYOUT", "布局应是节点 ID 到有限坐标的映射");
   return value;
 }
-export async function compileScripts(files: SourceFiles, workflow: Workflow): Promise<Record<string, string>> {
+export async function compileScripts(files: SourceFiles, workflow: Workflow, options: { requireDefaultExport?: boolean } = {}): Promise<Record<string, string>> {
   const compiled: Record<string, string> = {};
   for (const node of workflow.nodes) {
     if (node.type === "code.nodejs") {
       const script = safeFile(node.config.script!);
       check(Object.hasOwn(files, script) && /\.(?:ts|js|mjs)$/.test(script), "INVALID_SCRIPT", `缺少 Node.js 脚本: ${script}`);
       const result = await build({
-        entryPoints: [script], bundle: true, write: false, format: "esm", platform: "node", target: "node24", logLevel: "silent",
+        entryPoints: [script], bundle: true, write: false, format: "esm", platform: "node", target: "node24", logLevel: "silent", metafile: true,
         plugins: [{ name: "version-files", setup(builder) {
           builder.onResolve({ filter: /.*/ }, args => {
             if (builtinModules.includes(args.path) || args.path.startsWith("node:") && builtinModules.includes(args.path.slice(5))) return { path: args.path, external: true };
@@ -59,6 +60,7 @@ export async function compileScripts(files: SourceFiles, workflow: Workflow): Pr
           builder.onLoad({ filter: /.*/, namespace: "version" }, args => ({ contents: files[args.path], loader: args.path.endsWith(".ts") ? "ts" : "js" }));
         } }],
       });
+      if (options.requireDefaultExport) check(Object.values(result.metafile.outputs).some(output => output.exports.includes("default")), "INVALID_SCRIPT", "Node.js 入口必须包含默认导出");
       compiled[node.id] = result.outputFiles[0]!.text;
     } else if (node.type === "shell") {
       const script = safeFile(node.config.script!);
@@ -107,7 +109,7 @@ export class FileStore {
     check(digest(content) === hash, "ARTIFACT_MISMATCH", "产物摘要不一致");
     return JSON.parse(content.toString("utf8"));
   }
-  saveScriptTree(files: SourceFiles) {
+  saveScriptTree(files: SourceFiles, definition?: Omit<ScriptDefinition, "files">) {
     check(files && typeof files === "object" && !Array.isArray(files), "INVALID_SCRIPT", "缺少脚本文件集合");
     const entries = Object.entries(files);
     check(entries.length > 0 && entries.length <= 100, "INVALID_SCRIPT", "脚本文件数量超出限制");
@@ -118,7 +120,8 @@ export class FileStore {
       const bytes = Buffer.byteLength(code, "utf8"); check(bytes <= 1024 * 1024, "SCRIPT_LIMIT", `脚本文件超过 1 MiB: ${name}`); total += bytes;
     }
     check(total <= 4 * 1024 * 1024, "SCRIPT_LIMIT", "脚本源码总大小超过 4 MiB");
-    const content = json({ files: Object.fromEntries(entries.sort()) });
+    const content = canonicalJson({ files: Object.fromEntries(entries.sort()), ...(definition ? { definition } : {}) });
+    check(Buffer.byteLength(content) <= 32 * 1024 * 1024, "SCRIPT_LIMIT", "脚本产物编码后超过 32 MiB");
     const hash = digest(content), relative = `artifacts/scripts/${hash}/tree.json`, target = this.path(relative);
     if (!existsSync(target)) {
       const staging = this.path(`staging/${randomUUID()}`); mkdirSync(staging, { recursive: true, mode: 0o700 });
@@ -127,9 +130,11 @@ export class FileStore {
     }
     return { path: relative, hash };
   }
-  readScriptTree(path: string): { files: SourceFiles } {
+  readScriptTree(path: string): { files: SourceFiles; definition?: Omit<ScriptDefinition, "files"> } {
     check(/^artifacts\/scripts\/[a-f0-9]{64}\/tree\.json$/.test(path), "INVALID_PATH", "脚本产物引用无效");
-    const absolute = this.path(path), text = readFileSync(absolute, "utf8");
+    const absolute = this.path(path);
+    check(lstatSync(absolute).size <= 32 * 1024 * 1024, "ARTIFACT_MISMATCH", "脚本产物超限");
+    const text = readFileSync(absolute, "utf8");
     check(digest(text) === path.split("/")[2], "ARTIFACT_MISMATCH", "脚本产物已发生修改");
     const tree = JSON.parse(text); check(tree && tree.files && typeof tree.files === "object", "ARTIFACT_MISMATCH", "脚本产物无效");
     return tree;

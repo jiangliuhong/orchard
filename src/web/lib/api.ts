@@ -12,6 +12,14 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
 }
 export const send = <T>(path: string, value?: unknown, method = "POST") => api<T>(path, { method, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
 export const requestId = () => crypto.randomUUID();
+export function useCommandKey() {
+  const current = useRef<{ payload: string; id: string } | null>(null);
+  return (input: unknown) => {
+    const payload = JSON.stringify(input);
+    if (current.current?.payload !== payload) current.current = { payload, id: requestId() };
+    return current.current.id;
+  };
+}
 export const pretty = (value: unknown) => JSON.stringify(value, null, 2) ?? "—";
 export function useResource<T>(path: string) {
   const [data, setData] = useState<T>(), [error, setError] = useState(""), [revision, setRevision] = useState(0);

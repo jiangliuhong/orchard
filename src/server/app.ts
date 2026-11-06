@@ -10,13 +10,17 @@ import { assertSchema } from "../domain/validation.js";
 import { AppError, check } from "../domain/errors.js";
 import type { SourceFiles, StreamEvent } from "../domain/types.js";
 import { digest, json } from "../persistence/files.js";
-import { validateScript } from "../domain/scripts.js";
+import type { ScriptDefinition } from "../domain/scripts.js";
+import { ScriptLibrary } from "../authoring/script-library.js";
+import { ScriptAgentService, type ScriptAgentRequest } from "../authoring/script-agent.js";
+import { ScriptMaintenance } from "../persistence/script-maintenance.js";
 import { SCHEMA_VERSION } from "../persistence/schema.js";
 import { SessionManager } from "../providers/session-manager.js";
 import { agentLimits } from "../providers/agent-limits.js";
 import { codexNativeAdapter } from "../providers/codex-app-server.js";
 import { piNativeAdapter } from "../providers/pi-rpc.js";
 import { ScriptTestRunner } from "../runtime/script-tests.js";
+import { checkScriptSource } from "../runtime/script.js";
 import { WebBridgeGateway } from "../web-bridge/gateway.js";
 import { WebBridgeClient } from "../web-bridge/client.js";
 import { catalogHash } from "../web-bridge/catalog.js";
@@ -43,6 +47,9 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   const bridge = new WebBridgeGateway(new WebBridgeClient(store.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(store.root));
   const apiAuth = new LocalApiAuth(store.root);
   const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers, bridge), scriptTests = new ScriptTestRunner(store);
+  const scripts = new ScriptLibrary(store);
+  const scriptAgent = new ScriptAgentService(store, providers);
+  const scriptMaintenance = new ScriptMaintenance(store);
   const app = Fastify({ bodyLimit: 6 * 1024 * 1024, logger: false });
   const connections = new Set<() => void>();
   const publicValue = (value: unknown): unknown => {
@@ -52,6 +59,11 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     return artifact ? { artifact: { id, sha256: id, byteSize: Number(artifact.byte_size) } } : value;
   };
   const publicEvent = (event: StreamEvent) => ({ ...event, payload: publicValue(event.payload) });
+  const publicScriptTest = (test: ReturnType<Store["scriptTest"]>) => {
+    const input = publicValue(test.input);
+    return { ...test, input, inputArtifactId: input !== test.input ? (input as { artifact?: { id: string } })?.artifact?.id : undefined,
+      output: publicValue(test.output), stdout: publicValue(test.stdout), stderr: publicValue(test.stderr) };
+  };
   app.addHook("onRequest", async (request, reply) => {
     const host = request.headers.host ?? "";
     let hostname: string;
@@ -129,35 +141,89 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     try { return await providers.verifyModel(request.params.id, request.params.modelId, { signal: controller.signal }); }
     finally { reply.raw.off("close", disconnected); }
   });
-  app.get("/api/scripts", async () => ({ items: store.scripts() }));
-  app.post("/api/scripts", async request => {
-    const input = request.body as any; const definition = validateScript(input);
-    const tree = store.files.saveScriptTree(definition.files); return store.createScript(definition, tree.path, tree.hash);
+  app.get<{ Querystring: { q?: string; runtime?: string; status?: string; offset?: string; limit?: string } }>("/api/scripts", async request => {
+    const { q = "", runtime, status, offset = "0", limit = "50" } = request.query;
+    const start = cursor(offset), size = cursor(limit);
+    check(size > 0 && size <= 200, "INVALID_REQUEST", "每页数量须为 1 至 200");
+    check(!runtime || ["nodejs", "shell"].includes(runtime), "INVALID_REQUEST", "运行时无效");
+    check(!status || ["draft", "published", "archived"].includes(status), "INVALID_REQUEST", "状态无效");
+    const items = store.scripts().filter(script => (!runtime || script.runtime === runtime) && (!status || script.status === status) && `${script.id} ${script.name} ${script.description}`.toLowerCase().includes(q.toLowerCase()));
+    return { total: items.length, items: items.slice(start, start + size).map(script => ({
+      ...script, publishedVersion: script.currentPublishedVersionId ? store.scriptVersion(script.currentPublishedVersionId).number : null,
+      latestTest: store.one("SELECT status,draft_revision AS draftRevision,script_version_id AS scriptVersionId FROM script_tests WHERE script_id=? ORDER BY created_at DESC,id DESC LIMIT 1", script.id) ?? null,
+    })) };
   });
-  app.get<{ Params: { id: string } }>("/api/scripts/:id", async request => {
-    const script = store.script(request.params.id), versions = store.scriptVersions(request.params.id);
-    return { ...script, versions, draft: script.currentDraftVersionId ? { ...store.scriptVersion(script.currentDraftVersionId), files: store.files.readScriptTree(store.scriptVersion(script.currentDraftVersionId).sourceRef).files } : null };
-  });
+  app.post("/api/scripts", async request => scripts.create(request.body as ScriptDefinition & { requestId?: string }));
+  app.get<{ Params: { id: string } }>("/api/scripts/:id", async request => scripts.detail(request.params.id));
   app.patch<{ Params: { id: string } }>("/api/scripts/:id/draft", async request => {
-    const input = request.body as any, definition = validateScript({ ...input, id: request.params.id });
-    const tree = store.files.saveScriptTree(definition.files); return store.updateScriptDraft(request.params.id, input.expectedRevision, definition, tree.path, tree.hash);
+    return scripts.update(request.params.id, request.body as ScriptDefinition & { expectedRevision: number; requestId?: string });
   });
-  app.post<{ Params: { id: string } }>("/api/scripts/:id/archive", async request => store.archiveScript(request.params.id));
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/copy", async request => {
+    const input = body<{ id: string; name: string; versionId: string; requestId: string }>(request.body, { id: { type: "string" }, name: { type: "string" }, versionId: { type: "string" }, requestId }, ["id", "name", "versionId", "requestId"]);
+    return scripts.copy(request.params.id, input);
+  });
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/restore", async request => {
+    const input = body<{ versionId: string; expectedRevision: number; expectedDraftVersionId: string | null; replaceDraft: boolean; requestId: string }>(request.body, {
+      versionId: { type: "string", minLength: 1 }, expectedRevision, expectedDraftVersionId: { type: ["string", "null"] }, replaceDraft: { type: "boolean" }, requestId,
+    }, ["versionId", "expectedRevision", "expectedDraftVersionId", "replaceDraft", "requestId"]);
+    return scripts.restore(request.params.id, input);
+  });
+  app.get<{ Params: { id: string } }>("/api/scripts/:id/references", async request => scripts.references(request.params.id));
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/cleanup/preview", async request => {
+    const input = body<{ keepDays: number; keepLatest: number }>(request.body, { keepDays: { type: "integer", minimum: 1, maximum: 3650 }, keepLatest: { type: "integer", minimum: 1, maximum: 10000 } }, ["keepDays", "keepLatest"]);
+    return scriptMaintenance.preview(request.params.id, input);
+  });
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/cleanup", async request => {
+    const input = body<{ keepDays: number; keepLatest: number; token: string; requestId: string }>(request.body, { keepDays: { type: "integer", minimum: 1, maximum: 3650 }, keepLatest: { type: "integer", minimum: 1, maximum: 10000 }, token: { type: "string", minLength: 1 }, requestId }, ["keepDays", "keepLatest", "token", "requestId"]);
+    return scriptMaintenance.clean(request.params.id, input);
+  });
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/archive", async request => {
+    const result = store.archiveScript(request.params.id); scriptAgent.cancelScript(request.params.id); return result;
+  });
+  app.get<{ Params: { id: string }; Querystring: { offset?: string; limit?: string } }>("/api/scripts/:id/agent/turns", async request => scriptAgent.list(request.params.id, cursor(request.query.offset), request.query.limit === undefined ? 20 : cursor(request.query.limit)));
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/agent/turns", async (request, reply) => {
+    const input = body<ScriptAgentRequest>(request.body, {
+      prompt: { type: "string", minLength: 1, maxLength: 100000 }, providerId: { type: "string", minLength: 1 },
+      modelId: { type: "string", minLength: 1 }, conversationId: { type: "string", minLength: 1, maxLength: 100 },
+      expectedRevision, requestId, testId: { type: "string", minLength: 1 },
+    }, ["prompt", "providerId", "modelId", "expectedRevision", "requestId"]);
+    return reply.code(202).send(scriptAgent.start(request.params.id, input));
+  });
+  app.get<{ Params: { id: string; turnId: string } }>("/api/scripts/:id/agent/turns/:turnId", async request => scriptAgent.get(request.params.id, request.params.turnId));
+  app.post<{ Params: { id: string; turnId: string } }>("/api/scripts/:id/agent/turns/:turnId/cancel", async request => scriptAgent.cancel(request.params.id, request.params.turnId));
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/agent/apply", async request => {
+    const input = body<{ turnId: string; expectedRevision: number; requestId: string }>(request.body, { turnId: { type: "string", minLength: 1 }, expectedRevision, requestId }, ["turnId", "expectedRevision", "requestId"]);
+    return scriptAgent.apply(request.params.id, input);
+  });
   app.post<{ Params: { id: string } }>("/api/scripts/:id/publish", async request => {
     const input = body<{ expectedRevision: number; requestId: string }>(request.body, { expectedRevision, requestId }, ["expectedRevision", "requestId"]);
-    return store.command(`script-publish:${request.params.id}`, input.requestId, input, () => store.publishScript(request.params.id, input.expectedRevision));
+    const scope = `script-publish:${request.params.id}`;
+    if (store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) {
+      return store.command(scope, input.requestId, input, () => { throw new Error("unreachable"); });
+    }
+    const script = store.script(request.params.id);
+    if (script.currentDraftVersionId) {
+      const draft = store.scriptVersion(script.currentDraftVersionId);
+      await checkScriptSource({ runtime: script.runtime, entryFile: draft.entryFile, files: store.files.readScriptTree(draft.sourceRef).files });
+    }
+    return store.command(scope, input.requestId, input, () => store.publishScript(request.params.id, input.expectedRevision));
   });
   app.get<{ Params: { id: string; versionId: string } }>("/api/scripts/:id/versions/:versionId", async request => {
-    const version = store.scriptVersion(request.params.versionId); check(version.scriptId === request.params.id, "NOT_FOUND", "脚本版本不属于该脚本");
-    return { ...version, files: store.files.readScriptTree(version.sourceRef).files };
+    return scripts.version(request.params.id, request.params.versionId);
   });
-  app.get<{ Params: { id: string } }>("/api/scripts/:id/tests", async request => ({ items: store.scriptTests(request.params.id) }));
-  app.get<{ Params: { id: string; testId: string } }>("/api/scripts/:id/tests/:testId", async request => { const test = store.scriptTest(request.params.testId); check(test.scriptId === request.params.id, "NOT_FOUND", "脚本测试不属于该脚本"); return test; });
+  app.get<{ Params: { id: string }; Querystring: { offset?: string; limit?: string } }>("/api/scripts/:id/tests", async request => scripts.tests(request.params.id, cursor(request.query.offset), request.query.limit === undefined ? 20 : cursor(request.query.limit)));
+  app.get<{ Params: { id: string; testId: string } }>("/api/scripts/:id/tests/:testId", async request => { const test = store.scriptTest(request.params.testId); check(test.scriptId === request.params.id, "NOT_FOUND", "脚本测试不属于该脚本"); return publicScriptTest(test); });
+  app.post<{ Params: { id: string; testId: string } }>("/api/scripts/:id/tests/:testId/cancel", async request => {
+    const test = store.scriptTest(request.params.testId);
+    check(test.scriptId === request.params.id, "NOT_FOUND", "脚本测试不属于该脚本");
+    return publicScriptTest(scriptTests.cancel(test.id));
+  });
   app.post<{ Params: { id: string } }>("/api/scripts/:id/tests", async request => {
     const input = body<{ scriptVersionId?: string; draftRevision?: number; input: unknown; requestId: string }>(request.body, { scriptVersionId: { type: "string" }, draftRevision: { type: "integer", minimum: 0 }, input: {}, requestId }, ["input", "requestId"]);
     check(Boolean(input.scriptVersionId) !== (input.draftRevision !== undefined), "INVALID_REQUEST", "必须指定已发布版本或草稿修订号");
     const test = store.command(`script-test:${request.params.id}`, input.requestId, input, () => store.createScriptTest(request.params.id, input.scriptVersionId ?? null, input.draftRevision ?? null, input.input));
-    scriptTests.enqueue(test.id); return test;
+    check(store.one("SELECT 1 FROM script_tests WHERE id=?", test.id), "TEST_EXPIRED", "测试记录已清理，请使用新的请求标识", 410);
+    scriptTests.enqueue(test.id); return publicScriptTest(test);
   });
   app.get("/api/drafts", async () => ({ items: store.drafts().map(d => {
     const tree = store.files.readTree(d.artifactPath), definition = JSON.parse(tree.files["workflow.json"]!);
@@ -299,6 +365,6 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   app.addHook("preClose", async () => { for (const close of connections) close(); await providers.closeVerifications(); });
   // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
   // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
-  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); await scriptTests.close(); bridge.close(); await manager.close().catch(() => {}); store.close(); });
-  return { app, store, providers, authoring, runner, bridge };
+  app.addHook("onClose", async () => { await scriptAgent.close(); await authoring.close(); await runner.close(); await scriptTests.close(); bridge.close(); await manager.close().catch(() => {}); store.close(); });
+  return { app, store, providers, authoring, runner, bridge, scripts, scriptAgent };
 }

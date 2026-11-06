@@ -1,13 +1,27 @@
 import { Store } from "../persistence/store.js";
 import { failure, check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
-import { executeScript } from "./script.js";
+import { executeScript, ScriptExecutionError } from "./script.js";
 
 export class ScriptTestRunner {
   private active?: { id: string; controller: AbortController; job: Promise<void> };
   private closed = false;
-  constructor(readonly store: Store) { this.wake(); }
+  constructor(readonly store: Store) {
+    for (const test of store.all<{ id: string }>("SELECT id FROM script_tests WHERE status='running'")) {
+      store.finishScriptTest(test.id, { status: "failed", error: { code: "INTERRUPTED", message: "服务重启，测试已中断，请重新测试" }, stdout: "", stderr: "" });
+    }
+    this.wake();
+  }
   enqueue(id: string) { this.wake(); return this.store.scriptTest(id); }
+  cancel(id: string) {
+    const test = this.store.scriptTest(id);
+    if (this.active?.id === id) this.active.controller.abort();
+    else if (test.status === "queued") {
+      this.store.setScriptTestRunning(id);
+      this.store.finishScriptTest(id, { status: "cancelled", stdout: "", stderr: "" });
+    }
+    return this.store.scriptTest(id);
+  }
   private wake() {
     setImmediate(() => {
       if (this.active || this.closed) return;
@@ -23,18 +37,26 @@ export class ScriptTestRunner {
     let test = this.store.scriptTest(id);
     try {
       this.store.setScriptTestRunning(id); test = this.store.scriptTest(id);
-      const script = this.store.script(test.scriptId);
-      const versionId = test.scriptVersionId ?? script.currentDraftVersionId;
-      check(versionId, "NOT_FOUND", "脚本版本不存在");
-      const version = this.store.scriptVersion(versionId);
-      if (test.scriptVersionId) check(version.status === "published", "INVALID_STATE", "只能执行已发布脚本版本");
-      else check(version.revision === test.draftRevision, "REVISION_CONFLICT", "脚本草稿已更新，请重新测试");
-      assertSchema(test.input, version.inputSchema, "脚本输入");
-      const tree = this.store.files.readScriptTree(version.sourceRef);
-      const result = await executeScript({ runtime: script.runtime, entryFile: version.entryFile, files: tree.files, input: test.input, cwd: this.store.files.path("runs"), timeoutMs: version.timeoutMs, signal });
+      let definition = this.store.scriptTestSnapshot(id);
+      if (!definition) {
+        const script = this.store.script(test.scriptId);
+        const versionId = test.scriptVersionId ?? script.currentDraftVersionId;
+        check(versionId, "NOT_FOUND", "脚本版本不存在");
+        const version = this.store.scriptVersion(versionId);
+        if (test.scriptVersionId) check(version.status === "published", "INVALID_STATE", "只能执行已发布脚本版本");
+        else check(version.revision === test.draftRevision, "REVISION_CONFLICT", "脚本草稿已更新，请重新测试");
+        definition = this.store.scriptDefinition(script.id, versionId);
+      }
+      assertSchema(test.input, definition.inputSchema, "脚本输入");
+      const result = await executeScript({ ...definition, input: test.input, cwd: this.store.files.path("runs"), signal });
+      try { assertSchema(result.output, definition.outputSchema, "脚本输出"); }
+      catch (error) {
+        this.store.finishScriptTest(id, { ...result, status: "failed", error: failure(error) });
+        return;
+      }
       this.store.finishScriptTest(id, { status: "succeeded", ...result });
     } catch (error) {
-      this.store.finishScriptTest(id, { status: signal.aborted ? "cancelled" : "failed", error: failure(error), stdout: "", stderr: "" });
+      this.store.finishScriptTest(id, { stdout: "", stderr: "", ...(error instanceof ScriptExecutionError ? error.execution : {}), status: signal.aborted ? "cancelled" : "failed", error: failure(error) });
     }
   }
 }

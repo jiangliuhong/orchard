@@ -80,7 +80,7 @@ export class AuthoringService {
       const definition = readDefinition(files);
       files["workflow.json"] = JSON.stringify({ ...definition, id: `workflow-${randomUUID()}`, name: `${definition.name}（副本）` }, null, 2);
     }
-    const validation = await validateFiles(files), tree = this.store.files.saveTree(files);
+    const validation = await validateAuthoringFiles(this.store, files), tree = this.store.files.saveTree(files);
     return this.store.command(scope, requestId, input, () => {
       const current = this.store.workflows().find(w => w.id === workflowId);
       check(current, "NOT_FOUND", "工作流不存在");
@@ -102,7 +102,7 @@ export class AuthoringService {
       baseVersionId = workflow.currentVersionId;
       files = this.store.files.readTree(this.store.version(baseVersionId).artifactPath).files;
     } else files = initialFiles(`workflow-${randomUUID()}`);
-    const validation = await validateFiles(files), tree = this.store.files.saveTree(files);
+    const validation = await validateAuthoringFiles(this.store, files), tree = this.store.files.saveTree(files);
     return this.store.command("draft", requestId, { workflowId }, () => {
       const id = randomUUID(), now = Date.now();
       this.store.exec("INSERT INTO drafts VALUES(?,?,?,?,?,?,NULL,'draft',?,?)", id, workflowId ?? null, baseVersionId, 0, tree.path, json(validation), now, now);
@@ -126,7 +126,7 @@ export class AuthoringService {
   async update(id: string, revision: number, files: SourceFiles) {
     const draft = this.ensureEditable(id, revision), before = this.store.files.readTree(draft.artifactPath).files;
     checkFiles(files); check(this.identity(files) === this.identity(before), "IDENTITY_CHANGED", "不能修改工作流 ID");
-    const validation = await validateFiles(files), tree = this.store.files.saveTree(files);
+    const validation = await validateAuthoringFiles(this.store, files), tree = this.store.files.saveTree(files);
     this.store.transaction(() => {
       this.ensureEditable(id, revision);
       this.store.exec("UPDATE drafts SET artifact_path=?,validation_json=?,revision=revision+1,updated_at=? WHERE id=?", tree.path, json(validation), Date.now(), id);
@@ -227,7 +227,7 @@ export class AuthoringService {
       // 纯准备阶段（§19.3）：应用文件变更并静态检查；后续 validateFiles 诊断不通过仍可保存待修复草稿。
       const files = applyAuthoringChanges(before, response.changes);
       check(this.identity(files) === this.identity(before), "IDENTITY_CHANGED", "不能修改工作流 ID");
-      const validation = await validateFiles(files), tree = this.store.files.saveTree(files);
+      const validation = await validateAuthoringFiles(this.store, files), tree = this.store.files.saveTree(files);
       this.store.transaction(() => {
         controller.signal.throwIfAborted();
         check(this.store.turn(turnId).status === "running", "TURN_CANCELLED", "本轮已取消");
@@ -275,7 +275,7 @@ export class AuthoringService {
       const definition = await this.providers.freeze(readDefinition(original));
       const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
       const compiled = await compileScripts(files, definition), layout = readLayout(files);
-      this.store.assertWorkflowScripts(definition);
+      this.store.assertWorkflowScriptContracts(definition);
       const tree = this.store.files.saveTree(files, compiled);
       return this.store.command(scope, requestId, input, () => {
         const current = this.store.draft(id);
@@ -308,4 +308,12 @@ export class AuthoringService {
       this.sessionHandles.delete(conversationId);
     }
   }
+}
+async function validateAuthoringFiles(store: Store, files: SourceFiles) {
+  const validation = await validateFiles(files);
+  if (!validation.valid) return validation;
+  try {
+    const diagnostics = store.assertWorkflowScriptContracts(readDefinition(files));
+    return { valid: true, diagnostics: diagnostics.filter(item => item.status === "unknown").map(item => `${item.nodeId} ${item.contract}无法静态判定，实际运行时继续校验`) };
+  } catch (error) { return { valid: false, diagnostics: [error instanceof Error ? error.message : "脚本契约校验失败"] }; }
 }

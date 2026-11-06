@@ -13,6 +13,7 @@
 | `code.nodejs` | `script`，可选 `timeoutMs` | 默认导出函数的 JSON 返回值 |
 | `agent` | `prompt`，可选 `providerId` / `modelId` / `timeoutMs` | 经输出 Schema 校验的 JSON |
 | `shell` | `script`，可选 `resultMode` / `timeoutMs` | 默认 `{stdout,stderr,exitCode}`；`json` 模式读取结果文件 |
+| `script` | `scriptId`、`scriptVersionId`，可选 `timeoutMs` | 固定脚本版本的输出；运行时校验该版本 Schema |
 | `switch` | `cases: [{label,value}]`、`defaultLabel` | `{edgeId,value,reason}` |
 
 默认 Agent 选择位于 `defaults.agent`。发布时按节点、工作流默认、Provider 默认模型解析有效选择，保存明确 Provider / 模型。覆盖 Provider 时不会继承另一个 Provider 的模型。
@@ -81,3 +82,11 @@ printf 'received: %s\n' "$input"
 仅允许 `workflow.json`、`layout.json` 和脚本文件，最多 100 个文件，单个 1 MiB，总源码 4 MiB。拒绝绝对路径、`..`、符号链接及非法扩展名。
 
 `layout.json` 是节点 ID 到 `{x,y}` 的映射，不决定执行顺序。发布时固定定义、布局、源码与编译产物并校验摘要。一个版本可运行多次，修改会发布新版本。
+
+## 脚本库版本引用
+
+`script` 节点引用脚本库，不使用工作流内嵌文件路径。`config.scriptVersionId` 必须是指定脚本的已发布版本；超时可以比脚本版本更短，不能放宽版本的时限。库脚本的超时范围为 1 秒至 5 分钟。
+
+脚本发布新版本不会改变工作流的固定引用。归档禁止新引用，但已有发布工作流可继续执行原版本。脚本版本的源码、Schema、名称、说明及 Shell 输出协议保存在带摘要的不可变产物中；旧产物兼容原进程输出协议。
+
+编辑和发布时检查可判定的输入绑定及 Schema 包含关系，明确不兼容会阻止发布；信息不足和复杂组合会提示无法静态判定，运行时同时校验脚本和节点的输入输出。使用方法见[脚本库说明](../product/script-library.md)。

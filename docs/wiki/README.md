@@ -6,6 +6,7 @@
 
 - [页面使用说明](./product/interface.md)
 - [对话创作与发布](./product/authoring.md)
+- [脚本库、Agent 创作与版本复用](./product/script-library.md)
 
 ## 技术规范
 

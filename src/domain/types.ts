@@ -49,6 +49,8 @@ export type ScriptRuntime = "nodejs" | "shell";
 export type ScriptStatus = "draft" | "published" | "archived";
 export interface ScriptVersion {
   id: string; scriptId: string; number: number; status: "draft" | "published"; revision: number;
+  name?: string; description?: string; resultMode?: "process" | "json";
+  metadataSnapshot?: boolean;
   entryFile: string; timeoutMs: number; inputSchema: JsonSchema; outputSchema: JsonSchema; sourceRef: string; contentHash: string;
   validation: { valid: boolean; diagnostics: string[] }; createdAt: number; updatedAt: number; publishedAt: number | null;
 }

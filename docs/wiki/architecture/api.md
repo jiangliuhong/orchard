@@ -31,7 +31,36 @@
 | 创作事件 / SSE | `GET /turns/:id/events?after=0` / `GET /turns/:id/stream?after=0` |
 | 完整 JSON 产物 | `GET /artifacts/:id` |
 
-## 请求体
+## 脚本库接口
+
+以下端点同样使用 `/api` 前缀：
+
+| 操作 | 方法与路径 |
+| --- | --- |
+| 列表、创建 | `GET /scripts?q=&runtime=&status=&offset=0&limit=20` / `POST /scripts` |
+| 详情、更新草稿 | `GET /scripts/:id` / `PATCH /scripts/:id/draft` |
+| 固定版本 | `GET /scripts/:id/versions/:versionId` |
+| 发布、归档 | `POST /scripts/:id/publish` / `POST /scripts/:id/archive` |
+| 复制、还原 | `POST /scripts/:id/copy` / `POST /scripts/:id/restore` |
+| 工作流引用 | `GET /scripts/:id/references` |
+| 测试摘要、创建 | `GET /scripts/:id/tests?offset=0&limit=20` / `POST /scripts/:id/tests` |
+| 测试详情、取消 | `GET /scripts/:id/tests/:testId` / `POST /scripts/:id/tests/:testId/cancel` |
+| Agent 轮次列表、生成 | `GET /scripts/:id/agent/turns?offset=0&limit=20` / `POST /scripts/:id/agent/turns` |
+| Agent 详情、取消 | `GET /scripts/:id/agent/turns/:turnId` / `POST /scripts/:id/agent/turns/:turnId/cancel` |
+| 确认 Agent 变更 | `POST /scripts/:id/agent/apply` |
+| 清理预览、确认 | `POST /scripts/:id/cleanup/preview` / `POST /scripts/:id/cleanup` |
+
+脚本定义包含 `id,name,description,runtime,entryFile,inputSchema,outputSchema,files`，可选 `timeoutMs` 和 `resultMode`。`files` 为完整源码文件字典；Shell 的 `resultMode` 为 `process`（默认）或 `json`。创建/编辑建议携带 `requestId`（保留旧客户端省略的兼容），编辑还包含 `expectedRevision`，新客户端同时携带 `expectedDraftVersionId` 防止草稿替换后的修订号重用。
+
+复制包含 `id,name,versionId,requestId`；还原包含 `versionId,expectedRevision,expectedDraftVersionId,replaceDraft,requestId`，现有草稿必须显式确认替换。发布包含 `expectedRevision,requestId`。脚本列表最多每页 200 条，测试和 Agent 历史最多每页 100 条，列表返回摘要及 total。
+
+测试包含 `input,requestId`，并且必须恰好指定 `scriptVersionId` 或 `draftRevision`。测试绑定完整不可变快照；详情中的大字段可能返回 `{artifact:{id,sha256,byteSize}}`，大输入额外携带 `inputArtifactId` 以便准确复用。历史清理后原请求重试返回 410 / TEST_EXPIRED，不重新执行。
+
+Agent 生成包含 `providerId,modelId,prompt,expectedRevision,requestId`，可选 `conversationId,testId`，返回 202。通过轮次详情轮询状态；跨脚本轮次或测试访问返回 404。确认应用包含 `turnId,expectedRevision,requestId`，只允许在原草稿 ID 和修订上应用一次。服务重启中断未完成生成，不自动重试；归档后只读保留历史。
+
+清理预览包含 `keepDays,keepLatest`，返回 count、token 和每批上限。确认请求包含相同策略、token 和 requestId；范围改变时返回 409 / CLEANUP_CONFLICT。默认不自动清理，用户确认范围后才删除符合条件的历史测试和无引用产物。
+
+## 工作流请求体
 
 ```json
 {
