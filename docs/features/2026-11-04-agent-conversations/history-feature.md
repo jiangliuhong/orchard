@@ -158,14 +158,14 @@ API 以草稿为边界，所有写操作都需要幂等请求 ID 和草稿修订
 
 实现应同步更新：
 
-- `docs/wiki/interface.md`：补充对话选择器、新对话、继续对话和归档的页面说明。
-- `docs/features/agent-conversations/implementation-status.md`：记录历史筛选、归档恢复和真实环境验收进度。
+- `docs/wiki/product/interface.md`：补充对话选择器、新对话、继续对话和归档的页面说明。
+- `docs/features/2026-11-04-agent-conversations/implementation-status.md`：记录历史筛选、归档恢复和真实环境验收进度。
 - 对应 API、Store、服务层和 UI 的契约测试。
 
 ## 开发指导
 
 本节是交给实现 Agent 的执行规格。实现 Agent 应优先复用
-`docs/features/agent-conversations/design.md` 中已有的会话、轮次、幂等和恢复契约；本 feature 只补充历史管理和工作流绑定行为。若本节与底层设计冲突，以底层设计中“实现约束”章节为准，并在提交说明中指出冲突。
+`docs/features/2026-11-04-agent-conversations/design.md` 中已有的会话、轮次、幂等和恢复契约；本 feature 只补充历史管理和工作流绑定行为。若本节与底层设计冲突，以底层设计中“实现约束”章节为准，并在提交说明中指出冲突。
 
 ### 推荐实现顺序
 

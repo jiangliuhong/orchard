@@ -254,7 +254,7 @@ Orchard 启动本机 `pi --mode rpc`，使用 Pi 自定义 JSONL 命令、响应
 - [OpenAI Codex App Server 官方文档](https://learn.chatgpt.com/docs/app-server)：进程连接、初始化、thread/turn 和事件协议。
 - [Pi RPC 官方文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)：常驻进程、JSONL framing、响应关联与完成边界。
 - [Pi RPC Commands](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc-commands.md)：prompt、abort、会话管理与状态命令。
-- 项目当前行为参见 [Provider 文档](../../wiki/providers.md)、`src/providers/registry.ts`、`src/runtime/process.ts`、`src/authoring/service.ts` 和 `src/persistence/schema.ts`。
+- 项目当前行为参见 [Provider 文档](../../wiki/architecture/providers.md)、`src/providers/registry.ts`、`src/runtime/process.ts`、`src/authoring/service.ts` 和 `src/persistence/schema.ts`。
 
 ## 17. 实施决策与模块边界
 
@@ -852,6 +852,6 @@ Pi 会话文件由 Pi 管理格式，Orchard 不直接改写 JSONL 内容。工�
 3. 原生会话可在空闲后和正常重启后恢复；不确定执行明确中断，不自动重发。
 4. 无工具边界及本机认证／Magpie 兼容有对应验证记录。
 5. 数据迁移按审核后的精确方案执行，旧消息、文件、运行记录保留。
-6. 文档更新 `docs/wiki/providers.md`、`docs/wiki/authoring.md`、`docs/wiki/api.md`、`docs/wiki/verification.md`，清楚区分已测能力与未测范围。
+6. 文档更新 `docs/wiki/architecture/providers.md`、`docs/wiki/product/authoring.md`、`docs/wiki/architecture/api.md`、`docs/wiki/operations/verification.md`，清楚区分已测能力与未测范围。
 
 当前交付仅更新本设计。后续实施可先进行无需 schema 变更的协议与传输工作；进入第 20 节表结构实施前，应确认该精确提案已获审核。若评审调整字段或约束，先同步本文件，避免实现与批准方案分叉。

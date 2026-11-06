@@ -14,7 +14,7 @@ Switch 记录匹配值、选中连线和理由。Agent 输出必须满足声明�
 
 ## 数据
 
-新数据目录包含 `workbench.db`、`workbench.lock`、`artifacts/trees`、`artifacts/blobs` 和每次运行的 `runs/` 工作目录。结构有十二张表；初始结构批准于 OpenSpec 设计 D10，草稿测试字段变更批准于 2026-11-04 并记录在 `docs/wiki/draft-testing-design.md`。数据库只接受新工作台 application_id 与 schema version 2，自动在事务中升级 v1 并保留运行、节点、事件、产物和请求回执；不迁移旧 Orchard 库。
+新数据目录包含 `workbench.db`、`workbench.lock`、`artifacts/trees`、`artifacts/blobs` 和每次运行的 `runs/` 工作目录。结构有十二张表；初始结构批准于 OpenSpec 设计 D10，草稿测试字段变更批准于 2026-11-04 并记录在 `docs/wiki/decisions/draft-testing-design.md`。数据库只接受新工作台 application_id 与 schema version 2，自动在事务中升级 v1 并保留运行、节点、事件、产物和请求回执；不迁移旧 Orchard 库。
 
 流程文件和编译产物以完整摘要固化；节点启动前验证。较大 JSON 结果写入摘要产物，API 返回引用，完整结果由产物端点显式读取。结果超过 16 MiB、进程输出超过 8 MiB 会失败。日志分块保存，事件按 stream 分配单调 sequence，事务提交后才通知订阅者。
 
