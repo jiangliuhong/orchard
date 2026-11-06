@@ -43,7 +43,7 @@ export function renderableWorkflow(value: unknown): value is Workflow {
   if (!value || typeof value !== "object") return false;
   const g = value as Workflow;
   return Array.isArray(g.nodes) && Array.isArray(g.edges) && typeof g.entryNodeId === "string" &&
-    g.nodes.every(n => n && typeof n.id === "string" && typeof n.name === "string" && n.config && ["code.nodejs", "agent", "shell", "switch"].includes(n.type)) &&
+    g.nodes.every(n => n && typeof n.id === "string" && typeof n.name === "string" && n.config && ["code.nodejs", "agent", "shell", "switch", "web-bridge"].includes(n.type)) &&
     g.edges.every(e => e && typeof e.id === "string" && g.nodes.some(n => n.id === e.from) && (e.to === null || g.nodes.some(n => n.id === e.to))) &&
     new Set(g.nodes.map(n => n.id)).size === g.nodes.length;
 }

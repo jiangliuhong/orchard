@@ -24,7 +24,7 @@ const validateShape = ajv.compile({
     defaults: { type: "object", properties: { agent: choiceSchema }, additionalProperties: false },
     nodes: { type: "array", minItems: 1, maxItems: 100, items: {
       type: "object", required: ["id", "name", "type", "input", "outputSchema", "config"],
-      properties: { id: { type: "string", pattern: "^[a-z][a-z0-9-]{0,99}$" }, name: { type: "string", minLength: 1 }, type: { enum: ["code.nodejs", "agent", "shell", "script", "switch"] }, input: { $ref: "binding" }, inputSchema: schemaValue, outputSchema: schemaValue, config: { type: "object" } }, additionalProperties: false,
+      properties: { id: { type: "string", pattern: "^[a-z][a-z0-9-]{0,99}$" }, name: { type: "string", minLength: 1 }, type: { enum: ["code.nodejs", "agent", "shell", "script", "switch", "web-bridge"] }, input: { $ref: "binding" }, inputSchema: schemaValue, outputSchema: schemaValue, config: { type: "object" } }, additionalProperties: false,
     } },
     edges: { type: "array", maxItems: 300, items: { type: "object", required: ["id", "from", "to"], properties: { id: { type: "string", minLength: 1 }, from: { type: "string" }, to: { type: ["string", "null"] }, label: { type: "string", minLength: 1 } }, additionalProperties: false } },
     result: { $ref: "binding" },
@@ -38,8 +38,10 @@ function validateConfig(node: WorkflowNode) {
       ? { cases: { type: "array", maxItems: 100, items: { type: "object", required: ["label", "value"], properties: { label: { type: "string", minLength: 1 }, value: { type: ["string", "number", "boolean", "null"] } }, additionalProperties: false } }, defaultLabel: { type: "string", minLength: 1 } }
       : node.type === "script"
         ? { scriptId: { type: "string", pattern: "^[a-z][a-z0-9-]{0,99}$" }, scriptVersionId: { type: "string", minLength: 1 }, timeoutMs: { type: "integer", minimum: 1000, maximum: 300000 } }
-        : { script: { type: "string", pattern: "^scripts/" }, timeoutMs: timeout, ...(node.type === "shell" ? { resultMode: { enum: ["process", "json"] } } : {}) };
-  const required = node.type === "agent" ? ["prompt"] : node.type === "switch" ? ["cases", "defaultLabel"] : node.type === "script" ? ["scriptId", "scriptVersionId"] : ["script"];
+        : node.type === "web-bridge"
+          ? { application: { type: "string", pattern: "^[a-z][a-z0-9-]{0,49}$" }, tool: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,99}$" }, timeoutMs: timeout, resultMode: { enum: ["result", "envelope"] } }
+          : { script: { type: "string", pattern: "^scripts/" }, timeoutMs: timeout, ...(node.type === "shell" ? { resultMode: { enum: ["process", "json"] } } : {}) };
+  const required = node.type === "agent" ? ["prompt"] : node.type === "switch" ? ["cases", "defaultLabel"] : node.type === "script" ? ["scriptId", "scriptVersionId"] : node.type === "web-bridge" ? ["application", "tool"] : ["script"];
   assertSchema(node.config, { type: "object", required, properties, additionalProperties: false }, `${node.id} 配置`);
   if (node.config.modelId) check(!/^\s*-|[\0\r\n]/.test(node.config.modelId), "INVALID_MODEL", "模型 ID 无效");
 }

@@ -102,6 +102,7 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; border-color: var(--border); }
+html { overflow-y: scroll; scrollbar-gutter: stable; }
 body { margin: 0; }
 [hidden] { display: none !important; }
 button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
@@ -503,3 +504,70 @@ summary { cursor: pointer; }
 .conversation-rename input { flex: 1; min-width: 0; font-size: 12px; padding: 4px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--foreground); }
 .conversation-archived > summary { font-size: 10px; color: var(--muted-foreground); cursor: pointer; padding: 2px 0; }
 .conversation-archived[open] > summary { margin-bottom: 5px; }
+.web-bridge-settings { display: grid; gap: 12px; margin-bottom: 20px; }
+.web-bridge-settings > .preference-row { padding: 2px 2px 12px; border-bottom: 1px solid var(--border-soft); }
+.web-bridge-settings h2 { display: flex; align-items: center; gap: 7px; margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+.web-bridge-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.web-bridge-create-application { grid-column: 1 / -1; display: grid; gap: 9px; padding: 12px 14px; border: 1px dashed var(--border); border-radius: 10px; background: var(--surface-2); }
+.web-bridge-create-application > div:first-child { display: grid; gap: 2px; }
+.web-bridge-create-application > div:first-child span { color: var(--muted-foreground); font-size: 11px; }
+.web-bridge-application, .web-bridge-tools { display: grid; gap: 10px; padding: 15px 16px; border: 1px solid var(--border); border-radius: 11px; background: var(--card); box-shadow: 0 1px 2px rgb(0 0 0 / 3%); }
+.web-bridge-heading { display: flex; justify-content: space-between; padding-bottom: 2px; }
+.web-bridge-heading div { display: grid; gap: 3px; }
+.web-bridge-heading strong { font-size: 14px; }
+.web-bridge-heading span, .web-bridge-tool small { color: var(--muted-foreground); font-size: 11px; }
+.web-bridge-application .field { margin-top: 7px; }
+.web-bridge-application .field label { font-size: 11px; }
+.inline-field { display: flex; gap: 6px; }
+.inline-field input { flex: 1; }
+.web-bridge-environment { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 7px 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); font-size: 12px; }
+.web-bridge-tool { display: flex; align-items: center; gap: 9px; padding: 8px 0; }
+.web-bridge-tool span { display: grid; gap: 2px; }
+.web-bridge-tool strong { font-size: 12px; }
+.web-bridge-tools { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }
+.web-bridge-tools h3 { grid-column: 1 / -1; margin: 0; font-size: 14px; }
+.web-bridge-tabs { display: grid; gap: 12px; }
+.web-bridge-tabs [data-slot=tabs-list] { width: fit-content; height: 38px; padding: 0; gap: 8px; background: transparent; border-bottom: 1px solid var(--border-soft); border-radius: 0; }
+.web-bridge-tabs [data-slot=tabs-trigger] { height: 38px; padding: 0 12px; gap: 7px; border: 0; border-bottom: 2px solid transparent; border-radius: 7px 7px 0 0; background: transparent; color: var(--muted-foreground); font-size: 12px; }
+.web-bridge-tabs [data-slot=tabs-trigger]:hover { background: var(--surface-2); color: var(--foreground); }
+.web-bridge-tabs [data-slot=tabs-trigger][data-state=active] { border-bottom-color: var(--primary); background: var(--surface-2); color: var(--foreground); box-shadow: none; font-weight: 600; }
+.web-bridge-tabs [data-slot=tabs-content] { min-width: 0; }
+.definition-card { align-content: start; }
+.definition-card .field-hint { min-height: 34px; }
+.web-bridge-management { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 12px; }
+.web-bridge-app-picker { display: grid; align-content: start; gap: 4px; padding-right: 12px; border-right: 1px solid var(--border-soft); }
+.web-bridge-app-picker button { display: grid; gap: 2px; border: 0; border-radius: 8px; padding: 9px 10px; background: transparent; color: var(--muted-foreground); text-align: left; font: inherit; }
+.web-bridge-app-picker button:hover, .web-bridge-app-picker button.active { background: var(--surface-2); color: var(--foreground); }
+.web-bridge-app-picker button.active { font-weight: 600; }
+.web-bridge-app-picker small { color: var(--muted-foreground); font-size: 10px; }
+.web-bridge-management-body { display: grid; gap: 12px; min-width: 0; }
+.management-title { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-soft); padding-bottom: 10px; }
+.management-title div { display: grid; gap: 2px; }
+.management-title h3 { margin: 0; font-size: 16px; }
+.management-title span { color: var(--muted-foreground); font-size: 11px; }
+.management-section { display: grid; gap: 9px; padding: 13px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.management-section h4 { margin: 0; font-size: 13px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-heading span { color: var(--muted-foreground); font-size: 11px; }
+.web-bridge-tool > button[data-size=icon] { margin-left: auto; }
+.tool-actions { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
+.web-bridge-profile-select { min-width: 170px; height: 31px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); color: var(--foreground); font-size: 12px; }
+.web-bridge-tool-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(620px, calc(100dvh - 64px)); overflow-y: auto; }
+.web-bridge-test-output { min-height: 70px; max-height: 220px; overflow: auto; padding: 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); color: var(--muted-foreground); font-size: 11px; }
+.settings-layout { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 28px; align-items: start; }
+.settings-sidebar { position: sticky; top: 20px; display: grid; gap: 12px; }
+.settings-sidebar-nav { display: grid; gap: 3px; margin-left: 26px; padding-left: 14px; border-left: 2px solid var(--border-soft); }
+.settings-sidebar-nav button { border: 0; border-radius: 9px; background: transparent; color: var(--muted-foreground); cursor: pointer; font: inherit; font-size: 15px; padding: 10px 13px; text-align: left; transition: background .15s ease, color .15s ease; }
+.settings-sidebar-nav button:hover { background: var(--surface-2); color: var(--foreground); }
+.settings-sidebar-nav button.active { background: var(--surface-2); color: var(--foreground); font-weight: 650; }
+.settings-content { min-width: 0; }
+@media (max-width: 760px) {
+  .settings-layout { grid-template-columns: 1fr; gap: 16px; }
+  .settings-sidebar { position: static; }
+  .settings-sidebar-nav { display: flex; overflow-x: auto; margin-left: 0; padding: 0; border-left: 0; border-bottom: 1px solid var(--border-soft); }
+  .settings-sidebar-nav button { white-space: nowrap; }
+  .web-bridge-grid, .web-bridge-tools { grid-template-columns: 1fr; }
+  .web-bridge-tools h3 { grid-column: auto; }
+  .web-bridge-management { grid-template-columns: 1fr; }
+  .web-bridge-app-picker { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--border-soft); }
+}

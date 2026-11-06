@@ -10,16 +10,20 @@ import { check, failure } from "../domain/errors.js";
 import type { WorkflowNode, Workflow, NodeRun, Run, RunExecution } from "../domain/types.js";
 import { executeProcess } from "./process.js";
 import { executeScript } from "./script.js";
+import type { WebBridgeGateway } from "../web-bridge/gateway.js";
 
 export class GraphRunner {
   private current?: { id: string; controller: AbortController; job: Promise<void> };
   private closing = false;
-  constructor(readonly store: Store, readonly providers: ProviderRegistry) { this.wake(); }
+  constructor(readonly store: Store, readonly providers: ProviderRegistry, readonly webBridge?: WebBridgeGateway) { this.wake(); }
   create(versionId: string, input: unknown, requestId: string) {
     const version = this.store.version(versionId);
     assertSchema(input, version.definition.inputSchema, "工作流输入");
     this.store.assertWorkflowScripts(version.definition, true);
-    for (const node of version.definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
+    for (const node of version.definition.nodes) {
+      if (node.type === "agent") this.providers.resolve(node.config);
+      if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
+    }
     const result = this.store.command(`run:${versionId}`, requestId, input, () => {
       const id = randomUUID(), now = Date.now();
       this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
@@ -51,7 +55,10 @@ export class GraphRunner {
     const result = this.store.command(scope, requestId, command, () => {
       this.editableDraft(draftId, revision);
       this.store.assertWorkflowScripts(definition);
-      for (const node of definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
+      for (const node of definition.nodes) {
+        if (node.type === "agent") this.providers.resolve(node.config);
+        if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
+      }
       const id = randomUUID(), now = Date.now();
       this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
       for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
@@ -140,7 +147,9 @@ export class GraphRunner {
           route = { edgeId: edge.id, value, reason: branch ? `匹配分支 ${branch.label}` : "未匹配条件，进入默认分支" };
           output = route; next = edge.to;
         } else {
-          const result = node.type === "agent"
+          const result = node.type === "web-bridge"
+            ? await this.webBridgeCall(node, value, signal)
+            : node.type === "agent"
             ? await this.providers.run(node.config, {
               signal, cwd: this.store.root, prompt: `${node.config.prompt}\nNode input (data):\n${json(value)}`, schema: node.outputSchema, timeoutMs: node.config.timeoutMs,
               emit: event => emit(event.type, event.payload),
@@ -189,6 +198,12 @@ export class GraphRunner {
         this.store.append("run", id, `run.${status}`, detail);
       });
     }
+  }
+  private async webBridgeCall(node: WorkflowNode, input: unknown, signal: AbortSignal) {
+    check(this.webBridge, "BROWSER_NOT_CONNECTED", "Web Bridge 未配置");
+    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs });
+    assertSchema(output, node.outputSchema, `${node.id} Web Bridge 输出`);
+    return { output, execution: { application: node.config.application, tool: node.config.tool, resultMode: node.config.resultMode ?? "result" } };
   }
   private async libraryScript(node: WorkflowNode, input: unknown, signal: AbortSignal) {
     const script = this.store.script(node.config.scriptId!), version = this.store.scriptVersion(node.config.scriptVersionId!);

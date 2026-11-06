@@ -1,12 +1,12 @@
 import { useMemo } from "react";
 import { Background, Controls, Handle, MarkerType, Position, ReactFlow, type NodeProps } from "@xyflow/react";
-import { Check, Code2, GitBranch, Sparkles, Terminal } from "lucide-react";
+import { Check, Code2, GitBranch, Sparkles, Terminal, Globe } from "lucide-react";
 import type { Workflow, Layout, NodeRun } from "../../domain/types.js";
 import { Status } from "../components/common";
 import { projectGraph, type CanvasNode } from "./graph";
 import { useTheme } from "../lib/theme";
-const icons = { "code.nodejs": Code2, agent: Sparkles, shell: Terminal, script: Code2, switch: GitBranch, end: Check };
-const names = { "code.nodejs": "NODE.JS", agent: "AGENT", shell: "SHELL", script: "SCRIPT", switch: "SWITCH", end: "END" };
+const icons = { "code.nodejs": Code2, agent: Sparkles, shell: Terminal, script: Code2, switch: GitBranch, "web-bridge": Globe, end: Check };
+const names = { "code.nodejs": "NODE.JS", agent: "AGENT", shell: "SHELL", script: "SCRIPT", switch: "SWITCH", "web-bridge": "WEB BRIDGE", end: "END" };
 function WorkflowNode({ data, selected }: NodeProps<CanvasNode>) {
   const Icon = icons[data.kind];
   if (data.kind === "end") return <div className={`flow-node flow-node-end ${selected ? "is-selected" : ""}`} title="点击查看工作流最终输出"><Handle type="target" position={Position.Top} /><Icon size={12} /><span>结束</span></div>;

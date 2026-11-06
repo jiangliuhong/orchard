@@ -7,12 +7,15 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "ORCHARD_DEV=1 node --import tsx --watch src/server/main.ts",
+    "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
-    "build": "tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -p tsconfig.server.json && mkdir -p dist/web-bridge && cp -R src/web-bridge/extension dist/web-bridge/extension && cp src/web-bridge/catalog.json dist/web-bridge/catalog.json && vite build",
     "start": "node dist/server/main.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "bin": {
+    "orchard": "dist/cli/index.js"
   },
   "dependencies": {
     "@fastify/static": "10.1.8",

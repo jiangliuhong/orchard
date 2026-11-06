@@ -17,6 +17,11 @@ import { agentLimits } from "../providers/agent-limits.js";
 import { codexNativeAdapter } from "../providers/codex-app-server.js";
 import { piNativeAdapter } from "../providers/pi-rpc.js";
 import { ScriptTestRunner } from "../runtime/script-tests.js";
+import { WebBridgeGateway } from "../web-bridge/gateway.js";
+import { WebBridgeClient } from "../web-bridge/client.js";
+import { catalogHash } from "../web-bridge/catalog.js";
+import { WebBridgeConfig } from "../web-bridge/config.js";
+import { LocalApiAuth } from "../web-bridge/auth.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -35,7 +40,9 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   const providers = suppliedProviders ?? new ProviderRegistry(store, manager)
     .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
     .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
-  const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers), scriptTests = new ScriptTestRunner(store);
+  const bridge = new WebBridgeGateway(new WebBridgeClient(store.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(store.root));
+  const apiAuth = new LocalApiAuth(store.root);
+  const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers, bridge), scriptTests = new ScriptTestRunner(store);
   const app = Fastify({ bodyLimit: 6 * 1024 * 1024, logger: false });
   const connections = new Set<() => void>();
   const publicValue = (value: unknown): unknown => {
@@ -51,7 +58,15 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     try { hostname = new URL(`http://${host}`).hostname; } catch { return reply.code(403).send({ code: "INVALID_HOST", message: "无效本地 Host" }); }
     if (!["127.0.0.1", "localhost", "[::1]"].includes(hostname)) return reply.code(403).send({ code: "INVALID_HOST", message: "只允许本地工作台访问" });
     const origin = request.headers.origin;
-    if (origin && origin !== `http://${host}`) return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" });
+    if (origin) {
+      try {
+        const originUrl = new URL(origin);
+        const localOrigin = ["127.0.0.1", "localhost", "::1"].includes(originUrl.hostname);
+        if (!localOrigin || originUrl.protocol !== "http:") return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" });
+      } catch { return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" }); }
+    }
+    const suppliedToken = request.headers["x-orchard-token"];
+    if (suppliedToken !== undefined && !apiAuth.valid(suppliedToken)) return reply.code(401).send({ code: "UNAUTHORIZED", message: "本机 API 认证失败" });
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
   });
@@ -67,7 +82,36 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
       : (error as { statusCode?: number }).statusCode ?? 500;
     reply.code(status).send({ code: known ? error.code : "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) });
   });
-  app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount }));
+  app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount, webBridge: await bridge.status() }));
+  app.get("/api/web-bridge/auth", async () => apiAuth.view());
+  app.get("/api/web-bridge/status", async () => bridge.status());
+  app.get("/api/web-bridge/profiles", async () => ({ items: bridge.profilesList() }));
+  app.post("/api/web-bridge/profiles/register", async request => bridge.registerProfile(request.body as any));
+  app.get("/api/web-bridge/applications", async () => ({ items: bridge.applications() }));
+  app.post("/api/web-bridge/applications", async request => bridge.saveApplication(request.body as any));
+  app.get<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => {
+    const application = bridge.applications().find(item => item.id === request.params.applicationId);
+    check(application, "NOT_FOUND", "浏览器应用不存在");
+    return application;
+  });
+  app.patch<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => bridge.saveApplication({ ...(request.body as any), id: request.params.applicationId }));
+  app.delete<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => bridge.deleteApplication(request.params.applicationId));
+  app.get<{ Querystring: { application?: string } }>("/api/web-bridge/tools", async request => ({ items: bridge.tools(request.query.application) }));
+  app.get<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => ({ items: bridge.tools(request.params.applicationId) }));
+  app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/environments", async request => bridge.saveEnvironment(request.params.applicationId, request.body as any));
+  app.patch<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => bridge.saveEnvironment(request.params.applicationId, { ...(request.body as any), id: request.params.environmentId }));
+  app.delete<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => { bridge.deleteEnvironment(request.params.applicationId, request.params.environmentId); return { ok: true }; });
+  app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { const body = request.body as { enabled?: boolean }; check(typeof body?.enabled === "boolean", "INVALID_REQUEST", "enabled 必须为布尔值"); bridge.setToolEnabled(request.params.applicationId, request.params.toolId, body.enabled); return { ok: true }; });
+  app.post<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body));
+  app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => bridge.saveTool({ ...(request.body as any), application: request.params.applicationId }));
+  app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/definition", async request => bridge.saveTool({ ...(request.body as any), application: request.params.applicationId, toolId: request.params.toolId }));
+  app.delete<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { bridge.deleteTool(request.params.applicationId, request.params.toolId); return { ok: true }; });
+  app.post("/api/web-bridge/calls", async request => {
+    const input = body<{ requestId?: string; application: string; tool: string; args: unknown; timeoutMs?: number }>(request.body,
+      { requestId: { type: "string" }, application: { type: "string", minLength: 1 }, tool: { type: "string", minLength: 1 }, args: {}, timeoutMs: { type: "integer", minimum: 1, maximum: 120000 } },
+      ["application", "tool", "args"]);
+    return bridge.call(input.application, input.tool, input.args, { requestId: input.requestId, timeoutMs: input.timeoutMs });
+  });
   app.get("/api/providers", async () => ({ items: providers.views() }));
   app.patch<{ Params: { id: string } }>("/api/providers/:id", async request => providers.update(request.params.id, request.body));
   app.post<{ Params: { id: string } }>("/api/providers/:id/detect", async request => providers.detect(request.params.id));
@@ -255,6 +299,6 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   app.addHook("preClose", async () => { for (const close of connections) close(); await providers.closeVerifications(); });
   // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
   // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
-  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); await scriptTests.close(); await manager.close().catch(() => {}); store.close(); });
-  return { app, store, providers, authoring, runner };
+  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); await scriptTests.close(); bridge.close(); await manager.close().catch(() => {}); store.close(); });
+  return { app, store, providers, authoring, runner, bridge };
 }

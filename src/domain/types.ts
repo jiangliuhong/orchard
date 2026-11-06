@@ -10,7 +10,7 @@ export interface AgentChoice { providerId?: string; modelId?: string }
 export interface WorkflowNode {
   id: string;
   name: string;
-  type: "code.nodejs" | "agent" | "shell" | "script" | "switch";
+  type: "code.nodejs" | "agent" | "shell" | "script" | "switch" | "web-bridge";
   input: Binding;
   inputSchema?: JsonSchema;
   outputSchema: JsonSchema;
@@ -25,6 +25,8 @@ export interface WorkflowNode {
     cases?: { label: string; value: Scalar }[];
     defaultLabel?: string;
     timeoutMs?: number;
+    application?: string;
+    tool?: string;
   };
 }
 export interface WorkflowEdge { id: string; from: string; to: string | null; label?: string }

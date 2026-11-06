@@ -10,6 +10,7 @@ import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice, Loading, PageHeading } from "../components/common";
 import { ModelManager } from "./ModelManager";
+import { WebBridgeSettings } from "./WebBridgeSettings";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
   const localCli = typeof provider.config.executable === "string";
@@ -113,14 +114,31 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
+  const [section, setSection] = useState<"general" | "providers" | "web-bridge">("providers");
   return <>
-    <PageHeading eyebrow="CONNECTIONS" title="设置" description="管理本地 Agent 连接、默认模型和工作台外观。" />
-    <section className="panel preferences-list" aria-label="外观设置">
-      <div className="preference-row"><div><h2>外观</h2><p>选择浅色、深色，或跟随系统。</p></div><ThemePicker label="设置外观" /></div>
-    </section>
-    <div className="section-label"><span>Provider</span><span>{data?.items.length ?? 0} 个连接</span></div>
-    <ErrorNotice message={error} />
-    {data ? <div className="panel providers-list">{data.items.map(provider => <ProviderRow key={provider.id} provider={provider} reload={reload} />)}</div> : !error && <Loading />}
-    <p className="page-footnote">启用开关和模型选择即时保存。已发布工作流仍使用发布时固定的 Provider 与模型。</p>
+    <div className="settings-layout">
+      <h1 className="sr-only">设置</h1>
+      <aside className="settings-sidebar" aria-label="设置分类">
+        <nav className="settings-sidebar-nav">
+          <button className={section === "general" ? "active" : ""} onClick={() => setSection("general")}>常规</button>
+          <button className={section === "providers" ? "active" : ""} onClick={() => setSection("providers")}>Provider</button>
+          <button className={section === "web-bridge" ? "active" : ""} onClick={() => setSection("web-bridge")}>Web Bridge</button>
+        </nav>
+      </aside>
+      <section className="settings-content">
+      {section === "providers" && <>
+        <div className="section-label"><span>Provider</span><span>{data?.items.length ?? 0} 个连接</span></div>
+        <ErrorNotice message={error} />
+        {data ? <div className="panel providers-list">{data.items.map(provider => <ProviderRow key={provider.id} provider={provider} reload={reload} />)}</div> : !error && <Loading />}
+        <p className="page-footnote">启用开关和模型选择即时保存。已发布工作流仍使用发布时固定的 Provider 与模型。</p>
+      </>}
+      {section === "web-bridge" && <WebBridgeSettings />}
+      {section === "general" && <>
+        <section className="panel preferences-list" aria-label="外观设置">
+          <div className="preference-row"><div><h2>外观</h2><p>选择浅色、深色，或跟随系统。</p></div><ThemePicker label="设置外观" /></div>
+        </section>
+      </>}
+      </section>
+    </div>
   </>;
 }
