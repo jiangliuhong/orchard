@@ -114,7 +114,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  const [section, setSection] = useState<"general" | "providers" | "web-bridge">("providers");
+  const [section, setSection] = useState<"general" | "providers" | "web-bridge">("general");
   return <>
     <div className="settings-layout">
       <h1 className="sr-only">设置</h1>

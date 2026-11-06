@@ -23,7 +23,7 @@ import { ScriptTestRunner } from "../runtime/script-tests.js";
 import { checkScriptSource } from "../runtime/script.js";
 import { WebBridgeGateway } from "../web-bridge/gateway.js";
 import { WebBridgeClient } from "../web-bridge/client.js";
-import { catalogHash } from "../web-bridge/catalog.js";
+import { catalogHash, extensionDirectory } from "../web-bridge/catalog.js";
 import { WebBridgeConfig } from "../web-bridge/config.js";
 import { LocalApiAuth } from "../web-bridge/auth.js";
 
@@ -74,7 +74,8 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
       try {
         const originUrl = new URL(origin);
         const localOrigin = ["127.0.0.1", "localhost", "::1"].includes(originUrl.hostname);
-        if (!localOrigin || originUrl.protocol !== "http:") return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" });
+        const extensionRegistration = request.method === "POST" && request.url === "/api/web-bridge/profiles/register" && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+        if (!(localOrigin && originUrl.protocol === "http:") && !extensionRegistration) return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" });
       } catch { return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" }); }
     }
     const suppliedToken = request.headers["x-orchard-token"];
@@ -96,9 +97,17 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   });
   app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount, webBridge: await bridge.status() }));
   app.get("/api/web-bridge/auth", async () => apiAuth.view());
+  app.get("/api/web-bridge/extension", async () => ({ directory: extensionDirectory() }));
   app.get("/api/web-bridge/status", async () => bridge.status());
   app.get("/api/web-bridge/profiles", async () => ({ items: bridge.profilesList() }));
-  app.post("/api/web-bridge/profiles/register", async request => bridge.registerProfile(request.body as any));
+  app.post("/api/web-bridge/profiles/register", async request => {
+    const profile = body<{ id: string; name: string; extensionId: string }>(request.body,
+      { id: { type: "string", minLength: 1, maxLength: 100 }, name: { type: "string", minLength: 1, maxLength: 100 }, extensionId: { type: "string", pattern: "^[a-p]{32}$" } },
+      ["id", "name", "extensionId"]);
+    const origin = request.headers.origin;
+    check(!origin?.startsWith("chrome-extension:") || origin === `chrome-extension://${profile.extensionId}`, "INVALID_ORIGIN", "浏览器插件来源与插件 ID 不一致");
+    return bridge.registerProfile(profile);
+  });
   app.get("/api/web-bridge/applications", async () => ({ items: bridge.applications() }));
   app.post("/api/web-bridge/applications", async request => bridge.saveApplication(request.body as any));
   app.get<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => {

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
-    "build": "tsc -p tsconfig.server.json && mkdir -p dist/web-bridge && cp -R src/web-bridge/extension dist/web-bridge/extension && cp src/web-bridge/catalog.json dist/web-bridge/catalog.json && vite build",
+    "build": "tsc -p tsconfig.server.json && mkdir -p dist/web-bridge/extension && cp -R src/web-bridge/extension/. dist/web-bridge/extension && cp src/web-bridge/catalog.json dist/web-bridge/catalog.json && vite build",
     "start": "node dist/server/main.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts"

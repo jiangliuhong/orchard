@@ -5,6 +5,224 @@ import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
+import { randomUUID } from "node:crypto";
+import { JSDOM } from "jsdom";
+import { WebBridgeGateway } from "../src/web-bridge/gateway.js";
+import { WebBridgeClient } from "../src/web-bridge/client.js";
+import { catalogHash } from "../src/web-bridge/catalog.js";
+
+interface ExtensionProfile { id: string; name: string; extensionId: string }
+interface ExtensionReply { ok: boolean; profile?: ExtensionProfile; servers?: string[]; error?: string }
+function extensionHarness(stored: Record<string, string> = {}, initiallyAvailable = true, alarms: { name: string; periodInMinutes: number }[] = []) {
+  const source = readFileSync(new URL("../src/web-bridge/extension/background.js", import.meta.url), "utf8");
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  const requests: { url: string; profile: ExtensionProfile }[] = [];
+  const listeners = new Map<string, (event?: { name: string }) => void>();
+  const warnings: string[] = [];
+  let available = initiallyAvailable;
+  let onMessage: (message: unknown, sender: { id: string }, sendResponse: (result: ExtensionReply) => void) => boolean | undefined;
+  const event = (name: string) => ({ addListener: (listener: (event?: { name: string }) => void) => listeners.set(name, listener) });
+  runInNewContext(source, {
+    AbortSignal,
+    crypto: { randomUUID },
+    console: { warn: (message: string) => warnings.push(message) },
+    chrome: {
+      runtime: {
+        id: extensionId, onInstalled: event("installed"), onStartup: event("startup"),
+        onMessage: { addListener: (listener: typeof onMessage) => { onMessage = listener; } },
+      },
+      storage: { local: {
+        get: async () => ({ ...stored }),
+        set: async (value: Record<string, string>) => { Object.assign(stored, value); },
+      } },
+      alarms: {
+        onAlarm: event("alarm"),
+        get: async (name: string) => alarms.findLast(alarm => alarm.name === name),
+        create: async (name: string, options: { periodInMinutes: number }) => { alarms.push({ name, ...options }); },
+      },
+    },
+    fetch: async (url: string, options: RequestInit) => {
+      requests.push({ url, profile: JSON.parse(String(options.body)) });
+      return { ok: available && url.includes(":7443/") };
+    },
+  });
+  return {
+    requests, listeners, alarms, warnings, stored,
+    setAvailable: (value: boolean) => { available = value; },
+    send: (message: unknown) => new Promise<ExtensionReply>(resolve => onMessage(message, { id: extensionId }, resolve)),
+  };
+}
+
+test("browser extension retries registration and checks both local services", async () => {
+  const { requests, listeners, alarms, warnings, setAvailable } = extensionHarness({}, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 2);
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(alarms, [{ name: "orchard-profile-registration", periodInMinutes: 0.5 }]);
+  setAvailable(true);
+  listeners.get("alarm")!({ name: "orchard-profile-registration" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 4);
+  assert.equal(warnings.length, 1);
+  assert.ok(requests[2]!.url.includes(":7441/"));
+  assert.ok(requests[3]!.url.includes(":7443/"));
+  assert.equal(requests[3]!.profile.extensionId, "abcdefghijklmnopabcdefghijklmnop");
+  for (const name of ["startup", "installed"]) {
+    listeners.get(name)!();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(requests.length, 8);
+});
+
+test("automatic reconnect recovers from service restarts without opening the popup and keeps its alarm across worker restarts", async () => {
+  const extension = extensionHarness();
+  await new Promise(resolve => setImmediate(resolve));
+  const original = await extension.send({ type: "profile:status" });
+  assert.equal(original.servers!.length, 1);
+  const id = original.profile!.id;
+  extension.setAvailable(false);
+  extension.listeners.get("alarm")!({ name: "orchard-profile-registration" });
+  await new Promise(resolve => setImmediate(resolve));
+  const offline = await extension.send({ type: "profile:status" });
+  assert.equal(offline.servers!.length, 0);
+  extension.setAvailable(true);
+  extension.listeners.get("alarm")!({ name: "orchard-profile-registration" });
+  await new Promise(resolve => setImmediate(resolve));
+  const requestCount = extension.requests.length;
+  const restored = await extension.send({ type: "profile:status" });
+  assert.equal(restored.servers!.length, 1);
+  assert.equal(restored.profile!.id, id);
+  assert.equal(extension.requests.length, requestCount);
+  const restarted = extensionHarness(extension.stored, true, extension.alarms);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(restarted.alarms.length, 1);
+  assert.equal((await restarted.send({ type: "profile:status" })).profile!.id, id);
+});
+
+test("browser profile names and identities survive worker restarts and remain separate across Chrome profiles", async () => {
+  const first = extensionHarness();
+  const renamed = await first.send({ type: "profile:save", name: "  工作 Chrome  " });
+  assert.equal(renamed.ok, true);
+  assert.equal(renamed.profile!.name, "工作 Chrome");
+  assert.equal(first.stored.profileName, "工作 Chrome");
+  const id = renamed.profile!.id;
+  const restarted = extensionHarness(first.stored);
+  const restored = await restarted.send({ type: "profile:register" });
+  assert.equal(restored.profile!.id, id);
+  assert.equal(restored.profile!.name, "工作 Chrome");
+  const second = extensionHarness();
+  const separate = await second.send({ type: "profile:register" });
+  assert.notEqual(separate.profile!.id, id);
+  assert.equal(separate.profile!.extensionId, restored.profile!.extensionId);
+  const blank = await first.send({ type: "profile:save", name: "  " });
+  assert.equal(blank.ok, false);
+  const tooLong = await first.send({ type: "profile:save", name: "a".repeat(101) });
+  assert.equal(tooLong.ok, false);
+  assert.equal(first.stored.profileName, "工作 Chrome");
+  assert.equal(first.requests.at(-1)!.profile.name, "工作 Chrome");
+});
+
+test("extension popup saves names and distinguishes offline saves from successful registration", async t => {
+  const extension = extensionHarness();
+  const dom = new JSDOM(readFileSync(new URL("../src/web-bridge/extension/popup.html", import.meta.url), "utf8"));
+  t.after(() => dom.window.close());
+  const document = dom.window.document;
+  runInNewContext(readFileSync(new URL("../src/web-bridge/extension/popup.js", import.meta.url), "utf8"), {
+    document, window: dom.window, chrome: { runtime: { sendMessage: extension.send } },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const name = document.getElementById("profile-name") as HTMLInputElement;
+  const save = document.getElementById("save") as HTMLButtonElement;
+  assert.equal(save.disabled, false);
+  assert.ok(name.value.startsWith("Chrome · "));
+  const originalId = document.getElementById("profile-id")!.textContent;
+  name.value = "工作浏览器";
+  document.getElementById("profile-form")!.dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(extension.stored.profileName, "工作浏览器");
+  assert.equal(document.getElementById("profile-id")!.textContent, originalId);
+  assert.equal(document.getElementById("status")!.dataset.state, "success");
+  assert.ok(document.getElementById("status")!.textContent!.includes("名称已保存"));
+  assert.equal(extension.requests.at(-1)!.profile.name, "工作浏览器");
+  extension.setAvailable(false);
+  name.value = "离线资料";
+  document.getElementById("profile-form")!.dispatchEvent(new dom.window.Event("submit", { cancelable: true }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(extension.stored.profileName, "离线资料");
+  assert.equal(document.getElementById("status")!.dataset.state, "error");
+  assert.ok(document.getElementById("status")!.textContent!.includes("名称已保存。尚未连接本机服务"));
+  extension.setAvailable(true);
+  document.getElementById("reconnect")!.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.getElementById("status")!.dataset.state, "success");
+});
+
+test("popup automatically displays reconnection without overwriting an unsaved name and stops polling when closed", async t => {
+  const extension = extensionHarness({}, false);
+  const dom = new JSDOM(readFileSync(new URL("../src/web-bridge/extension/popup.html", import.meta.url), "utf8"));
+  t.after(() => dom.window.close());
+  const document = dom.window.document;
+  const timers = new Map<number, () => void>();
+  let timerId = 0;
+  runInNewContext(readFileSync(new URL("../src/web-bridge/extension/popup.js", import.meta.url), "utf8"), {
+    document,
+    window: {
+      setTimeout: (callback: () => void, delay: number) => {
+        assert.equal(delay, 5000);
+        timers.set(++timerId, callback);
+        return timerId;
+      },
+      clearTimeout: (id: number) => { timers.delete(id); },
+      addEventListener: dom.window.addEventListener.bind(dom.window),
+    },
+    chrome: { runtime: { sendMessage: extension.send } },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const name = document.getElementById("profile-name") as HTMLInputElement;
+  name.value = "尚未保存的名称";
+  assert.ok(document.getElementById("status")!.textContent!.includes("自动重连已开启"));
+  extension.setAvailable(true);
+  extension.listeners.get("alarm")!({ name: "orchard-profile-registration" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.size, 1);
+  const callback = [...timers.values()][0]!;
+  timers.clear();
+  callback();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.getElementById("status")!.dataset.state, "success");
+  assert.equal(name.value, "尚未保存的名称");
+  assert.equal(extension.stored.profileName, undefined);
+  assert.equal(timers.size, 1);
+  dom.window.dispatchEvent(new dom.window.Event("pagehide"));
+  assert.equal(timers.size, 0);
+});
+
+test("profile renaming preserves bindings, migrates legacy IDs and expires disconnected profiles", t => {
+  const root = mkdtempSync(join(tmpdir(), "orchard-profiles-")), config = new WebBridgeConfig(root);
+  const bridge = new WebBridgeGateway(new WebBridgeClient(join(root, "bridge.sock"), catalogHash), config);
+  t.after(() => bridge.close());
+  config.saveApplication({ id: "crm", name: "CRM" });
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  const environment = config.saveEnvironment("crm", { origin: "https://example.test", profileId: extensionId, bound: true });
+  bridge.registerProfile({ id: extensionId, name: "旧资料", extensionId });
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  bridge.registerProfile({ id: "work-profile", name: "工作资料", extensionId });
+  bridge.registerProfile({ id: "test-profile", name: "测试资料", extensionId });
+  assert.equal(bridge.profilesList().length, 2);
+  assert.equal(config.environments("crm")[0]!.id, environment.id);
+  assert.equal(config.environments("crm")[0]!.profileId, "work-profile");
+  assert.equal(config.environments("crm")[0]!.bound, true);
+  bridge.registerProfile({ id: "work-profile", name: "新的工作名称", extensionId });
+  assert.equal(bridge.profilesList().length, 2);
+  assert.equal(bridge.profilesList().find(profile => profile.id === "work-profile")!.name, "新的工作名称");
+  assert.equal(config.environments("crm")[0]!.profileId, "work-profile");
+  now += 150000;
+  assert.equal(bridge.profilesList().every(profile => !profile.connected), true);
+  bridge.registerProfile({ id: "work-profile", name: "新的工作名称", extensionId });
+  assert.equal(bridge.profilesList().find(profile => profile.id === "work-profile")!.connected, true);
+});
 
 test("native messaging framing handles partial and batched frames", () => {
   const first = encodeNativeMessage({ id: "a", result: 1 }), second = encodeNativeMessage({ id: "b", result: 2 });

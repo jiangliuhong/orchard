@@ -28,10 +28,19 @@ export class WebBridgeGateway {
   registerProfile(profile: { id: string; name: string; extensionId: string }) {
     check(/^[a-zA-Z0-9._-]{1,100}$/.test(profile.id), "INVALID_PROFILE", "浏览器资料 ID 无效");
     check(profile.name.trim().length > 0 && profile.name.length <= 100, "INVALID_PROFILE", "浏览器资料名称不能为空");
+    if (profile.id !== profile.extensionId) {
+      const config = this.config;
+      for (const application of config?.applications() ?? []) {
+        for (const environment of config?.environments(application.id) ?? []) {
+          if (environment.profileId === profile.extensionId) config?.saveEnvironment(application.id, { ...environment, profileId: profile.id });
+        }
+      }
+      this.profiles.delete(profile.extensionId);
+    }
     const next = { ...profile, name: profile.name.trim(), connected: true, lastSeen: Date.now() };
     this.profiles.set(profile.id, next); return next;
   }
-  profilesList() { return [...this.profiles.values()].sort((a, b) => b.lastSeen - a.lastSeen); }
+  profilesList() { return [...this.profiles.values()].map(profile => ({ ...profile, connected: Date.now() - profile.lastSeen < 150000 })).sort((a, b) => b.lastSeen - a.lastSeen); }
   async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string } = {}) {
     const tool = this.tools(application).find(item => item.toolId === toolId);
     check(tool, "UNKNOWN_TOOL", `未知浏览器工具: ${application}/${toolId}`);

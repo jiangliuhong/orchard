@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Check, Globe, Plus, Settings2, Trash2, Wrench } from "lucide-react";
+import { Check, Globe, Plus, RefreshCw, Settings2, Trash2, Wrench } from "lucide-react";
 import { api, send, useResource } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -18,6 +18,7 @@ export function WebBridgeSettings() {
   const tools = useResource<{ items: Tool[] }>("/web-bridge/tools");
   const profiles = useResource<{ items: BrowserProfile[] }>("/web-bridge/profiles");
   const auth = useResource<{ configured: boolean; last4: string }>("/web-bridge/auth");
+  const extension = useResource<{ directory: string }>("/web-bridge/extension");
   const [selectedId, setSelectedId] = useState(""), [tab, setTab] = useState("definitions"), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [applicationId, setApplicationId] = useState(""), [applicationName, setApplicationName] = useState("");
   const [origin, setOrigin] = useState(""), [profileId, setProfileId] = useState(""), [toolEditor, setToolEditor] = useState<{ application: string; toolId?: string; value: string }>(), [testToolState, setTestToolState] = useState<Tool>(), [testArgs, setTestArgs] = useState("{}"), [testOutput, setTestOutput] = useState(""), [deleteTarget, setDeleteTarget] = useState<Application>();
@@ -67,6 +68,28 @@ export function WebBridgeSettings() {
 
   return <section className="panel web-bridge-settings" aria-label="Web Bridge 设置">
     <div className="preference-row"><div><h2><Globe size={17} /> Web Bridge</h2><p>先定义应用和工具，再进入应用管理环境与测试。</p></div><span className="readiness readiness-ready"><span className="status-dot" />本机服务已就绪</span></div>
+    <div className="management-section">
+      <label className="field" htmlFor="web-bridge-extension-directory">浏览器插件目录</label>
+      <Input id="web-bridge-extension-directory" className="font-mono" readOnly value={extension.data?.directory ?? ""} placeholder={extension.error ? "目录加载失败" : "正在加载目录…"} />
+      <p className="field-hint">在 Chrome 中打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择此目录。</p>
+      <ErrorNotice message={extension.error} />
+    </div>
+    <section className="management-section" aria-label="浏览器资料列表">
+      <div className="section-heading"><span>已注册的浏览器资料：{profiles.data?.items.length ?? 0}</span><Button variant="outline" size="sm" onClick={() => { profiles.reload(); apps.reload(); }}><RefreshCw size={14} />刷新浏览器资料</Button></div>
+      <p className="field-hint">点击 Chrome 工具栏中的 Orchard 插件，为当前浏览器资料设置名称；保存后刷新此列表。</p>
+      <ErrorNotice message={profiles.error} />
+      {!profiles.data && !profiles.error ? <Loading /> : !profiles.data?.items.length ? <p className="field-hint">安装或重新加载插件后，点击插件图标连接本机服务，再刷新浏览器资料。</p> : <ul className="web-bridge-profile-list">
+        {profiles.data.items.map(profile => <li key={profile.id}>
+          <div className="section-heading"><strong>{profile.name}</strong><span className={`readiness ${profile.connected ? "readiness-ready" : "readiness-unavailable"}`}><span className="status-dot" />{profile.connected ? "已连接" : "已断开"}</span></div>
+          <dl>
+            <div><dt>浏览器</dt><dd>Chrome</dd></div>
+            <div><dt>最近注册</dt><dd><time dateTime={new Date(profile.lastSeen).toISOString()}>{new Date(profile.lastSeen).toLocaleString("zh-CN")}</time></dd></div>
+            <div><dt>资料 ID</dt><dd><code>{profile.id}</code></dd></div>
+            <div><dt>插件 ID</dt><dd><code>{profile.extensionId}</code></dd></div>
+          </dl>
+        </li>)}
+      </ul>}
+    </section>
     <ErrorNotice message={error} />
     {notice && <p role="status" className="success-note">{notice}</p>}
     {!apps.data || !tools.data || !profiles.data ? <Loading /> : <Tabs value={tab} onValueChange={setTab} className="web-bridge-tabs">
@@ -82,7 +105,7 @@ export function WebBridgeSettings() {
         {!apps.data.items.length ? <p className="field-hint">请先在“应用定义”中创建应用。</p> : <div className="web-bridge-management">
           <div className="web-bridge-app-picker">{apps.data.items.map(application => <button key={application.id} className={selected?.id === application.id ? "active" : ""} onClick={() => setSelectedId(application.id)}>{application.name}<small>{application.id}</small></button>)}</div>
           {selected && <div className="web-bridge-management-body"><div className="management-title"><div><h3>{selected.name}</h3><span>{selected.id}</span></div><Button variant="ghost" size="sm" onClick={() => removeApplication(selected)}><Trash2 size={14} />删除应用</Button></div>
-            <section className="management-section"><div className="section-heading"><h4>环境</h4><span>绑定到已连接的浏览器资料</span></div><div className="inline-field"><Input placeholder="https://example.test" value={origin} onChange={event => setOrigin(event.target.value)} /><select className="web-bridge-profile-select" value={profileId} onChange={event => setProfileId(event.target.value)}><option value="">选择浏览器资料</option>{profiles.data?.items.map(profile => <option key={profile.id} value={profile.id}>{profile.name}{profile.connected ? " · 已连接" : " · 已断开"}</option>)}</select><Button size="sm" disabled={!origin.trim() || !profileId} onClick={() => void addEnvironment()}><Plus size={14} />添加</Button></div>{!profiles.data?.items.length && <p className="field-hint">暂无已连接的浏览器资料，请先启动 Chrome 扩展。</p>}{selected.environments.map(environment => <div className="web-bridge-environment" key={environment.id}><span>{environment.origin}</span><span className="field-hint">{profiles.data?.items.find(profile => profile.id === environment.profileId)?.name ?? environment.profileId ?? "未知资料"} · {environment.bound ? "已绑定" : "未绑定"}</span><Button variant="ghost" size="icon" onClick={() => void removeEnvironment(environment)}><Trash2 size={14} /></Button></div>)}</section>
+            <section className="management-section"><div className="section-heading"><h4>环境</h4><span>绑定到已连接的浏览器资料</span></div><div className="inline-field"><Input placeholder="https://example.test" value={origin} onChange={event => setOrigin(event.target.value)} /><select className="web-bridge-profile-select" aria-label="选择浏览器资料" value={profileId} onChange={event => setProfileId(event.target.value)}><option value="">选择浏览器资料</option>{profiles.data?.items.map(profile => <option key={profile.id} value={profile.id} disabled={!profile.connected}>{profile.name} · {profile.id.slice(-8)}{profile.connected ? " · 已连接" : " · 已断开"}</option>)}</select><Button size="sm" disabled={!origin.trim() || !profileId || !profiles.data?.items.some(profile => profile.id === profileId && profile.connected)} onClick={() => void addEnvironment()}><Plus size={14} />添加</Button></div>{!profiles.data?.items.some(profile => profile.connected) && <p className="field-hint">暂无已连接的浏览器资料，请先启动 Chrome 扩展。</p>}{selected.environments.map(environment => <div className="web-bridge-environment" key={environment.id}><span>{environment.origin}</span><span className="field-hint">{profiles.data?.items.find(profile => profile.id === environment.profileId)?.name ?? environment.profileId ?? "未知资料"} · {environment.bound ? "已绑定" : "未绑定"}</span><Button variant="ghost" size="icon" onClick={() => void removeEnvironment(environment)}><Trash2 size={14} /></Button></div>)}</section>
             <section className="management-section"><div className="section-heading"><h4>工具列表</h4><Button size="sm" onClick={() => setToolEditor({ application: selected.id, value: "{}" })}><Plus size={14} />新增工具</Button></div>{selectedTools.map(tool => <div className="web-bridge-tool" key={tool.toolId}><input type="checkbox" checked={tool.enabled} onChange={() => toggleTool(tool)} /><span><strong>{tool.toolId}</strong><small>{tool.description} · {tool.method} {tool.path} · {tool.risk}</small></span><div className="tool-actions"><Button variant="outline" size="sm" onClick={() => setToolEditor({ application: tool.application, toolId: tool.toolId, value: JSON.stringify(tool, null, 2) })}>编辑</Button><Button variant="outline" size="sm" onClick={() => { setTestToolState(tool); setTestOutput(""); }}><Check size={13} />测试</Button><Button variant="ghost" size="sm" onClick={() => removeTool(tool)}><Trash2 size={13} />删除</Button></div></div>)}</section>
             {testToolState && <section className="management-section"><div className="section-heading"><h4>测试：{testToolState.toolId}</h4><Button variant="ghost" size="sm" onClick={() => setTestToolState(undefined)}>关闭</Button></div><Textarea rows={4} className="font-mono" value={testArgs} onChange={event => setTestArgs(event.target.value)} /><Button size="sm" onClick={() => testTool()}><Check size={13} />执行测试</Button><pre className="web-bridge-test-output">{testOutput || "输入 JSON 参数后执行测试。"}</pre></section>}
           </div>}

@@ -1,8 +1,43 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { createApp } from "../src/server/app.js";
 import { setup, exampleFiles, until } from "./helpers.js";
+
+test("HTTP exposes a loadable browser extension directory without a browser connection", async t => {
+  const { store, providers } = setup(t), { app } = createApp(store, providers);
+  t.after(() => app.close());
+  const response = await app.inject({ url: "/api/web-bridge/extension" });
+  assert.equal(response.statusCode, 200, response.body);
+  const { directory } = response.json();
+  assert.ok(isAbsolute(directory));
+  const manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8"));
+  assert.equal(manifest.name, "Orchard Web Bridge");
+  assert.equal(manifest.manifest_version, 3);
+  assert.ok(manifest.host_permissions.includes("http://127.0.0.1/*"));
+  assert.ok(manifest.permissions.includes("alarms"));
+});
+
+test("HTTP accepts extension profile registration while restricting extension origins to that route", async t => {
+  const { store, providers } = setup(t), { app } = createApp(store, providers);
+  t.after(() => app.close());
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  const headers = { origin: `chrome-extension://${extensionId}` };
+  const payload = { id: extensionId, name: "Chrome", extensionId };
+  const response = await app.inject({ method: "POST", url: "/api/web-bridge/profiles/register", headers, payload });
+  assert.equal(response.statusCode, 200, response.body);
+  const profiles = await app.inject({ url: "/api/web-bridge/profiles" });
+  assert.equal(profiles.json().items[0].id, extensionId);
+  assert.equal(profiles.json().items[0].connected, true);
+  assert.equal((await app.inject({ url: "/api/web-bridge/profiles", headers })).statusCode, 403);
+  assert.equal((await app.inject({ method: "POST", url: "/api/web-bridge/applications", headers, payload: { id: "crm", name: "CRM" } })).statusCode, 403);
+  assert.equal((await app.inject({ method: "POST", url: "/api/web-bridge/profiles/register", headers: { origin: "https://evil.test" }, payload })).statusCode, 403);
+  const mismatch = await app.inject({ method: "POST", url: "/api/web-bridge/profiles/register", headers, payload: { ...payload, extensionId: "a".repeat(32) } });
+  assert.equal(mismatch.json().code, "INVALID_ORIGIN");
+  assert.equal((await app.inject({ method: "POST", url: "/api/web-bridge/profiles/register", headers, payload: { ...payload, extensionId: "invalid" } })).statusCode, 400);
+});
 
 test("HTTP creation, editing, publishing, two branches, old version history and request conflicts", async t => {
   const { store, providers } = setup(t), { app } = createApp(store, providers); t.after(() => app.close());

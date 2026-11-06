@@ -552,6 +552,13 @@ summary { cursor: pointer; }
 .web-bridge-tool > button[data-size=icon] { margin-left: auto; }
 .tool-actions { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
 .web-bridge-profile-select { min-width: 170px; height: 31px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); color: var(--foreground); font-size: 12px; }
+.web-bridge-profile-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.web-bridge-profile-list li { min-width: 0; padding: 12px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface-2); }
+.web-bridge-profile-list strong { overflow-wrap: anywhere; font-size: 13px; }
+.web-bridge-profile-list dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 8px 18px; margin: 10px 0 0; font-size: 11px; }
+.web-bridge-profile-list dl > div { min-width: 0; }
+.web-bridge-profile-list dt { margin-bottom: 3px; color: var(--muted-foreground); }
+.web-bridge-profile-list dd { margin: 0; overflow-wrap: anywhere; }
 .web-bridge-tool-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(620px, calc(100dvh - 64px)); overflow-y: auto; }
 .web-bridge-test-output { min-height: 70px; max-height: 220px; overflow: auto; padding: 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); color: var(--muted-foreground); font-size: 11px; }
 .settings-layout { display: grid; grid-template-columns: 218px minmax(0, 1fr); gap: 28px; align-items: start; }

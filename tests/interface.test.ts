@@ -29,6 +29,7 @@ dom.window.HTMLElement.prototype.releasePointerCapture = () => {};
 const { render, screen, fireEvent, cleanup, waitFor, act } = await import("@testing-library/react");
 const { ProviderPicker } = await import("../src/web/features/ProviderPicker.js");
 const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
+const { WebBridgeSettings } = await import("../src/web/features/WebBridgeSettings.js");
 const { ModelManager } = await import("../src/web/features/ModelManager.js");
 const { DraftPage } = await import("../src/web/features/DraftPage.js");
 const { RunPage } = await import("../src/web/features/RunPages.js");
@@ -45,6 +46,97 @@ const { ScriptCleanup, ScriptReferences } = await import("../src/web/features/Sc
 const { default: userEvent } = await import("@testing-library/user-event");
 const { ThemePicker, ThemeProvider, themeStorageKey } = await import("../src/web/lib/theme.js");
 afterEach(() => cleanup());
+test("Web Bridge displays the browser extension directory while no browser is connected", async () => {
+  const originalFetch = globalThis.fetch;
+  const directory = "/Applications/Orchard/dist/web-bridge/extension";
+  globalThis.fetch = async url => {
+    if (String(url).endsWith("/extension")) return Response.json({ directory });
+    if (String(url).endsWith("/auth")) return Response.json({ configured: true, last4: "1234" });
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    await waitFor(() => assert.equal((screen.getByLabelText("浏览器插件目录") as HTMLInputElement).value, directory));
+    assert.ok((screen.getByLabelText("浏览器插件目录") as HTMLInputElement).readOnly);
+    assert.ok(screen.getByText(/chrome:\/\/extensions/));
+    assert.ok(await screen.findByText("还没有应用定义，请先添加一个应用。"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Web Bridge reports extension directory loading failures", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => String(url).endsWith("/extension")
+    ? Response.json({ message: "无法读取插件目录" }, { status: 500 })
+    : Response.json({ items: [] });
+  try {
+    render(createElement(WebBridgeSettings));
+    assert.ok(await screen.findByText("无法读取插件目录"));
+    assert.equal((screen.getByLabelText("浏览器插件目录") as HTMLInputElement).placeholder, "目录加载失败");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Web Bridge refreshes browser profiles and offers newly registered profiles for environment binding", async () => {
+  const originalFetch = globalThis.fetch;
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  let connected = false;
+  globalThis.fetch = async url => {
+    const path = String(url);
+    if (path.endsWith("/extension")) return Response.json({ directory: "/orchard/extension" });
+    if (path.endsWith("/auth")) return Response.json({ configured: true, last4: "1234" });
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    if (path.endsWith("/profiles")) return Response.json({ items: connected ? [{ id: extensionId, name: "Chrome · klmnop", extensionId, connected: true, lastSeen: Date.now() }] : [] });
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "管理应用" }));
+    assert.ok(screen.getByText("暂无已连接的浏览器资料，请先启动 Chrome 扩展。"));
+    connected = true;
+    fireEvent.click(screen.getByRole("button", { name: "刷新浏览器资料" }));
+    assert.ok(await screen.findByRole("option", { name: "Chrome · klmnop · ijklmnop · 已连接" }));
+    assert.ok(screen.getByText("已注册的浏览器资料：1"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Web Bridge lists named browser profiles with details and refreshes names without changing bindings", async () => {
+  const originalFetch = globalThis.fetch;
+  const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+  let name = "工作 Chrome";
+  const lastSeen = Date.UTC(2026, 10, 6, 9);
+  globalThis.fetch = async url => {
+    const path = String(url);
+    if (path.endsWith("/extension")) return Response.json({ directory: "/orchard/extension" });
+    if (path.endsWith("/auth")) return Response.json({ configured: true, last4: "1234" });
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [{ id: "prod", origin: "https://example.test", profileId: "profile-work", bound: true }] }] });
+    if (path.endsWith("/profiles")) return Response.json({ items: [
+      { id: "profile-work", name, extensionId, connected: true, lastSeen },
+      { id: "profile-test", name: "测试 Chrome", extensionId, connected: false, lastSeen },
+    ] });
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    await screen.findByText("已注册的浏览器资料：2");
+    const list = screen.getByRole("region", { name: "浏览器资料列表" });
+    assert.ok(list.textContent?.includes("工作 Chrome"));
+    assert.ok(list.textContent?.includes("测试 Chrome"));
+    assert.ok(list.textContent?.includes("profile-work"));
+    assert.ok(list.textContent?.includes(extensionId));
+    assert.equal(list.querySelector("time")!.dateTime, new Date(lastSeen).toISOString());
+    fireEvent.click(await screen.findByRole("button", { name: "管理应用" }));
+    const select = screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement;
+    const work = screen.getByRole("option", { name: "工作 Chrome · ile-work · 已连接" }) as HTMLOptionElement;
+    assert.equal(work.value, "profile-work");
+    assert.equal((screen.getByRole("option", { name: "测试 Chrome · ile-test · 已断开" }) as HTMLOptionElement).disabled, true);
+    fireEvent.change(select, { target: { value: "profile-work" } });
+    name = "财务工作浏览器";
+    fireEvent.click(screen.getByRole("button", { name: "刷新浏览器资料" }));
+    await screen.findByRole("option", { name: "财务工作浏览器 · ile-work · 已连接" });
+    assert.equal(select.value, "profile-work");
+    assert.ok(screen.getByText("财务工作浏览器 · 已绑定"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("script list filters request server pagination and exposes script creation", async () => {
   const originalFetch = globalThis.fetch, requests: string[] = [];
   globalThis.fetch = async url => {
@@ -203,6 +295,7 @@ test("settings connection form preserves separately managed model state", async 
   };
   try {
     render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
     const checkbox = await screen.findByRole("checkbox", { name: "启用 Third Agent" });
     fireEvent.click(checkbox);
     await waitFor(() => assert.equal(requests.length, 1));
@@ -310,6 +403,7 @@ test("model manager lists, disables, adds, searches and confirms deletion", { ti
   };
   try {
     render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
     fireEvent.click(await screen.findByRole("button", { name: "管理 Third Agent 模型" }));
     assert.ok(await screen.findByRole("dialog", { name: "Third Agent 模型管理" }));
     const first = screen.getByRole("checkbox", { name: "启用模型 first" });
@@ -402,7 +496,7 @@ test("draft UI saves manual changes before conversation, supports cancel and res
     assert.ok(await screen.findByLabelText("节点提示词"));
   } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
 });
-test("navigation supports keyboard access and routes to Provider settings", async () => {
+test("navigation supports keyboard access and settings defaults to general", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({ items: [] });
   try {
@@ -418,6 +512,9 @@ test("navigation supports keyboard access and routes to Provider settings", asyn
     dom.window.history.replaceState({}, "", "/settings");
     view.rerender(createElement(App));
     assert.ok(await screen.findByRole("heading", { name: "设置" }));
+    assert.ok(screen.getByRole("button", { name: "常规" }).classList.contains("active"));
+    assert.ok(screen.getByRole("region", { name: "外观设置" }));
+    assert.equal(screen.getByRole("button", { name: "Provider" }).classList.contains("active"), false);
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
 });
 test("Provider toggle rolls back when an immediate save fails", async () => {
@@ -427,6 +524,7 @@ test("Provider toggle rolls back when an immediate save fails", async () => {
     : Response.json({ items: [provider({ enabled: false })] });
   try {
     render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
     const checkbox = await screen.findByRole("checkbox", { name: "启用 Third Agent" });
     fireEvent.click(checkbox);
     assert.ok(await screen.findByText("配置写入失败"));
@@ -450,6 +548,7 @@ test("Provider model selection immediately saves only the default model", async 
   };
   try {
     render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
     const select = await screen.findByRole("combobox", { name: "Third Agent 默认模型" });
     fireEvent.keyDown(select, { key: "Enter" });
     fireEvent.click(await screen.findByRole("option", { name: "Second model" }));

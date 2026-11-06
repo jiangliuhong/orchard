@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orchard Web Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+    <script src="popup.js" defer></script>
+  </head>
+  <body>
+    <header><span class="eyebrow">ORCHARD</span><h1>浏览器资料</h1><p>为当前 Chrome 资料命名，方便在工作台选择和绑定。</p></header>
+    <form id="profile-form">
+      <label for="profile-name">资料名称</label>
+      <input id="profile-name" name="name" maxlength="100" placeholder="例如：工作 Chrome、测试账号" required disabled />
+      <p class="hint">名称保存在当前浏览器资料中，重启后仍然保留。</p>
+      <button id="save" type="submit" disabled>保存并连接</button>
+    </form>
+    <p id="status" role="status" aria-live="polite">正在连接本机服务…</p>
+    <dl><dt>资料 ID</dt><dd id="profile-id">—</dd><dt>插件 ID</dt><dd id="extension-id">—</dd><dt>已连接服务</dt><dd id="servers">—</dd></dl>
+    <button id="reconnect" type="button" class="secondary" disabled>重新连接</button>
+    <p class="hint">自动重连已开启：关闭弹窗后仍会每 30 秒尝试连接，服务恢复后自动重新注册。</p>
+    <p class="hint">保存后，在工作台「设置 → Web Bridge」点击“刷新浏览器资料”查看新名称。</p>
+  </body>
+</html>
