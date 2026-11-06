@@ -1,0 +1,19 @@
+{
+  "applications": {
+    "sample": {
+      "id": "sample",
+      "name": "示例",
+      "enabled": true,
+      "extension": {
+        "retained": 1
+      }
+    }
+  },
+  "custom": {
+    "nested": [
+      false,
+      null,
+      "keep"
+    ]
+  }
+}

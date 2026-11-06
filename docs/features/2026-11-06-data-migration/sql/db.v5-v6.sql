@@ -1,0 +1,3 @@
+
+ALTER TABLE script_versions ADD COLUMN timeout_ms INTEGER NOT NULL DEFAULT 300000 CHECK(timeout_ms BETWEEN 1000 AND 300000);
+PRAGMA user_version = 6;

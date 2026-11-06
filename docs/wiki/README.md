@@ -23,6 +23,6 @@
 
 - [草稿运行测试设计](./decisions/draft-testing-design.md)
 
-功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（设计中）](../features/2026-11-06-data-migration/design.md)。
+功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（已完成并验收）](../features/2026-11-06-data-migration/design.md)。
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

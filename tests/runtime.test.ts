@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { executeProcess } from "../src/runtime/process.js";
 import { GraphRunner } from "../src/runtime/runner.js";
-import { Store } from "../src/persistence/store.js";
+import { TestStore as Store } from "./helpers.js";
 import { setup, publishExample, until, temporary, exampleFiles } from "./helpers.js";
 import { validateWorkflow } from "../src/domain/validation.js";
 import { json } from "../src/persistence/files.js";

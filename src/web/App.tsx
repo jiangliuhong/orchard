@@ -7,12 +7,14 @@ import { RunPage, RunsPage } from "./features/RunPages";
 import { SettingsPage } from "./features/SettingsPage";
 import { ErrorNotice } from "./components/common";
 import { ThemePicker } from "./lib/theme";
+import { BootstrapGate } from "./Bootstrap";
 class ErrorBoundary extends Component<{ children: ReactNode }, { error?: string }> {
   state: { error?: string } = {};
   static getDerivedStateFromError(error: Error) { return { error: error.message }; }
   render() { return this.state.error ? <div className="panel"><h1>页面暂时无法展示</h1><ErrorNotice message={this.state.error} /><a href="/">返回工作流列表 →</a></div> : this.props.children; }
 }
-export default function App() {
+export default function App() { return <BootstrapGate><BusinessApp /></BootstrapGate>; }
+export function BusinessApp() {
   const path = window.location.pathname, parts = path.split("/").filter(Boolean), studio = parts[0] === "drafts";
   const page = parts[0] === "scripts" ? parts[1] ? <ScriptPage key={parts[1]} id={parts[1]} /> : <ScriptsPage /> : parts[0] === "settings" ? <SettingsPage /> : parts[0] === "drafts" && parts[1] ? <DraftPage key={parts[1]} id={parts[1]} /> : parts[0] === "workflows" && parts[1] ? <WorkflowPage key={parts[1]} id={parts[1]} /> : parts[0] === "runs" && parts[1] ? <RunPage key={parts[1]} id={parts[1]} /> : parts[0] === "runs" ? <RunsPage /> : <WorkflowsPage />;
   return <div className={`app-shell ${studio ? "studio-shell" : ""}`}>

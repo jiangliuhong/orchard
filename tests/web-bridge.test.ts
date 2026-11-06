@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { decodeNativeMessages, encodeNativeMessage, decodeLine, encodeLine } from "../src/web-bridge/protocol.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { initializeData } from "../src/migrations/runner.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -199,9 +200,11 @@ test("popup automatically displays reconnection without overwriting an unsaved n
 });
 
 test("profile renaming preserves bindings, migrates legacy IDs and expires disconnected profiles", t => {
-  const root = mkdtempSync(join(tmpdir(), "orchard-profiles-")), config = new WebBridgeConfig(root);
+  const root = mkdtempSync(join(tmpdir(), "orchard-profiles-"));
+  initializeData(root, "new_install", randomUUID());
+  const config = new WebBridgeConfig(root);
   const bridge = new WebBridgeGateway(new WebBridgeClient(join(root, "bridge.sock"), catalogHash), config);
-  t.after(() => bridge.close());
+  t.after(async () => { await bridge.close(); rmSync(root, { recursive: true, force: true }); });
   config.saveApplication({ id: "crm", name: "CRM" });
   const extensionId = "abcdefghijklmnopabcdefghijklmnop";
   const environment = config.saveEnvironment("crm", { origin: "https://example.test", profileId: extensionId, bound: true });
@@ -239,7 +242,9 @@ test("line framing rejects oversized messages and preserves JSON", () => {
 });
 
 test("web bridge config writes restricted environment state atomically", () => {
-  const root = mkdtempSync(join(tmpdir(), "orchard-web-bridge-")), config = new WebBridgeConfig(root);
+  const root = mkdtempSync(join(tmpdir(), "orchard-web-bridge-"));
+  initializeData(root, "new_install", randomUUID());
+  const config = new WebBridgeConfig(root);
   config.saveApplication({ id: "acctrix", name: "Acctrix" });
   const saved = config.saveEnvironment("acctrix", { origin: "https://fm.example.test" });
   assert.equal(config.environments("acctrix")[0]?.origin, "https://fm.example.test");

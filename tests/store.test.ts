@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { setup, temporary } from "./helpers.js";
 import { canonicalJson, digest, FileStore } from "../src/persistence/files.js";
-import { Store } from "../src/persistence/store.js";
+import { TestStore as Store, exampleFiles } from "./helpers.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { join } from "node:path";
 import { RUN_SCHEMA, MIGRATE_V2_TO_V3 } from "../src/persistence/schema.js";
@@ -86,10 +86,10 @@ PRAGMA user_version = 2;
 test("approved schema has sixteen tables and isolates unknown databases", t => {
   const root = temporary(t), store = new Store(root);
   assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, 16);
-  assert.throws(() => new Store(root), /已有/); store.close();
+  assert.throws(() => new Store(root), /INSTANCE_LOCKED/); store.close();
   const unknownRoot = temporary(t), database = new DatabaseSync(join(unknownRoot, "workbench.db"));
   database.exec("CREATE TABLE old_data(id TEXT)"); database.close();
-  assert.throws(() => new Store(unknownRoot), /未知数据库/);
+  assert.throws(() => new Store(unknownRoot), /UNKNOWN_DATABASE/);
 });
 test("commands are transactional and keyed by request content", t => {
   const { store } = setup(t); t.after(() => store.close());
@@ -127,7 +127,7 @@ test("schema v1 upgrades atomically and preserves runs, node references, events,
   const insert = (sql: string, ...params: SQLInputValue[]) => database.prepare(sql).run(...params);
   insert("INSERT INTO provider_settings(id,enabled,config_json,models_json,default_model,revision,updated_at) VALUES('test-provider',1,'{}','[]','',1,0)");
   insert("INSERT INTO workflows(id,name,created_at,updated_at) VALUES(?,?,?,?)", workflowId, "迁移工作流", now, now);
-  insert("INSERT INTO workflow_versions(id,workflow_id,version_no,definition_json,layout_json,artifact_path,content_hash,created_at) VALUES(?,?,1,'{}','{}','unused','hash',?)", versionId, workflowId, now);
+  insert(`INSERT INTO workflow_versions(id,workflow_id,version_no,definition_json,layout_json,artifact_path,content_hash,created_at) VALUES(?,?,1,'{}','{}','${new FileStore(root).saveTree(exampleFiles()).path}','hash',?)`, versionId, workflowId, now);
   insert("UPDATE workflows SET current_version_id=? WHERE id=?", versionId, workflowId);
   const input = { text: "x".repeat(50000) }, blob = new FileStore(root).writeBlob(input);
   insert("INSERT INTO artifacts VALUES(?,?,?,?,?,?)", blob.id, blob.relativePath, blob.hash, blob.size, "application/json", now);
@@ -163,7 +163,7 @@ test("failed v1 migration rolls back the table, schema version and index", t => 
   database.exec(SCHEMA_V2.replace(RUN_SCHEMA, legacyRunSchema).replace("PRAGMA user_version = 2", "PRAGMA user_version = 1"));
   database.exec("PRAGMA foreign_keys=OFF; INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES('orphan','missing-version','queued','{}',0)");
   database.close();
-  assert.throws(() => new Store(root), /升级外键校验失败/);
+  assert.throws(() => new Store(root), /DATABASE_CORRUPT/);
   const original = new DatabaseSync(join(root, "workbench.db"));
   t.after(() => original.close());
   assert.equal(original.prepare("PRAGMA user_version").get()!.user_version, 1);
@@ -189,7 +189,7 @@ test("v2 databases upgrade to an equivalent v6 schema and old rows keep NULL ass
   legacy.exec(SCHEMA_V2);
   const insert = (sql: string, ...params: SQLInputValue[]) => legacy.prepare(sql).run(...params);
   legacy.exec("INSERT INTO provider_settings(id,enabled,config_json,models_json,default_model,revision,updated_at) VALUES('test-provider',1,'{}','[]','',1,0)");
-  insert("INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('draft-v2',NULL,NULL,0,'unused','{}','draft',?,?)", now, now);
+  insert(`INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('draft-v2',NULL,NULL,0,'${new FileStore(root).saveTree(exampleFiles()).path}','{}','draft',?,?)`, now, now);
   insert("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,created_at) VALUES(?,?,'test-provider','test-model',1,'succeeded',0,?)", legacyTurnId, "draft-v2", now);
   insert("INSERT INTO authoring_messages(id,draft_id,turn_id,sequence,role,content_json,created_at) VALUES('msg-1','draft-v2',?,1,'user',?,?)", legacyTurnId, JSON.stringify({ text: "旧请求" }), now);
   insert("INSERT INTO authoring_messages(id,draft_id,turn_id,sequence,role,content_json,created_at) VALUES('msg-2','draft-v2',NULL,2,'user',?,?)", JSON.stringify({ text: "无轮次消息" }), now);
@@ -256,7 +256,7 @@ test("recovery interrupts active turns and marks uncertain conversations needs_r
   // 每个场景独立草稿（一个草稿最多一个当前对话，部分唯一索引限制）。
   const mk = (store: Store, turnId: string, status: string, submission: string, withConversation: boolean) => {
     const draftId = randomUUID(), conversationId = randomUUID();
-    store.exec("INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES(?,NULL,NULL,0,'unused','{}','draft',?,?)", draftId, now, now);
+    store.exec(`INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES(?,NULL,NULL,0,'${new FileStore(root).saveTree(exampleFiles()).path}','{}','draft',?,?)`, draftId, now, now);
     if (withConversation) {
       store.insertConversation({ id: conversationId, draftId, mode: "multi", contextMode: "native", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "m", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
     }
@@ -290,7 +290,7 @@ test("v3 databases upgrade to v6: rotation archived rows become idle, archived_a
   legacy.exec(MIGRATE_V2_TO_V3);
   legacy.exec("INSERT INTO provider_settings(id,enabled,config_json,models_json,default_model,revision,updated_at) VALUES('test-provider',1,'{}','[]','',1,0)");
   const insert = (sql: string, ...params: SQLInputValue[]) => legacy.prepare(sql).run(...params);
-  insert("INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('draft-v3',NULL,NULL,0,'unused','{}','draft',?,?)", now, now);
+  insert(`INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('draft-v3',NULL,NULL,0,'${new FileStore(root).saveTree(exampleFiles()).path}','{}','draft',?,?)`, now, now);
   const conv = (id: string, status: string, contextMode: string, updatedAt: number) => insert(
     "INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,transport,connection_fingerprint,backend_generation,created_at,updated_at) VALUES(?,?,'multi',?,?,'test-provider',1,'m','legacy','fp',0,?,?)",
     id, "draft-v3", contextMode, status, now, updatedAt);

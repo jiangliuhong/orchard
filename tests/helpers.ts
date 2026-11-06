@@ -3,7 +3,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { TestContext } from "node:test";
-import { Store } from "../src/persistence/store.js";
+import { Store as BusinessStore } from "../src/persistence/store.js";
+import { DirectoryLease } from "../src/migrations/lock.js";
+import { initializeData, execute, baseline } from "../src/migrations/runner.js";
+import { plan } from "../src/migrations/planner.js";
+import { present, safe, writeJson, readJson } from "../src/migrations/journal.js";
+import type { Job } from "../src/migrations/types.js";
+export class TestStore extends BusinessStore {
+  private lease: DirectoryLease;
+  constructor(root: string) {
+    const lease = DirectoryLease.acquire(root);
+    try {
+      if (!present(safe(root, "workbench.db")) && lease.original.length === 0) initializeData(root, "new_install", randomUUID());
+      baseline(root);
+      const current = plan(root);
+      if (current.steps.length) {
+        const now = new Date().toISOString(), id = randomUUID(), ledger = safe(root, "migrations/ledger.json");
+        const job: Job = { formatVersion: 1, jobId: id, requestId: id, requestScope: "test-explicit-migration", inputHmac: "test", plan: current, phase: "accepted", revision: 1, startedAt: now, updatedAt: now, steps: current.steps.map(s => ({id:s.id,state:"pending"})), processed: 0, install: [], ledgerBefore: present(ledger) ? readJson(ledger) : null };
+        writeJson(safe(root, `migrations/jobs/${id}/state.json`), job);
+        const result = execute(root, job); if (result.phase !== "committed") throw new Error(result.error?.code ?? result.phase);
+      } else if (current.sourceVersions.webBridge === null) initializeData(root, "optional_config", randomUUID());
+      baseline(root);
+      super(root, lease); this.lease = lease; this.recoverBusiness();
+    } catch (error) { lease.release(); throw error; }
+  }
+  override close() { super.close(); if (present(safe(this.root, "workbench.lock"))) this.lease.release(); }
+}
 import { ProviderRegistry, type AgentProvider, type TurnRequest, type ProviderResult } from "../src/providers/registry.js";
 import { AuthoringService } from "../src/authoring/service.js";
 import type { SourceFiles, Workflow } from "../src/domain/types.js";
@@ -48,7 +73,7 @@ export function exampleFiles(id = "example"): SourceFiles {
   };
 }
 export function setup(t: TestContext) {
-  const root = temporary(t), store = new Store(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
+  const root = temporary(t), store = new TestStore(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
   providers.update(provider.id, { enabled: true, defaultModel: "test-model" });
   const authoring = new AuthoringService(store, providers);
   return { root, store, provider, providers, authoring };

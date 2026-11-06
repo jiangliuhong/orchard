@@ -1,0 +1,57 @@
+{
+  "applications": {
+    "sample": {
+      "id": "sample",
+      "name": "示例",
+      "enabled": true,
+      "extension": {
+        "retained": 1
+      }
+    }
+  },
+  "environments": {
+    "sample": [
+      {
+        "id": "local",
+        "origin": "http://localhost:3000",
+        "enabled": true,
+        "bound": false,
+        "tabAvailable": false,
+        "profileId": "external-profile",
+        "custom": "keep"
+      }
+    ]
+  },
+  "tools": {
+    "sample/list": {
+      "application": "sample",
+      "toolId": "list",
+      "site": "sample",
+      "description": "列表",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "path": "/api/list",
+      "method": "GET",
+      "fields": [],
+      "risk": "read",
+      "approval": "none",
+      "timeoutMs": 1000,
+      "catalogVersion": "1",
+      "enabled": true,
+      "custom": "keep"
+    }
+  },
+  "enabledTools": {
+    "sample/unregistered": false
+  },
+  "custom": {
+    "nested": [
+      false,
+      null,
+      "keep"
+    ]
+  },
+  "schemaVersion": 1
+}

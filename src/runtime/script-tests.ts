@@ -6,12 +6,14 @@ import { executeScript, ScriptExecutionError } from "./script.js";
 export class ScriptTestRunner {
   private active?: { id: string; controller: AbortController; job: Promise<void> };
   private closed = false;
-  constructor(readonly store: Store) {
+  private enabled = false;
+  constructor(readonly store: Store, autoStart = true) {
     for (const test of store.all<{ id: string }>("SELECT id FROM script_tests WHERE status='running'")) {
       store.finishScriptTest(test.id, { status: "failed", error: { code: "INTERRUPTED", message: "服务重启，测试已中断，请重新测试" }, stdout: "", stderr: "" });
     }
-    this.wake();
+    if (autoStart) this.start();
   }
+  start() { this.enabled = true; this.wake(); }
   enqueue(id: string) { this.wake(); return this.store.scriptTest(id); }
   cancel(id: string) {
     const test = this.store.scriptTest(id);
@@ -23,6 +25,7 @@ export class ScriptTestRunner {
     return this.store.scriptTest(id);
   }
   private wake() {
+    if (!this.enabled) return;
     setImmediate(() => {
       if (this.active || this.closed) return;
       const next = this.store.one<{ id: string }>("SELECT id FROM script_tests WHERE status='queued' ORDER BY created_at,rowid LIMIT 1");

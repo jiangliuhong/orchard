@@ -1,0 +1,11 @@
+import {readFileSync,writeFileSync,readdirSync} from 'node:fs';
+import {resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {checkManifest,sha256} from './check-migration-manifest.mjs';
+const root=fileURLToPath(new URL('../',import.meta.url)),manifest=checkManifest({requireReview:true}),dist=resolve(root,'dist');
+const walk=path=>readdirSync(resolve(dist,path),{withFileTypes:true}).flatMap(entry=>{const name=path?`${path}/${entry.name}`:entry.name;return entry.isDirectory()?walk(name):[name];});
+const files={};
+for(const path of walk('').filter(path=>path!=='migration-integrity.json').sort())files[path]=sha256(readFileSync(resolve(dist,path)));
+for(const required of ['migrations/worker.js','migrations/runner.js','migrations/frozen.js','server/main.js','web/index.html'])if(!files[required])throw new Error(`Incomplete build: ${required}`);
+writeFileSync(resolve(dist,'migration-integrity.json'),JSON.stringify({formatVersion:1,releaseDigest:manifest.contentDigest,files},null,2)+'\n');
+console.log(`Locked ${Object.keys(files).length} built files for release ${manifest.contentDigest}`);

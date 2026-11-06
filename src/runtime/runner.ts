@@ -15,7 +15,9 @@ import type { WebBridgeGateway } from "../web-bridge/gateway.js";
 export class GraphRunner {
   private current?: { id: string; controller: AbortController; job: Promise<void> };
   private closing = false;
-  constructor(readonly store: Store, readonly providers: ProviderRegistry, readonly webBridge?: WebBridgeGateway) { this.wake(); }
+  private enabled = false;
+  constructor(readonly store: Store, readonly providers: ProviderRegistry, readonly webBridge?: WebBridgeGateway, autoStart = true) { if (autoStart) this.start(); }
+  start() { this.enabled = true; this.wake(); }
   create(versionId: string, input: unknown, requestId: string) {
     const version = this.store.version(versionId);
     assertSchema(input, version.definition.inputSchema, "工作流输入");
@@ -96,6 +98,7 @@ export class GraphRunner {
     return this.store.run(id);
   }
   wake() {
+    if (!this.enabled) return;
     setImmediate(() => {
       if (this.current || this.closing) return;
       const next = this.store.one<{ id: string }>("SELECT id FROM runs WHERE status='queued' ORDER BY created_at,rowid LIMIT 1");

@@ -104,6 +104,19 @@
 * { box-sizing: border-box; border-color: var(--border); }
 html { overflow-y: scroll; scrollbar-gutter: stable; }
 body { margin: 0; }
+.migration-wizard { max-width: 820px; margin: 48px auto; padding: 32px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); line-height: 1.7; overflow-wrap: anywhere; }
+.migration-wizard h1 { margin-bottom: 16px; font-size: 24px; font-weight: 600; }
+.migration-wizard h2 { margin: 20px 0 12px; font-size: 18px; font-weight: 600; }
+.migration-wizard p, .migration-wizard ol { margin: 12px 0; }
+.migration-wizard ol { padding-left: 24px; list-style: decimal; }
+.migration-wizard button { margin: 8px 8px 8px 0; padding: 8px 16px; border: 1px solid var(--border); border-radius: 7px; background: var(--pill); }
+.migration-wizard button:hover { background: var(--pill-hover); }
+.migration-wizard button:disabled { opacity: .5; }
+.migration-wizard input:not([type=checkbox]), .migration-wizard select { display: block; width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); }
+.migration-wizard input[type=checkbox] { margin-right: 8px; }
+.migration-wizard [role=alert] { color: var(--danger); }
+.migration-wizard section { margin-top: 24px; border-top: 1px solid var(--border); }
+@media (max-width: 860px) { .migration-wizard { margin: 20px 12px; padding: 20px; } }
 [hidden] { display: none !important; }
 button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
 button, a { touch-action: manipulation; }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setup, TestProvider, until } from "./helpers.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
-import { Store } from "../src/persistence/store.js";
+import { TestStore as Store } from "./helpers.js";
 import { createApp } from "../src/server/app.js";
 
 test("legacy models remain enabled and disabling the default clears it without selecting a replacement", context => {
