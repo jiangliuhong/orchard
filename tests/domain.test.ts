@@ -20,6 +20,14 @@ test("graph rejects invalid formats, IDs, cycles, dangling nodes, fanout and Swi
     (g: typeof valid) => { g.nodes[0].config.extra = true; },
   ]) { const candidate = structuredClone(valid); change(candidate); assert.throws(() => validateWorkflow(candidate)); }
 });
+test("script nodes require fixed library identities", () => {
+  const valid = JSON.parse(exampleFiles()["workflow.json"]!);
+  valid.nodes[0] = { id: "a", name: "Library script", type: "script", input: { source: "workflow" }, outputSchema: true, config: { scriptId: "normalize-text", scriptVersionId: "version-1" } };
+  assert.doesNotThrow(() => validateWorkflow(valid));
+  const invalid = structuredClone(valid); delete invalid.nodes[0].config.scriptVersionId;
+  assert.throws(() => validateWorkflow(invalid));
+});
+
 test("bindings require dominance on every path, including final output", () => {
   const valid = JSON.parse(exampleFiles()["workflow.json"]!);
   valid.nodes.push({ id: "end", name: "End", type: "code.nodejs", input: { source: "node", nodeId: "c" }, config: { script: "scripts/a.ts" }, outputSchema: true });

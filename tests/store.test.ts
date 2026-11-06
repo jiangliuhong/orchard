@@ -83,9 +83,9 @@ PRAGMA application_id = 1331110449;
 PRAGMA user_version = 2;
 `;
 
-test("approved schema has thirteen tables and isolates unknown databases", t => {
+test("approved schema has sixteen tables and isolates unknown databases", t => {
   const root = temporary(t), store = new Store(root);
-  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, 13);
+  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, 16);
   assert.throws(() => new Store(root), /已有/); store.close();
   const unknownRoot = temporary(t), database = new DatabaseSync(join(unknownRoot, "workbench.db"));
   database.exec("CREATE TABLE old_data(id TEXT)"); database.close();
@@ -139,7 +139,7 @@ test("schema v1 upgrades atomically and preserves runs, node references, events,
   insert("INSERT INTO command_receipts(scope,request_id,request_hash,result_json,created_at) VALUES('migration-test','request',?,?,?)", digest(canonicalJson({})), JSON.stringify({ id: runId }), now);
   database.close();
   const upgraded = new Store(root);
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 4);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 6);
   assert.equal(upgraded.one("PRAGMA foreign_keys")!.foreign_keys, 1);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   assert.deepEqual(upgraded.run(runId), { id: runId, workflowVersionId: versionId, draftId: null, draftRevision: null, snapshotPath: null, status: "succeeded", input, output: { done: true }, activeNodeId: null, error: undefined, createdAt: now, startedAt: now, endedAt: now });
@@ -182,7 +182,7 @@ const turnColumns = (store: Store) =>
 const indexNames = (store: Store) =>
   store.all("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).sort();
 
-test("v2 databases upgrade to an equivalent v4 schema and old rows keep NULL associations", t => {
+test("v2 databases upgrade to an equivalent v6 schema and old rows keep NULL associations", t => {
   const root = temporary(t), now = Date.now();
   const legacyTurnId = randomUUID();
   const legacy = new DatabaseSync(join(root, "workbench.db"));
@@ -196,7 +196,7 @@ test("v2 databases upgrade to an equivalent v4 schema and old rows keep NULL ass
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 4);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 6);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // 旧行保留且关联为 NULL；不自动创建对话。
   assert.equal(upgraded.one("SELECT conversation_id FROM authoring_turns WHERE id=?", legacyTurnId)!.conversation_id, null);
@@ -283,7 +283,7 @@ test("recovery interrupts active turns and marks uncertain conversations needs_r
   assert.doesNotThrow(() => recovered.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,created_at) VALUES(?,?,'test-provider','m',1,'queued',0,?)", randomUUID(), draftId, Date.now()));
 });
 
-test("v3 databases upgrade to v4: rotation archived rows become idle, archived_at approximates, diagnostics coexist with current", t => {
+test("v3 databases upgrade to v6: rotation archived rows become idle, archived_at approximates, diagnostics coexist with current", t => {
   const root = temporary(t), now = Date.now();
   const legacy = new DatabaseSync(join(root, "workbench.db"));
   legacy.exec(SCHEMA_V2);
@@ -301,7 +301,7 @@ test("v3 databases upgrade to v4: rotation archived rows become idle, archived_a
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 4);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 6);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // §4.1/§4.2：存量 archived 为轮换产物 → idle；archived_at 取迁移前 updated_at 近似。
   const archived = upgraded.conversation("c-archived")!;

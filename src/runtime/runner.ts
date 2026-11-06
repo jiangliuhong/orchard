@@ -9,6 +9,7 @@ import { assertSchema, resolveBinding } from "../domain/validation.js";
 import { check, failure } from "../domain/errors.js";
 import type { WorkflowNode, Workflow, NodeRun, Run, RunExecution } from "../domain/types.js";
 import { executeProcess } from "./process.js";
+import { executeScript } from "./script.js";
 
 export class GraphRunner {
   private current?: { id: string; controller: AbortController; job: Promise<void> };
@@ -17,6 +18,7 @@ export class GraphRunner {
   create(versionId: string, input: unknown, requestId: string) {
     const version = this.store.version(versionId);
     assertSchema(input, version.definition.inputSchema, "工作流输入");
+    this.store.assertWorkflowScripts(version.definition, true);
     for (const node of version.definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
     const result = this.store.command(`run:${versionId}`, requestId, input, () => {
       const id = randomUUID(), now = Date.now();
@@ -48,6 +50,7 @@ export class GraphRunner {
     const compiled = await compileScripts(files, definition), tree = this.store.files.saveTree(files, compiled);
     const result = this.store.command(scope, requestId, command, () => {
       this.editableDraft(draftId, revision);
+      this.store.assertWorkflowScripts(definition);
       for (const node of definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
       const id = randomUUID(), now = Date.now();
       this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
@@ -142,7 +145,9 @@ export class GraphRunner {
               signal, cwd: this.store.root, prompt: `${node.config.prompt}\nNode input (data):\n${json(value)}`, schema: node.outputSchema, timeoutMs: node.config.timeoutMs,
               emit: event => emit(event.type, event.payload),
             }).then(result => ({ output: result.output, execution: { providerId: result.providerId, modelId: result.modelId, modelSource: result.modelSource, usage: result.usage } }))
-            : await this.script(id, attemptId, node, value, tree.compiled[node.id], tree.files[node.config.script!], signal, emit);
+            : node.type === "script"
+              ? await this.libraryScript(node, value, signal)
+              : await this.script(id, attemptId, node, value, tree.compiled[node.id], tree.files[node.config.script!], signal, emit);
           output = result.output; execution = result.execution;
           next = workflow.edges.find(e => e.from === node.id)?.to ?? null;
         }
@@ -184,6 +189,16 @@ export class GraphRunner {
         this.store.append("run", id, `run.${status}`, detail);
       });
     }
+  }
+  private async libraryScript(node: WorkflowNode, input: unknown, signal: AbortSignal) {
+    const script = this.store.script(node.config.scriptId!), version = this.store.scriptVersion(node.config.scriptVersionId!);
+    check((script.status === "published" || script.status === "archived") && version.status === "published" && version.scriptId === script.id, "SCRIPT_VERSION_INVALID", "工作流引用的脚本版本无效");
+    assertSchema(input, version.inputSchema, `${node.id} 脚本输入`);
+    const tree = this.store.files.readScriptTree(version.sourceRef);
+    const timeoutMs = Math.min(version.timeoutMs, node.config.timeoutMs ?? version.timeoutMs);
+    const result = await executeScript({ runtime: script.runtime, entryFile: version.entryFile, files: tree.files, input, cwd: this.store.files.path("runs"), timeoutMs, signal });
+    assertSchema(result.output, version.outputSchema, `${node.id} 脚本输出`);
+    return { output: result.output, execution: { scriptId: script.id, scriptVersionId: version.id, exitCode: result.exitCode, durationMs: result.durationMs } };
   }
   private async script(runId: string, attemptId: string, node: WorkflowNode, input: unknown, compiled: string | undefined, shell: string | undefined, signal: AbortSignal, emit: (type: string, payload: unknown) => void) {
     const relative = `runs/${runId}/${attemptId}`, directory = this.store.files.path(relative);

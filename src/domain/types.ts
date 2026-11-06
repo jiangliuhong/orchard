@@ -10,12 +10,14 @@ export interface AgentChoice { providerId?: string; modelId?: string }
 export interface WorkflowNode {
   id: string;
   name: string;
-  type: "code.nodejs" | "agent" | "shell" | "switch";
+  type: "code.nodejs" | "agent" | "shell" | "script" | "switch";
   input: Binding;
   inputSchema?: JsonSchema;
   outputSchema: JsonSchema;
   config: {
     script?: string;
+    scriptId?: string;
+    scriptVersionId?: string;
     resultMode?: "process" | "json";
     providerId?: string;
     modelId?: string;
@@ -41,6 +43,18 @@ export interface Workflow {
 }
 export type Layout = Record<string, { x: number; y: number }>;
 export type SourceFiles = Record<string, string>;
+export type ScriptRuntime = "nodejs" | "shell";
+export type ScriptStatus = "draft" | "published" | "archived";
+export interface ScriptVersion {
+  id: string; scriptId: string; number: number; status: "draft" | "published"; revision: number;
+  entryFile: string; timeoutMs: number; inputSchema: JsonSchema; outputSchema: JsonSchema; sourceRef: string; contentHash: string;
+  validation: { valid: boolean; diagnostics: string[] }; createdAt: number; updatedAt: number; publishedAt: number | null;
+}
+export interface ScriptView {
+  id: string; name: string; description: string; runtime: ScriptRuntime; status: ScriptStatus;
+  currentDraftVersionId: string | null; currentPublishedVersionId: string | null;
+  createdAt: number; updatedAt: number; archivedAt: number | null;
+}
 export type RunStatus = "queued" | "running" | "cancel_requested" | "succeeded" | "failed" | "cancelled" | "interrupted";
 export type NodeStatus = "pending" | "running" | "succeeded" | "failed" | "cancelled" | "skipped" | "interrupted";
 export interface Failure { code: string; message: string }

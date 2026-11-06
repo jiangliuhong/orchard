@@ -10,11 +10,13 @@ import { assertSchema } from "../domain/validation.js";
 import { AppError, check } from "../domain/errors.js";
 import type { SourceFiles, StreamEvent } from "../domain/types.js";
 import { digest, json } from "../persistence/files.js";
+import { validateScript } from "../domain/scripts.js";
 import { SCHEMA_VERSION } from "../persistence/schema.js";
 import { SessionManager } from "../providers/session-manager.js";
 import { agentLimits } from "../providers/agent-limits.js";
 import { codexNativeAdapter } from "../providers/codex-app-server.js";
 import { piNativeAdapter } from "../providers/pi-rpc.js";
+import { ScriptTestRunner } from "../runtime/script-tests.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -33,7 +35,7 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   const providers = suppliedProviders ?? new ProviderRegistry(store, manager)
     .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
     .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
-  const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers);
+  const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers), scriptTests = new ScriptTestRunner(store);
   const app = Fastify({ bodyLimit: 6 * 1024 * 1024, logger: false });
   const connections = new Set<() => void>();
   const publicValue = (value: unknown): unknown => {
@@ -82,6 +84,36 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     reply.raw.once("close", disconnected);
     try { return await providers.verifyModel(request.params.id, request.params.modelId, { signal: controller.signal }); }
     finally { reply.raw.off("close", disconnected); }
+  });
+  app.get("/api/scripts", async () => ({ items: store.scripts() }));
+  app.post("/api/scripts", async request => {
+    const input = request.body as any; const definition = validateScript(input);
+    const tree = store.files.saveScriptTree(definition.files); return store.createScript(definition, tree.path, tree.hash);
+  });
+  app.get<{ Params: { id: string } }>("/api/scripts/:id", async request => {
+    const script = store.script(request.params.id), versions = store.scriptVersions(request.params.id);
+    return { ...script, versions, draft: script.currentDraftVersionId ? { ...store.scriptVersion(script.currentDraftVersionId), files: store.files.readScriptTree(store.scriptVersion(script.currentDraftVersionId).sourceRef).files } : null };
+  });
+  app.patch<{ Params: { id: string } }>("/api/scripts/:id/draft", async request => {
+    const input = request.body as any, definition = validateScript({ ...input, id: request.params.id });
+    const tree = store.files.saveScriptTree(definition.files); return store.updateScriptDraft(request.params.id, input.expectedRevision, definition, tree.path, tree.hash);
+  });
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/archive", async request => store.archiveScript(request.params.id));
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/publish", async request => {
+    const input = body<{ expectedRevision: number; requestId: string }>(request.body, { expectedRevision, requestId }, ["expectedRevision", "requestId"]);
+    return store.command(`script-publish:${request.params.id}`, input.requestId, input, () => store.publishScript(request.params.id, input.expectedRevision));
+  });
+  app.get<{ Params: { id: string; versionId: string } }>("/api/scripts/:id/versions/:versionId", async request => {
+    const version = store.scriptVersion(request.params.versionId); check(version.scriptId === request.params.id, "NOT_FOUND", "脚本版本不属于该脚本");
+    return { ...version, files: store.files.readScriptTree(version.sourceRef).files };
+  });
+  app.get<{ Params: { id: string } }>("/api/scripts/:id/tests", async request => ({ items: store.scriptTests(request.params.id) }));
+  app.get<{ Params: { id: string; testId: string } }>("/api/scripts/:id/tests/:testId", async request => { const test = store.scriptTest(request.params.testId); check(test.scriptId === request.params.id, "NOT_FOUND", "脚本测试不属于该脚本"); return test; });
+  app.post<{ Params: { id: string } }>("/api/scripts/:id/tests", async request => {
+    const input = body<{ scriptVersionId?: string; draftRevision?: number; input: unknown; requestId: string }>(request.body, { scriptVersionId: { type: "string" }, draftRevision: { type: "integer", minimum: 0 }, input: {}, requestId }, ["input", "requestId"]);
+    check(Boolean(input.scriptVersionId) !== (input.draftRevision !== undefined), "INVALID_REQUEST", "必须指定已发布版本或草稿修订号");
+    const test = store.command(`script-test:${request.params.id}`, input.requestId, input, () => store.createScriptTest(request.params.id, input.scriptVersionId ?? null, input.draftRevision ?? null, input.input));
+    scriptTests.enqueue(test.id); return test;
   });
   app.get("/api/drafts", async () => ({ items: store.drafts().map(d => {
     const tree = store.files.readTree(d.artifactPath), definition = JSON.parse(tree.files["workflow.json"]!);
@@ -223,6 +255,6 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   app.addHook("preClose", async () => { for (const close of connections) close(); await providers.closeVerifications(); });
   // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
   // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
-  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); await manager.close().catch(() => {}); store.close(); });
+  app.addHook("onClose", async () => { await authoring.close(); await runner.close(); await scriptTests.close(); await manager.close().catch(() => {}); store.close(); });
   return { app, store, providers, authoring, runner };
 }

@@ -107,6 +107,33 @@ export class FileStore {
     check(digest(content) === hash, "ARTIFACT_MISMATCH", "产物摘要不一致");
     return JSON.parse(content.toString("utf8"));
   }
+  saveScriptTree(files: SourceFiles) {
+    check(files && typeof files === "object" && !Array.isArray(files), "INVALID_SCRIPT", "缺少脚本文件集合");
+    const entries = Object.entries(files);
+    check(entries.length > 0 && entries.length <= 100, "INVALID_SCRIPT", "脚本文件数量超出限制");
+    let total = 0;
+    for (const [name, code] of entries) {
+      check(/^(?:[a-zA-Z0-9_-]+\/)*[a-zA-Z0-9_.-]+\.(?:ts|js|mjs|sh)$/.test(name) && !name.includes(".."), "INVALID_SCRIPT_PATH", `不支持的脚本文件: ${name}`);
+      check(typeof code === "string", "INVALID_SCRIPT", `脚本文件不是文本: ${name}`);
+      const bytes = Buffer.byteLength(code, "utf8"); check(bytes <= 1024 * 1024, "SCRIPT_LIMIT", `脚本文件超过 1 MiB: ${name}`); total += bytes;
+    }
+    check(total <= 4 * 1024 * 1024, "SCRIPT_LIMIT", "脚本源码总大小超过 4 MiB");
+    const content = json({ files: Object.fromEntries(entries.sort()) });
+    const hash = digest(content), relative = `artifacts/scripts/${hash}/tree.json`, target = this.path(relative);
+    if (!existsSync(target)) {
+      const staging = this.path(`staging/${randomUUID()}`); mkdirSync(staging, { recursive: true, mode: 0o700 });
+      writeFileSync(resolve(staging, "tree.json"), content, { mode: 0o600 }); mkdirSync(dirname(dirname(target)), { recursive: true, mode: 0o700 });
+      try { renameSync(staging, dirname(target)); } catch (error) { rmSync(staging, { recursive: true, force: true }); if (!existsSync(target)) throw error; }
+    }
+    return { path: relative, hash };
+  }
+  readScriptTree(path: string): { files: SourceFiles } {
+    check(/^artifacts\/scripts\/[a-f0-9]{64}\/tree\.json$/.test(path), "INVALID_PATH", "脚本产物引用无效");
+    const absolute = this.path(path), text = readFileSync(absolute, "utf8");
+    check(digest(text) === path.split("/")[2], "ARTIFACT_MISMATCH", "脚本产物已发生修改");
+    const tree = JSON.parse(text); check(tree && tree.files && typeof tree.files === "object", "ARTIFACT_MISMATCH", "脚本产物无效");
+    return tree;
+  }
   saveTree(files: SourceFiles, compiled: Record<string, string> = {}) {
     checkFiles(files);
     const content = json({ files: Object.fromEntries(Object.entries(files).sort()), compiled: Object.fromEntries(Object.entries(compiled).sort()) });

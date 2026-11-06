@@ -4,10 +4,11 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, join } from "node:path";
 import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, SCHEMA, SCHEMA_VERSION } from "./schema.js";
+import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, SCHEMA, SCHEMA_VERSION } from "./schema.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
-import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
+import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, ScriptVersion, ScriptView, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
+import { validateScript, type ScriptDefinition } from "../domain/scripts.js";
 import { ACTIVE_TURN_STATUSES, assertSubmissionState, assertTurnStatus, assertTurnTransition, isActiveTurn } from "../domain/turns.js";
 export { ACTIVE_TURN_STATUSES };
 
@@ -69,7 +70,7 @@ export class Store {
         this.db.exec(`BEGIN; ${SCHEMA} COMMIT;`);
       } else {
         // §20.3：接受所有受支持旧版本（1、2、3），顺序执行增量迁移至当前版本。
-        check([1, 2, 3, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
+        check([1, 2, 3, 4, 5, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
         if (version < SCHEMA_VERSION) {
           // 服务尚未启动且已持有独占数据目录锁。先完成 WAL checkpoint，关闭连接后
           // 再复制主文件，绝不复制正在写入的 WAL 数据库。备份失败则拒绝迁移。
@@ -102,6 +103,8 @@ export class Store {
             if (version === 1) this.db.exec(MIGRATE_V1_TO_V2);
             if (version <= 2) this.db.exec(MIGRATE_V2_TO_V3);
             if (version <= 3) this.db.exec(MIGRATE_V3_TO_V4);
+            if (version <= 4) this.db.exec(MIGRATE_V4_TO_V5);
+            if (version <= 5) this.db.exec(MIGRATE_V5_TO_V6);
             check(this.db.prepare("PRAGMA foreign_key_check").all().length === 0, "MIGRATION_FAILED", "数据库升级外键校验失败");
             for (const { name, count } of counts) {
               check(this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n === count,
@@ -195,6 +198,66 @@ export class Store {
     return r ? { id: String(r.id), enabled: !!r.enabled, config: parsed(r.config_json), models: parsed(r.models_json), defaultModel: String(r.default_model), revision: Number(r.revision), updatedAt: Number(r.updated_at) } : undefined;
   }
   saveProvider(setting: ProviderSetting) { this.exec("INSERT INTO provider_settings VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,models_json=excluded.models_json,default_model=excluded.default_model,revision=excluded.revision,updated_at=excluded.updated_at", setting.id, setting.enabled ? 1 : 0, json(setting.config), json(setting.models), setting.defaultModel, setting.revision, setting.updatedAt); }
+  script(id: string): ScriptView {
+    const row = this.one("SELECT * FROM scripts WHERE id=?", id); check(row, "NOT_FOUND", "脚本不存在");
+    return { id: String(row.id), name: String(row.name), description: String(row.description), runtime: row.runtime as ScriptView["runtime"], status: row.status as ScriptView["status"], currentDraftVersionId: row.current_draft_version_id as string | null, currentPublishedVersionId: row.current_published_version_id as string | null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), archivedAt: row.archived_at as number | null };
+  }
+  scripts() { return this.all<{ id: string }>("SELECT id FROM scripts ORDER BY updated_at DESC").map(row => this.script(row.id)); }
+  scriptVersion(id: string): ScriptVersion {
+    const row = this.one("SELECT * FROM script_versions WHERE id=?", id); check(row, "NOT_FOUND", "脚本版本不存在");
+    return { id: String(row.id), scriptId: String(row.script_id), number: Number(row.version_no), status: row.status as "draft" | "published", revision: Number(row.revision), entryFile: String(row.entry_file), timeoutMs: Number(row.timeout_ms), inputSchema: parsed(row.input_schema_json), outputSchema: parsed(row.output_schema_json), sourceRef: String(row.source_ref), contentHash: String(row.content_hash), validation: parsed(row.validation_json), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), publishedAt: row.published_at as number | null };
+  }
+  scriptVersions(scriptId: string) { this.script(scriptId); return this.all<{ id: string }>("SELECT id FROM script_versions WHERE script_id=? ORDER BY version_no DESC", scriptId).map(row => this.scriptVersion(row.id)); }
+  assertWorkflowScripts(definition: Workflow, allowArchived = false) { for (const node of definition.nodes) if (node.type === "script") { const script = this.script(node.config.scriptId!); check(script.status === "published" || (allowArchived && script.status === "archived"), "SCRIPT_NOT_PUBLISHED", "工作流只能引用已发布脚本"); const version = this.scriptVersion(node.config.scriptVersionId!); check(version.scriptId === script.id && version.status === "published", "SCRIPT_VERSION_INVALID", "脚本版本无效或未发布"); } }
+  createScript(definition: ScriptDefinition, sourceRef: string, contentHash: string) {
+    validateScript(definition); const now = Date.now(), scriptId = definition.id, versionId = randomUUID();
+    return this.transaction(() => {
+      check(!this.one("SELECT id FROM scripts WHERE id=?", scriptId), "IDENTITY_CONFLICT", "脚本 ID 已存在", 409);
+      this.exec("INSERT INTO scripts(id,name,description,runtime,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", scriptId, definition.name, definition.description, definition.runtime, "draft", now, now);
+      this.exec("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,timeout_ms,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", versionId, scriptId, 1, "draft", 0, definition.entryFile, definition.timeoutMs ?? 300000, json(definition.inputSchema), json(definition.outputSchema), sourceRef, contentHash, json({ valid: true, diagnostics: [] }), now, now);
+      this.exec("UPDATE scripts SET current_draft_version_id=? WHERE id=?", versionId, scriptId);
+      return { script: this.script(scriptId), version: this.scriptVersion(versionId) };
+    });
+  }
+  updateScriptDraft(scriptId: string, expectedRevision: number, definition: ScriptDefinition, sourceRef: string, contentHash: string) {
+    validateScript(definition); return this.transaction(() => {
+      const script = this.script(scriptId); check(script.status === "draft" || script.status === "published", "SCRIPT_ARCHIVED", "脚本已归档");
+      let current = script.currentDraftVersionId;
+      const now = Date.now();
+      if (!current) {
+        check(expectedRevision === 0, "REVISION_CONFLICT", "请使用新的草稿修订号");
+        current = randomUUID();
+        const latest = this.one<{ n: number }>("SELECT COALESCE(MAX(version_no),0) AS n FROM script_versions WHERE script_id=?", scriptId)!.n;
+        const published = script.currentPublishedVersionId ? this.scriptVersion(script.currentPublishedVersionId) : undefined;
+        this.exec("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,timeout_ms,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", current, scriptId, Number(latest) + 1, "draft", 0, published?.entryFile ?? definition.entryFile, definition.timeoutMs ?? published?.timeoutMs ?? 300000, json(published?.inputSchema ?? definition.inputSchema), json(published?.outputSchema ?? definition.outputSchema), published?.sourceRef ?? sourceRef, published?.contentHash ?? contentHash, json({ valid: true, diagnostics: [] }), now, now);
+        this.exec("UPDATE scripts SET current_draft_version_id=?,status='draft',updated_at=? WHERE id=?", current, now, scriptId);
+      }
+      const version = this.scriptVersion(current); check(version.revision === expectedRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
+      check(definition.id === scriptId && definition.runtime === script.runtime, "IDENTITY_CONFLICT", "脚本身份或运行时不能修改");
+      this.exec("UPDATE script_versions SET revision=revision+1,entry_file=?,timeout_ms=?,input_schema_json=?,output_schema_json=?,source_ref=?,content_hash=?,validation_json=?,updated_at=? WHERE id=? AND status='draft'", definition.entryFile, definition.timeoutMs ?? 300000, json(definition.inputSchema), json(definition.outputSchema), sourceRef, contentHash, json({ valid: true, diagnostics: [] }), now, current);
+      this.exec("UPDATE scripts SET name=?,description=?,updated_at=? WHERE id=?", definition.name, definition.description, now, scriptId);
+      return { script: this.script(scriptId), version: this.scriptVersion(current) };
+    });
+  }
+  archiveScript(scriptId: string) {
+    return this.transaction(() => { const script = this.script(scriptId); check(script.status !== "archived", "INVALID_STATE", "脚本已归档"); const now = Date.now(); this.exec("UPDATE scripts SET status='archived',archived_at=?,updated_at=? WHERE id=?", now, now, scriptId); return this.script(scriptId); });
+  }
+  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown) {
+    return this.transaction(() => { const script = this.script(scriptId); check(script.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档"); if (versionId) { const version = this.scriptVersion(versionId); check(version.scriptId === scriptId && version.status === "published", "INVALID_STATE", "只能测试已发布版本"); } else { check(script.currentDraftVersionId !== null && this.scriptVersion(script.currentDraftVersionId).revision === draftRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试"); } const id = randomUUID(), now = Date.now(); this.exec("INSERT INTO script_tests(id,script_id,script_version_id,draft_revision,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, scriptId, versionId, draftRevision, this.reference(input), now); return this.scriptTest(id); });
+  }
+  scriptTest(id: string) { const row = this.one("SELECT * FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在"); return { id: String(row.id), scriptId: String(row.script_id), scriptVersionId: row.script_version_id as string | null, draftRevision: row.draft_revision as number | null, status: String(row.status), input: this.dereference(row.input_ref), output: row.output_ref ? this.dereference(row.output_ref) : undefined, error: row.error_json ? parsed(row.error_json) : undefined, stdout: row.stdout_ref ? this.dereference(row.stdout_ref) : undefined, stderr: row.stderr_ref ? this.dereference(row.stderr_ref) : undefined, exitCode: row.exit_code as number | null, durationMs: row.duration_ms as number | null, createdAt: Number(row.created_at), startedAt: row.started_at as number | null, endedAt: row.ended_at as number | null }; }
+  scriptTests(scriptId: string) { this.script(scriptId); return this.all<{ id: string }>("SELECT id FROM script_tests WHERE script_id=? ORDER BY created_at DESC", scriptId).map(row => this.scriptTest(row.id)); }
+  setScriptTestRunning(id: string) { this.exec("UPDATE script_tests SET status='running',started_at=? WHERE id=? AND status='queued'", Date.now(), id); }
+  finishScriptTest(id: string, result: { status: "succeeded" | "failed" | "cancelled"; output?: unknown; error?: unknown; stdout: string; stderr: string; exitCode?: number | null; durationMs?: number }) { this.transaction(() => { const now = Date.now(); this.exec("UPDATE script_tests SET status=?,output_ref=?,error_json=?,stdout_ref=?,stderr_ref=?,exit_code=?,duration_ms=?,ended_at=? WHERE id=? AND status='running'", result.status, result.output === undefined ? null : this.reference(result.output), result.error === undefined ? null : json(result.error), this.reference(result.stdout), this.reference(result.stderr), result.exitCode ?? null, result.durationMs ?? null, now, id); }); return this.scriptTest(id); }
+  publishScript(scriptId: string, expectedRevision: number) {
+    return this.transaction(() => {
+      const script = this.script(scriptId), draftId = script.currentDraftVersionId; check(draftId, "NOT_FOUND", "脚本没有草稿");
+      const draft = this.scriptVersion(draftId); check(draft.revision === expectedRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
+      const now = Date.now(); this.exec("UPDATE script_versions SET status='published',published_at=?,updated_at=? WHERE id=?", now, now, draftId);
+      this.exec("UPDATE scripts SET status='published',current_published_version_id=?,current_draft_version_id=NULL,updated_at=? WHERE id=?", draftId, now, scriptId);
+      return { script: this.script(scriptId), version: this.scriptVersion(draftId) };
+    });
+  }
   version(id: string): Version {
     const r = this.one("SELECT * FROM workflow_versions WHERE id=?", id); check(r, "NOT_FOUND", "版本不存在");
     return { id: String(r.id), workflowId: String(r.workflow_id), number: Number(r.version_no), definition: parsed(r.definition_json), layout: parsed(r.layout_json), artifactPath: String(r.artifact_path), contentHash: String(r.content_hash), createdAt: Number(r.created_at) };

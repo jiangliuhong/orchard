@@ -1,10 +1,63 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { executeProcess } from "../src/runtime/process.js";
 import { GraphRunner } from "../src/runtime/runner.js";
 import { Store } from "../src/persistence/store.js";
 import { setup, publishExample, until, temporary, exampleFiles } from "./helpers.js";
+import { validateWorkflow } from "../src/domain/validation.js";
+import { json } from "../src/persistence/files.js";
+import type { Workflow } from "../src/domain/types.js";
+import type { ScriptDefinition } from "../src/domain/scripts.js";
+
+test("script workflow nodes run immutable versions and enforce their contract", async t => {
+  const { store, providers } = setup(t), runner = new GraphRunner(store, providers);
+  t.after(async () => { await runner.close(); store.close(); });
+  const definition = (version: string, timeoutMs = 300000): ScriptDefinition => ({ id: "normalize", name: "Normalize", description: "", runtime: "nodejs", entryFile: "index.js", timeoutMs, inputSchema: { type: "object", required: ["value"], properties: { value: { type: "string" } }, additionalProperties: false }, outputSchema: { type: "object", required: ["value", "version"], properties: { value: { type: "string" }, version: { type: "string" } }, additionalProperties: false }, files: { "index.js": `export default input => ({ value: input.value.toUpperCase(), version: ${JSON.stringify(version)} });` } });
+  const first = definition("one"), firstTree = store.files.saveScriptTree(first.files), firstCreated = store.createScript(first, firstTree.path, firstTree.hash), firstPublished = store.publishScript(first.id, firstCreated.version.revision).version;
+  const workflow: Workflow = { formatVersion: 1, id: "uses-normalize", name: "Uses normalize", inputSchema: { type: "object" }, outputSchema: first.outputSchema, entryNodeId: "normalize", nodes: [{ id: "normalize", name: "Normalize", type: "script", input: { source: "workflow" }, outputSchema: first.outputSchema, config: { scriptId: first.id, scriptVersionId: firstPublished.id } }], edges: [], result: { source: "node", nodeId: "normalize" } };
+  validateWorkflow(workflow);
+  const tree = store.files.saveTree({ "workflow.json": JSON.stringify(workflow), "layout.json": "{}" });
+  store.exec("INSERT INTO workflows VALUES(?,?,NULL,?,?)", workflow.id, workflow.name, Date.now(), Date.now());
+  const workflowVersionId = randomUUID(); store.exec("INSERT INTO workflow_versions VALUES(?,?,?,?,?,?,?,?)", workflowVersionId, workflow.id, 1, json(workflow), "{}", tree.path, tree.hash, Date.now()); store.exec("UPDATE workflows SET current_version_id=? WHERE id=?", workflowVersionId, workflow.id);
+  const run = runner.create(workflowVersionId, { value: "hello" }, randomUUID());
+  await until(() => { const current = store.run(run.id); return ["succeeded", "failed"].includes(current.status) && current; });
+  assert.deepEqual(store.run(run.id).output, { value: "HELLO", version: "one" });
+  const second = definition("two"), secondTree = store.files.saveScriptTree(second.files); const draft = store.updateScriptDraft(first.id, 0, second, secondTree.path, secondTree.hash); const secondPublished = store.publishScript(first.id, draft.version.revision).version;
+  assert.equal(store.scriptVersion(firstPublished.id).contentHash, firstPublished.contentHash);
+  const oldRun = runner.create(workflowVersionId, { value: "world" }, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(oldRun.id).status)); assert.deepEqual(store.run(oldRun.id).output, { value: "WORLD", version: "one" });
+  store.archiveScript(first.id); const archivedRun = runner.create(workflowVersionId, { value: "archived" }, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(archivedRun.id).status)); assert.deepEqual(store.run(archivedRun.id).output, { value: "ARCHIVED", version: "one" });
+  assert.notEqual(secondPublished.id, firstPublished.id);
+  assert.throws(() => store.assertWorkflowScripts({ ...workflow, nodes: [{ ...workflow.nodes[0]!, config: { scriptId: first.id, scriptVersionId: secondPublished.id } }] }), /已发布|版本/);
+});
+
+test("Shell script workflow nodes preserve the bounded output protocol", async t => {
+  const { store, providers } = setup(t), runner = new GraphRunner(store, providers);
+  t.after(async () => { await runner.close(); store.close(); });
+  const definition: ScriptDefinition = { id: "shell-transform", name: "Shell transform", description: "", runtime: "shell", entryFile: "run.sh", inputSchema: { type: "object" }, outputSchema: { type: "object" }, files: { "run.sh": "#!/bin/bash\nread -r input\nprintf '{\\\"input\\\":%s}' \"$input\"\n" } };
+  const tree = store.files.saveScriptTree(definition.files), created = store.createScript(definition, tree.path, tree.hash), version = store.publishScript(definition.id, created.version.revision).version;
+  const workflow: Workflow = { formatVersion: 1, id: "uses-shell-library", name: "Uses shell", inputSchema: { type: "object" }, outputSchema: { type: "object" }, entryNodeId: "run", nodes: [{ id: "run", name: "Run shell", type: "script", input: { source: "workflow" }, outputSchema: { type: "object" }, config: { scriptId: definition.id, scriptVersionId: version.id } }], edges: [], result: { source: "node", nodeId: "run" } };
+  const artifact = store.files.saveTree({ "workflow.json": JSON.stringify(workflow), "layout.json": "{}" }), workflowVersionId = randomUUID();
+  store.exec("INSERT INTO workflows VALUES(?,?,NULL,?,?)", workflow.id, workflow.name, Date.now(), Date.now()); store.exec("INSERT INTO workflow_versions VALUES(?,?,?,?,?,?,?,?)", workflowVersionId, workflow.id, 1, json(workflow), "{}", artifact.path, artifact.hash, Date.now());
+  const run = runner.create(workflowVersionId, { ok: true }, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(run.id).status));
+  assert.equal(store.run(run.id).status, "succeeded", JSON.stringify(store.run(run.id).error)); assert.deepEqual(store.run(run.id).output, { stdout: "{\"input\":{\"ok\":true}}", stderr: "", exitCode: 0 });
+});
+
+test("script workflow nodes propagate input/output schema failures, timeout and tampering", async t => {
+  const { store, providers } = setup(t), runner = new GraphRunner(store, providers);
+  t.after(async () => { await runner.close(); store.close(); });
+  const makeVersion = (definition: ScriptDefinition) => { const tree = store.files.saveScriptTree(definition.files), created = store.createScript(definition, tree.path, tree.hash); return { version: store.publishScript(definition.id, created.version.revision).version, tree }; };
+  const invalidInput = makeVersion({ id: "requires-value", name: "Requires value", description: "", runtime: "nodejs", entryFile: "index.js", inputSchema: { type: "object", required: ["value"], properties: { value: { type: "string" } } }, outputSchema: true, files: { "index.js": "export default input => input" } });
+  const invalidOutput = makeVersion({ id: "returns-number", name: "Returns number", description: "", runtime: "nodejs", entryFile: "index.js", inputSchema: true, outputSchema: { type: "string" }, files: { "index.js": "export default () => 42" } });
+  const slow = makeVersion({ id: "slow-script", name: "Slow", description: "", runtime: "nodejs", entryFile: "index.js", timeoutMs: 1000, inputSchema: true, outputSchema: true, files: { "index.js": "export default async () => { await new Promise(resolve => setTimeout(resolve, 5000)); return true; }" } });
+  const makeWorkflow = (id: string, scriptId: string, version: string): string => { const workflow: Workflow = { formatVersion: 1, id, name: id, inputSchema: { type: "object" }, outputSchema: true, entryNodeId: "run", nodes: [{ id: "run", name: id, type: "script", input: { source: "workflow" }, outputSchema: true, config: { scriptId, scriptVersionId: version } }], edges: [], result: { source: "node", nodeId: "run" } }; const artifact = store.files.saveTree({ "workflow.json": JSON.stringify(workflow), "layout.json": "{}" }), workflowVersionId = randomUUID(); store.exec("INSERT INTO workflows VALUES(?,?,NULL,?,?)", workflow.id, workflow.name, Date.now(), Date.now()); store.exec("INSERT INTO workflow_versions VALUES(?,?,?,?,?,?,?,?)", workflowVersionId, workflow.id, 1, json(workflow), "{}", artifact.path, artifact.hash, Date.now()); return workflowVersionId; };
+  const inputWorkflow = makeWorkflow("workflow-requires-value", "requires-value", invalidInput.version.id);
+  const inputRun = runner.create(inputWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(inputRun.id).status)); assert.equal(store.run(inputRun.id).status, "failed"); assert.equal(store.run(inputRun.id).error?.code, "SCHEMA_MISMATCH");
+  const outputWorkflow = makeWorkflow("workflow-returns-number", "returns-number", invalidOutput.version.id); const outputRun = runner.create(outputWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(outputRun.id).status)); assert.equal(store.run(outputRun.id).error?.code, "SCHEMA_MISMATCH");
+  const slowWorkflow = makeWorkflow("workflow-slow-script", "slow-script", slow.version.id); const slowRun = runner.create(slowWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(slowRun.id).status), 4000); assert.equal(store.run(slowRun.id).error?.code, "TIMEOUT");
+  writeFileSync(store.files.path(slow.tree.path), "tampered"); const tamperedRun = runner.create(slowWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(tamperedRun.id).status)); assert.equal(store.run(tamperedRun.id).error?.code, "ARTIFACT_MISMATCH");
+});
 
 test("same published version runs two paths and retains node results and metadata", async t => {
   const { store, providers, provider, authoring } = setup(t), runner = new GraphRunner(store, providers);

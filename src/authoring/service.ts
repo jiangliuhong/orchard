@@ -275,6 +275,7 @@ export class AuthoringService {
       const definition = await this.providers.freeze(readDefinition(original));
       const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
       const compiled = await compileScripts(files, definition), layout = readLayout(files);
+      this.store.assertWorkflowScripts(definition);
       const tree = this.store.files.saveTree(files, compiled);
       return this.store.command(scope, requestId, input, () => {
         const current = this.store.draft(id);
