@@ -37,7 +37,7 @@ test("history excerpts keep newest messages within budget and restore original o
   const excerpt = historyExcerpt([message(1, "user", "第一"), message(2, "assistant", "第二"), message(3, "user", "第三")])!;
   assert.deepEqual(excerpt.messages.map(m => m.text), ["第一", "第二", "第三"]);
   assert.equal(excerpt.truncated, false);
-  assert.equal(excerpt.source, "legacy");
+  assert.equal(excerpt.source, "explicit_rebuild");
 
   // 只摘取 user/assistant 的 text；error/诊断/无文本消息不复制。
   const filtered = historyExcerpt([
@@ -96,17 +96,15 @@ test("envelope shapes distinguish initial, continuation and single contexts", ()
   assert.deepEqual(agents[0]!.models, [{ id: "m1", name: "M", source: "configured" }]); // 仅启用模型
   assert.equal(agents[0]!.defaultModel, "m1");
 
-  // continuation（legacy 重建）：带确定性摘录与宿主上一轮结果。
-  const continuation = buildAuthoringContext({ kind: "continuation", draftId: "d1", baseRevision: 4, files, providers, previousOutcome: { turnId: "t1", status: "succeeded", appliedRevision: 4, errorCode: null }, history, historySource: "legacy", userRequest: "继续" });
+  const continuation = buildAuthoringContext({ kind: "continuation", draftId: "d1", baseRevision: 4, files, providers, previousOutcome: { turnId: "t1", status: "succeeded", appliedRevision: 4, errorCode: null }, history, historySource: "explicit_rebuild", userRequest: "继续" });
   assert.equal(continuation.kind, "continuation");
-  assert.equal(continuation.historyExcerpt!.source, "legacy");
+  assert.equal(continuation.historyExcerpt!.source, "explicit_rebuild");
   assert.deepEqual(continuation.historyExcerpt!.messages.map(m => m.role), ["user", "assistant"]);
   assert.deepEqual(continuation.previousOutcome, { turnId: "t1", status: "succeeded", appliedRevision: 4, errorCode: null });
 
   // 用户显式重建：来源标记 explicit_rebuild。
   const rebuild = buildAuthoringContext({ kind: "initial", draftId: "d1", baseRevision: 4, files, providers, previousOutcome: { turnId: "t2", status: "failed", appliedRevision: null, errorCode: "INVALID_AGENT_OUTPUT" }, history, historySource: "explicit_rebuild", userRequest: "重建" });
-  // initial 不带摘录（§18.2：single 每次 initial 且不含 historyExcerpt；重建摘录由受理层决定 kind）。
-  assert.equal(rebuild.historyExcerpt, undefined);
+  assert.equal(rebuild.historyExcerpt!.source, "explicit_rebuild");
 });
 
 test("composed prompts keep rules and reject the 512 KiB budget instead of trimming", () => {

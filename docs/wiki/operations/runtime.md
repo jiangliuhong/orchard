@@ -1,6 +1,6 @@
 # 运行状态与数据生命周期
 
-正式运行绑定不可变发布版本；草稿测试绑定不可变草稿快照，不创建发布版本。两者先验证输入并创建该次执行的全部节点记录。首版一个 Run 活动，其余排队；每个 Run 沿唯一选中路径串行执行。
+正式运行绑定不可变发布版本；草稿测试绑定不可变草稿快照，不创建发布版本。两者在入队事务中验证输入、创建全部节点记录并固定 Agent 模型配置修订。修改配置只影响新运行，排队和执行中的节点读取原绑定；细则见[Agent 模型配置](../product/agent-model-configs.md)。首版一个 Run 活动，其余排队；每个 Run 沿唯一选中路径串行执行。
 
 正式运行默认使用 `~/.orchard`；执行 `pnpm dev` 时使用仓库目录下的 `.orchard`。两者都可以通过 `--data-dir` 显式覆盖。
 
@@ -14,7 +14,7 @@ Switch 记录匹配值、选中连线和理由。Agent 输出必须满足声明�
 
 ## 数据
 
-新数据目录包含 `workbench.db`、`workbench.lock`、`artifacts/trees`、`artifacts/blobs` 和每次运行的 `runs/` 工作目录。结构有十二张表；初始结构批准于 OpenSpec 设计 D10，草稿测试字段变更批准于 2026-11-04 并记录在 `docs/wiki/decisions/draft-testing-design.md`。数据库只接受新工作台 application_id 与 schema version 2，自动在事务中升级 v1 并保留运行、节点、事件、产物和请求回执；不迁移旧 Orchard 库。
+新数据目录包含 `workbench.db`、`workbench.lock`、`artifacts/trees`、`artifacts/blobs` 和每次运行的 `runs/` 工作目录。当前数据库 v8，共十九张表；支持从工作台 v1–v7 顺序增量升级，升级前备份并检查完整性，保留已有运行、节点、事件、产物和请求回执。v8 只新增模型配置、历史修订和运行绑定三张表，不转换旧工作流，审核记录见[功能设计](../../features/2026-11-07-agent-model-configs/design.md)。不迁移旧 Orchard 库。
 
 流程文件和编译产物以完整摘要固化；节点启动前验证。较大 JSON 结果写入摘要产物，API 返回引用，完整结果由产物端点显式读取。结果超过 16 MiB、进程输出超过 8 MiB 会失败。日志分块保存，事件按 stream 分配单调 sequence，事务提交后才通知订阅者。
 

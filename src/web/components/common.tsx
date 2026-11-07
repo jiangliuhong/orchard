@@ -8,7 +8,7 @@ export const statuses: Record<string, string> = { archived: "已归档", draft: 
 export function Status({ value }: { value: string }) { return <Badge variant="outline" className={`status status-${value}`}><span className="status-dot" />{statuses[value] ?? value}</Badge>; }
 export function ErrorNotice({ message }: { message?: string }) { return message ? <div role="alert" className="notice error"><AlertCircle size={16} /><span>{message}</span></div> : null; }
 export function Loading() { return <div className="empty"><LoaderCircle className="animate-spin" /><span>正在加载…</span></div>; }
-export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) { return <div className="empty"><div className="empty-symbol"><Plus size={25} /></div><h2>{title}</h2><p>{description}</p>{action}</div>; }
+export function EmptyState({ title, description, action, symbol }: { title: string; description: string; action?: ReactNode; symbol?: ReactNode }) { return <div className="empty">{symbol ?? <div className="empty-symbol"><Plus size={25} /></div>}<h2>{title}</h2><p>{description}</p>{action}</div>; }
 export function PageHeading({ eyebrow, title, description, children }: { eyebrow: string; title: string; description?: string; children?: ReactNode }) { return <header className="page-heading"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1>{description && <p>{description}</p>}</div><div className="heading-actions">{children}</div></header>; }
 export function BackButton({ href = "/" }: { href?: string }) { return <Button variant="ghost" asChild><a href={href}>← 返回</a></Button>; }
 export function Payload({ value }: { value: unknown }) {

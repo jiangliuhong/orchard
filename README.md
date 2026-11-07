@@ -44,11 +44,14 @@ UI：React / TypeScript / Vite、shadcn/ui / Tailwind CSS、React Flow；Monaco 
 
 1. 进入“设置”，检查本地 CLI 路径，启用需要的 Provider，保存后检测连接。
 2. 刷新模型目录，在模型管理中启停、添加、删除或验证模型，设置默认模型。验证会发送真实请求，可能产生用量。Codex 沿用本机配置，兼容 Magpie 网关及自定义模型目录；使用准确模型 ID。CLI 版本可用不代表账号和模型权限必然可用。
-3. 新建工作流，在对话中选择 Provider 和模型，描述流程。也可以查看及编辑生成的流程定义和脚本；手动修改后先保存。
-4. 查看流程、节点配置与校验诊断，确认后点击“发布工作流”。生成和发布都不执行业务脚本。
-5. 在版本详情点击“运行”，填写符合输入 Schema 的 JSON。
-6. 在运行页检查路径、节点输入输出、日志、耗时、错误和跳过原因。运行中可以取消；再次运行创建新记录。
-7. 修改工作流会从当前版本创建新草稿。发布新版本不会改变历史运行。
+3. 在「设置 → Agent 模型配置」创建具名配置，例如「xxx 分析」，绑定明确的 Provider 和模型。
+4. 新建工作流，在创作对话中选择 Provider 和模型，描述流程。工作流默认配置和 Agent 节点选择具名模型配置；手动修改后先保存。
+5. 查看流程、节点配置与校验诊断，确认后点击“发布工作流”。生成和发布都不执行业务脚本。
+6. 在版本详情点击“运行”，填写符合输入 Schema 的 JSON。
+7. 在运行页检查路径、节点输入输出、日志、耗时、错误和跳过原因。运行中可以取消；再次运行创建新记录。
+8. 修改工作流会从当前版本创建新草稿。发布新版本不会改变历史运行。
+
+修改具名 Agent 模型配置后，引用它的工作流无需重新发布，下一次新建运行即使用新配置。排队和执行中的运行保留创建时的模型绑定；历史可追踪配置名称、修订和实际模型。详见[Agent 模型配置](docs/wiki/product/agent-model-configs.md)。
 
 草稿保存并通过校验后可以“运行测试”。测试会实际执行脚本和 Agent 调用，使用当前修订的不可变快照，不发布工作流、不递增发布版本号、不改变当前版本；详情页可返回草稿继续编辑并再次测试。
 
@@ -64,18 +67,19 @@ UI：React / TypeScript / Vite、shadcn/ui / Tailwind CSS、React Flow；Monaco 
 
 工作流和草稿支持删除，确认弹窗会说明删除范围。删除工作流将清理其全部版本、关联草稿及运行记录，独立副本不受影响；有活动任务时需先完成或取消。预览画布使用紧凑节点与居中分支，自动适配不再放大小流程。
 
-首版支持 Node.js、Agent、Shell、Switch，无环流程中一条活动路径串行执行。没有定时调度、并行、循环、自动重试或中断后自动续跑。运行使用版本固定的 Provider/模型，不因默认设置改变而替换；禁用阻止新调用，已有调用沿用启动配置。
+首版支持 Node.js、Agent、Shell、Switch，无环流程中一条活动路径串行执行。没有定时调度、并行、循环、自动重试或中断后自动续跑。运行使用入队时固定的 Agent 模型配置修订，修改具名配置只影响新运行；底层 Provider 或模型禁用阻止新调用，已有调用沿用启动配置。
 
 脚本按当前用户权限执行，独立进程用于超时和取消管理，不构成操作系统沙箱。中断或失败不能撤销外部副作用，重新运行前应检查业务状态。
 
 ## 文档
 
-- [流程格式和脚本协议](docs/wiki/workflow-format.md)
-- [Provider 扩展与配置](docs/wiki/providers.md)
-- [对话创作与发布](docs/wiki/authoring.md)
-- [运行状态与数据生命周期](docs/wiki/runtime.md)
-- [API 与事件](docs/wiki/api.md)
-- [页面使用说明](docs/wiki/interface.md)
-- [开发验证与后续验收](docs/wiki/verification.md)
+- [流程格式和脚本协议](docs/wiki/architecture/workflow-format.md)
+- [Provider 扩展与配置](docs/wiki/architecture/providers.md)
+- [Agent 模型配置](docs/wiki/product/agent-model-configs.md)
+- [对话创作与发布](docs/wiki/product/authoring.md)
+- [运行状态与数据生命周期](docs/wiki/operations/runtime.md)
+- [API 与事件](docs/wiki/architecture/api.md)
+- [页面使用说明](docs/wiki/product/interface.md)
+- [开发验证与后续验收](docs/wiki/operations/verification.md)
 
 本项目初始数据库结构已于 2026-11-04 由用户批准，依据 `openspec/changes/rebuild-ai-workflow-workbench/design.md` D10；后续结构变更仍需审核。

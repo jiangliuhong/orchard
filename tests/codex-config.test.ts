@@ -1,11 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { temporary, setup } from "./helpers.js";
 import { readCodexConfig, readCodexModels } from "../src/providers/codex-config.js";
 import { CliProvider } from "../src/providers/registry.js";
+import { codexNativeAdapter } from "../src/providers/codex-app-server.js";
+import { SessionManager } from "../src/providers/session-manager.js";
+import { installFixture, readLog } from "./agent-transport.test.js";
 
 test("Codex custom catalog takes precedence over the official cache and preserves exact model IDs", context => {
   const home = temporary(context), catalog = join(home, "magpie-models.json");
@@ -57,28 +59,28 @@ experimental_bearer_token = "fixture-secret"
 command = "fixture-mcp"
 `);
   writeFileSync(catalog, JSON.stringify({ models: [{ slug: "group/6.1-sol", display_name: "6.1-Sol" }] }));
-  const executable = join(root, "codex-fixture");
-  copyFileSync(fileURLToPath(new URL("./fixtures/agent.mjs", import.meta.url)), executable);
-  chmodSync(executable, 0o755);
-  providers.register(new CliProvider("codex-cli"), executable);
+  const { executable, logPath } = installFixture(context, "codex-server.mjs", "default");
+  const manager = new SessionManager();
+  context.after(() => manager.close());
+  providers.register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }), executable);
   providers.update("codex-cli", { enabled: true });
   const readiness = await providers.detect("codex-cli");
   assert.match(readiness.reason!, /自定义网关/);
   assert.match(readiness.reason!, /自定义模型目录/);
   assert.deepEqual((await providers.models("codex-cli")).models.map(model => model.id), ["group/6.1-sol", "group/default"]);
   const result = await providers.run({ providerId: "codex-cli", modelId: "group/6.1-sol" }, {
-    cwd: root, prompt: "CONFIG-CHECK", schema: true, signal: new AbortController().signal, emit: () => {},
+    cwd: root, prompt: 'RETURN:{"answer":42}', schema: true, signal: new AbortController().signal, emit: () => {},
   });
-  const output = result.output as { args: string[]; home: string };
-  assert.equal(output.home, home);
-  assert.equal(output.args.includes("--ignore-user-config"), false);
-  assert.equal(output.args[output.args.indexOf("-m") + 1], "group/6.1-sol");
-  assert.ok(output.args.includes("mcp_servers={}"));
-  assert.ok(output.args.includes("notify=[]"));
-  assert.ok(output.args.includes('web_search="disabled"'));
-  assert.equal(JSON.stringify(output).includes("fixture-secret"), false);
+  assert.deepEqual(result.output, { answer: 42 });
+  const log = readLog(logPath);
+  assert.equal(log.argv.includes("--ignore-user-config"), false);
+  const starts = log.lines.map(line => JSON.parse(line)).filter(message => message.method === "thread/start");
+  assert.ok(starts.some(message => message.params.model === "group/6.1-sol"));
+  assert.ok(log.argv.includes("mcp_servers={}"));
+  assert.ok(log.argv.includes("notify=[]"));
+  assert.ok(log.argv.includes('web_search="disabled"'));
+  assert.equal(JSON.stringify(log).includes("fixture-secret"), false);
   for (const feature of ["hooks", "plugins", "shell_tool", "apps", "multi_agent"]) {
-    const index = output.args.indexOf(feature);
-    assert.equal(output.args[index - 1], "--disable");
+    assert.ok(log.argv.includes(`features.${feature}=false`));
   }
 });

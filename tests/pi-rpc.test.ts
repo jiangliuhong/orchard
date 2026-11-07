@@ -225,7 +225,7 @@ test("registry.run dispatches native Pi single turns with --no-session and fresh
   assert.ok(log.argv.includes("--no-session"));
 });
 
-test("legacy Pi transport keeps the one-shot CLI path", async t => {
+test("default Pi transport uses native and propagates session failure", async t => {
   const { store, providers } = setup(t);
   t.after(() => store.close());
   const { executable } = installFixture(t, "pi-server.mjs", "default");
@@ -234,12 +234,13 @@ test("legacy Pi transport keeps the one-shot CLI path", async t => {
   const adapter = piNativeAdapter(manager, manager.limits);
   let nativeUsed = false;
   providers.register(new CliProvider("pi-cli", {
-    native: { ...adapter, sessionProvider: { ...adapter.sessionProvider, async openSession() { nativeUsed = true; throw new Error("native must not be used"); } } },
+    native: { ...adapter, sessionProvider: { ...adapter.sessionProvider, async openSession() { nativeUsed = true; throw new Error("session failed"); } } },
   }), executable);
-  providers.update("pi-cli", { enabled: true, defaultModel: "fixture-model" }); // 默认 legacy
-  assert.equal((await providers.detect("pi-cli")).state, "ready"); // 仅 --version 检查
+  providers.update("pi-cli", { enabled: true, defaultModel: "fixture-model" });
+  assert.equal((await providers.detect("pi-cli")).state, "ready");
+  assert.throws(() => providers.update("pi-cli", { config: { transport: "legacy" } }));
   await assert.rejects(providers.run({ providerId: "pi-cli", modelId: "fixture-model" }, {
     cwd: store.root, prompt: "hi", signal: new AbortController().signal, emit: () => {},
-  }));
-  assert.equal(nativeUsed, false);
+  }), /session failed/);
+  assert.equal(nativeUsed, true);
 });

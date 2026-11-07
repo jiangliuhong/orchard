@@ -10,6 +10,7 @@ import { ProviderRegistry } from "../providers/registry.js";
 import { ScriptLibrary, scriptDiagnostics } from "./script-library.js";
 
 export interface ScriptAgentTurn {
+  archivedAt?: number;
   id: string; scriptId: string; conversationId: string; draftVersionId: string; baseRevision: number;
   requestHash: string; prompt: string; choice: AgentChoice; snapshot: ScriptDefinition; testId?: string;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
@@ -44,11 +45,31 @@ export class ScriptAgentService {
       candidate: includePreview && turn.proposal ? prepareScriptProposal(snapshot, turn.proposal).definition : undefined,
     };
   }
-  list(scriptId: string, offset = 0, limit = 20) {
+  list(scriptId: string, offset = 0, limit = 20, conversationId?: string) {
     this.store.script(scriptId);
     check(Number.isInteger(offset) && offset >= 0 && Number.isInteger(limit) && limit > 0 && limit <= 100, "INVALID_REQUEST", "Agent 分页参数无效");
     const records = this.journal.list(scriptId);
-    return { total: records.length, activeCount: records.filter(turn => ["queued", "running"].includes(turn.status)).length, items: records.slice(offset, offset + limit).map(turn => ({ ...turn, appliedRevision: this.applied(scriptId, turn.id)?.version.revision ?? null })) };
+    const filtered = conversationId === undefined ? records : records.filter(turn => turn.conversationId === conversationId);
+    return { total: filtered.length, activeCount: records.filter(turn => ["queued", "running"].includes(turn.status)).length, items: filtered.slice(offset, offset + limit).map(turn => ({ ...turn, appliedRevision: this.applied(scriptId, turn.id)?.version.revision ?? null })) };
+  }
+  conversations(scriptId: string) {
+    this.store.script(scriptId);
+    const groups = new Map<string, { id: string; draftVersionId: string; title: string; updatedAt: number; archived: boolean; active: boolean }>();
+    for (const turn of this.journal.list(scriptId)) {
+      const group = groups.get(turn.conversationId);
+      if (!group) groups.set(turn.conversationId, { id: turn.conversationId, draftVersionId: turn.draftVersionId, title: turn.prompt, updatedAt: turn.createdAt, archived: !!turn.archivedAt, active: ["queued", "running"].includes(turn.status) });
+      else { group.title = turn.prompt; group.archived ||= !!turn.archivedAt; group.active ||= ["queued", "running"].includes(turn.status); }
+    }
+    return { items: [...groups.values()] };
+  }
+  archiveConversation(scriptId: string, conversationId: string) {
+    this.store.script(scriptId);
+    const turns = this.journal.list(scriptId).filter(turn => turn.conversationId === conversationId);
+    check(turns.length, "NOT_FOUND", "脚本 Agent 对话不存在", 404);
+    check(!turns.some(turn => ["queued", "running"].includes(turn.status)), "TURN_ACTIVE", "请等待对话生成完成后归档", 409);
+    const archivedAt = Date.now();
+    for (const turn of turns) this.journal.save({ ...this.journal.read(scriptId, turn.id)!, archivedAt });
+    return { id: conversationId, archivedAt };
   }
   start(scriptId: string, input: ScriptAgentRequest) {
     check(!this.closed, "SERVICE_CLOSED", "脚本 Agent 已关闭");
@@ -68,6 +89,7 @@ export class ScriptAgentService {
     if (input.testId) check(this.store.scriptTest(input.testId).scriptId === scriptId, "NOT_FOUND", "测试记录不属于此脚本", 404);
     const conversationId = input.conversationId ?? draft.id;
     check(/^[a-zA-Z0-9-]{1,100}$/.test(conversationId), "INVALID_REQUEST", "对话 ID 无效");
+    check(!this.journal.list(scriptId).some(turn => turn.conversationId === conversationId && turn.archivedAt), "CONVERSATION_ARCHIVED", "此对话已归档，请新建对话", 409);
     check(!this.journal.list(scriptId).some(turn => turn.conversationId === conversationId && turn.draftVersionId !== draft.id), "CONVERSATION_DRAFT_CONFLICT", "此对话属于历史草稿，请新建对话", 409);
     const turn: ScriptAgentTurn = { id, scriptId, conversationId, draftVersionId: draft.id, baseRevision: draft.revision, snapshot, requestHash, prompt: input.prompt, choice, testId: input.testId, status: "queued", createdAt: Date.now(), endedAt: null };
     this.journal.save(turn);

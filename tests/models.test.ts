@@ -1,9 +1,10 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { setup, TestProvider, until } from "./helpers.js";
+import { setup as setupProviders, TestProvider, until } from "./helpers.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
 import { Store } from "../src/persistence/store.js";
 import { createApp } from "../src/server/app.js";
+const setup = (context: TestContext) => setupProviders(context, { models: false });
 
 test("legacy models remain enabled and disabling the default clears it without selecting a replacement", context => {
   const { store, providers, provider } = setup(context);
@@ -58,7 +59,7 @@ test("model state persists in the existing JSON column across restart", context 
   assert.equal(registry.modelList(provider.id).find(model => model.id === "disabled")!.enabled, false);
   assert.equal(registry.modelList(provider.id).some(model => model.id === "deleted"), false);
   assert.equal(registry.setting(provider.id).models.find(model => model.id === "deleted")!.deleted, true);
-  assert.equal(reopened.all("SELECT name FROM sqlite_master WHERE type='table'").length, 16);
+  assert.equal(reopened.all("SELECT name FROM sqlite_master WHERE type='table'").length, 19);
 });
 
 test("model changes fence a pending catalog refresh and do not interrupt an active call", async context => {

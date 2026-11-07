@@ -20,7 +20,7 @@ import type { ProviderResult } from "./registry.js";
  * - turn/completed 按 turn.status 区分成功、失败、中断，不能只看通知名；
  * - 服务端带 id 请求必须处理：已知审批／工具请求返回协议错误并终止本轮 TOOLS_DISABLED，
  *   未知方法返回 method-not-found；不得默认批准、调用工具或无限等待；
- * - 工具限制复用 legacy exec 的禁用策略，通过 -c 配置覆盖传入（0.165.0 已验证可解析）；
+ * - 工具限制通过 -c 配置覆盖传入（0.165.0 已验证可解析）；
  * - 同一 thread 一次只允许一个 turn。
  */
 

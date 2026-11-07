@@ -1,9 +1,10 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { setup, until } from "./helpers.js";
+import { setup as setupProviders, until } from "./helpers.js";
 import { AppError } from "../src/domain/errors.js";
 import { createApp } from "../src/server/app.js";
 import type { TurnRequest } from "../src/providers/registry.js";
+const setup = (context: TestContext) => setupProviders(context, { models: false });
 
 function waitForAbort(request: TurnRequest): Promise<never> {
   return new Promise((_, reject) => {

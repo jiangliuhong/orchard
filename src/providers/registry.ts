@@ -1,11 +1,12 @@
-import { accessSync, constants, readFileSync, mkdtempSync, rmSync, readdirSync, lstatSync } from "node:fs";
+import { accessSync, constants, mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { executeProcess } from "../runtime/process.js";
 import { check, AppError, failure } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
-import type { AgentChoice, BackendRef, JsonSchema, Model, ModelVerification, ProviderCapabilities, ProviderSetting, ProviderView, Workflow } from "../domain/types.js";
+import type { AgentChoice, BackendRef, JsonSchema, Model, ModelVerification, ProviderCapabilities, ProviderSetting, ProviderView } from "../domain/types.js";
+import { AgentModelConfigs } from "../authoring/agent-model-configs.js";
 import type { Store } from "../persistence/store.js";
 import { isModelEnabled, visibleModels } from "../domain/models.js";
 import { readCodexConfig, readCodexModels } from "./codex-config.js";
@@ -30,18 +31,15 @@ export interface AgentProvider {
   defaultConfig?: Record<string, unknown>;
   detect(setting: ProviderSetting): Promise<ProviderView["readiness"]>;
   models(setting: ProviderSetting, cwd: string): Promise<{ models: Model[]; warning?: string }>;
-  turn(setting: ProviderSetting, request: TurnRequest): Promise<ProviderResult>;
-  /** 可选原生会话能力；按能力分派，业务层不得根据固定 Provider ID 判断会话能力。 */
   sessionProvider?: SessionProvider;
-  /** 按配置计算实际能力（如 transport 决定原生会话）；未实现时回退静态声明。 */
   capabilitiesFor?(setting: ProviderSetting): ProviderCapabilities;
 }
 
-/** 读取规范化层：config 缺少 transport 时按 legacy 读取，不自动切换已有配置（§17.1）。 */
-export function transportOf(config: Record<string, unknown>): "legacy" | "native" {
-  return config.transport === "native" ? "native" : "legacy";
+export function transportOf(config: Record<string, unknown>): "native" {
+  check(config.transport === undefined || config.transport === "native", "PROTOCOL_UNSUPPORTED", "仅支持原生协议，请更新 Provider 配置");
+  return "native";
 }
-const configSchema: JsonSchema = { type: "object", required: ["executable"], properties: { executable: { type: "string", minLength: 1 }, transport: { enum: ["legacy", "native"] } }, additionalProperties: false };
+const configSchema: JsonSchema = { type: "object", required: ["executable"], properties: { executable: { type: "string", minLength: 1 }, transport: { const: "native" } }, additionalProperties: false };
 function discoveredExecutable(command: string) {
   const paths = [...(process.env.PATH ?? "").split(":"), join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"];
   try {
@@ -58,12 +56,12 @@ export class ProviderRegistry {
   private readonly adapters = new Map<string, AgentProvider>();
   private readonly states = new Map<string, ProviderView["readiness"]>();
   private readonly verifications = new Map<string, { controller: AbortController; finished: Promise<void> }>();
-  /** 可选全局进程调度器：提供时单次 legacy 进程也必须申请同一槽位，禁止绕过限额（§23.1）。 */
-  constructor(readonly store: Store, private readonly scheduler?: SessionManager) {}
+  readonly modelConfigs: AgentModelConfigs;
+  constructor(readonly store: Store) { this.modelConfigs = new AgentModelConfigs(store, this); }
   register(provider: AgentProvider, executable = discoveredExecutable(provider.id.replace("-cli", ""))) {
     check(!this.adapters.has(provider.id), "DUPLICATE_PROVIDER", "Provider ID 已注册");
     this.adapters.set(provider.id, provider);
-    if (!this.store.provider(provider.id)) this.store.saveProvider({ id: provider.id, enabled: false, config: provider.defaultConfig ?? { executable }, models: [], defaultModel: "", revision: 1, updatedAt: Date.now() });
+    if (!this.store.provider(provider.id)) this.store.saveProvider({ id: provider.id, enabled: false, config: provider.defaultConfig ?? { executable, ...(provider instanceof CliProvider ? { transport: "native" } : {}) }, models: [], defaultModel: "", revision: 1, updatedAt: Date.now() });
     return this;
   }
   adapter(id: string) { const adapter = this.adapters.get(id); check(adapter, "PROVIDER_NOT_FOUND", `Provider 未注册: ${id}`); return adapter; }
@@ -84,7 +82,6 @@ export class ProviderRegistry {
         models: { type: "array", maxItems: 500, items: { type: "object", required: ["id", "name", "source"], properties: { id: { type: "string", minLength: 1, maxLength: 200 }, name: { type: "string", minLength: 1, maxLength: 200 }, source: { enum: ["configured", "discovered"] }, enabled: { type: "boolean" } }, additionalProperties: false } } }, additionalProperties: false,
     }, "Provider 设置");
     const current = this.setting(id), data = input as Partial<ProviderSetting>;
-    // 设置保存必须合并现有 config，不能因 UI 只提交 executable 就意外清空 transport（§18.3）。
     const next = { ...current, ...data, config: { ...current.config, ...(data.config ?? {}) }, id, revision: current.revision + 1, updatedAt: Date.now() };
     if (data.models) {
       check(new Set(data.models.map(model => model.id)).size === data.models.length, "MODEL_CONFLICT", "模型 ID 不能重复");
@@ -241,14 +238,6 @@ export class ProviderRegistry {
     check(state.state === "ready", "PROVIDER_UNAVAILABLE", state.reason ?? "Provider 未就绪", 503);
     return { ...effective, setting };
   }
-  async freeze(workflow: Workflow): Promise<Workflow> {
-    const frozen = structuredClone(workflow);
-    for (const node of frozen.nodes) if (node.type === "agent") {
-      const choice = await this.ready(node.config, frozen.defaults?.agent);
-      node.config.providerId = choice.providerId; node.config.modelId = choice.modelId;
-    }
-    return frozen;
-  }
   async run(choice: AgentChoice, request: Omit<TurnRequest, "modelId">) {
     const effective = await this.ready(choice);
     request.signal.throwIfAborted();
@@ -259,33 +248,24 @@ export class ProviderRegistry {
     request.emit({ type: "provider.completed", payload: result });
     return result;
   }
-  /**
-   * 按能力分派（§18.2）：legacy 调用原 CliProvider.turn()；native 创建临时专属句柄
-   * （persistent=false，Codex ephemeral thread / Pi --no-session），不论成功失败
-   * 在 finally 中释放句柄并等待进程退出。节点与验证不查找或写入任何草稿会话。
-   */
   private async dispatch(setting: ProviderSetting, request: TurnRequest): Promise<ProviderResult> {
     const adapter = this.adapter(setting.id);
     const sessionProvider = adapter.sessionProvider;
-    if (transportOf(setting.config) !== "native" || !sessionProvider) {
-      // legacy 单次进程同样占用全局槽位（若提供调度器），不绕过限额。
-      if (!this.scheduler) return adapter.turn(setting, request);
-      const slot = await this.scheduler.acquire(null, request.signal, "legacy-turn");
-      try { return await adapter.turn(setting, request); }
-      finally { slot.finish(); }
-    }
+    transportOf(setting.config);
+    check(sessionProvider, "PROTOCOL_UNSUPPORTED", "Provider 不支持原生会话协议");
     const directory = mkdtempSync(join(request.cwd, ".agent-"));
-    const handle = await sessionProvider.openSession(setting, {
-      key: `single:${randomUUID()}`, modelId: request.modelId, cwd: directory,
-      persistent: false, signal: request.signal,
-    });
     try {
-      return await sessionProvider.sendTurn(handle, {
-        ...request, cwd: directory, hostTurnId: randomUUID(),
-        onAccepted: async () => { /* 单次调用无宿主持久化步骤 */ },
+      const handle = await sessionProvider.openSession(setting, {
+        key: `single:${randomUUID()}`, modelId: request.modelId, cwd: directory,
+        persistent: false, signal: request.signal,
       });
+      try {
+        return await sessionProvider.sendTurn(handle, {
+          ...request, cwd: directory, hostTurnId: randomUUID(), onAccepted: async () => {},
+        });
+      } finally { await sessionProvider.releaseSession(handle); }
     } finally {
-      await sessionProvider.releaseSession(handle).finally(() => rmSync(directory, { recursive: true, force: true }));
+      rmSync(directory, { recursive: true, force: true });
     }
   }
 }
@@ -295,16 +275,15 @@ export class CliProvider implements AgentProvider {
   readonly configSchema = configSchema;
   readonly capabilities: ProviderCapabilities;
   private readonly probeCache = new Map<string, { at: number; readiness: ProviderView["readiness"] }>();
-  constructor(readonly id: "codex-cli" | "pi-cli", private readonly options: { native?: NativeAdapter; probeCacheMs?: number; initializeTimeoutMs?: number; scheduler?: SessionManager } = {}) {
+  constructor(readonly id: "codex-cli" | "pi-cli", private readonly options: { native: NativeAdapter; probeCacheMs?: number; initializeTimeoutMs?: number; scheduler?: SessionManager }) {
     this.name = id === "codex-cli" ? "Codex CLI" : "Pi CLI";
     this.capabilities = { modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: false, textStream: id === "pi-cli", sessions: "none" };
   }
-  /** 按配置计算实际能力：transport=native 且适配器可用时为原生持久会话。 */
   capabilitiesFor(setting: ProviderSetting): ProviderCapabilities {
-    if (transportOf(setting.config) === "native" && this.options.native) return this.options.native.capabilities(setting);
-    return this.capabilities;
+    transportOf(setting.config);
+    return this.options.native.capabilities(setting);
   }
-  get sessionProvider(): SessionProvider | undefined { return this.options.native?.sessionProvider; }
+  get sessionProvider(): SessionProvider { return this.options.native.sessionProvider; }
   async detect(setting: ProviderSetting): Promise<ProviderView["readiness"]> {
     try {
       const executable = this.executable(setting);
@@ -321,8 +300,8 @@ export class CliProvider implements AgentProvider {
       const base: ProviderView["readiness"] = { state: "ready", version: result.stdout.trim().slice(0, 200), reason: config
         ? `CLI 可执行；沿用本机 Codex 配置${config.customRoute ? "（自定义网关）" : ""}${config.catalogPath ? "与自定义模型目录" : ""}；模型权限需验证`
         : "CLI 可执行；账号及模型权限在调用时验证" };
-      if (transportOf(setting.config) === "native" && this.options.native) return this.probeNative(setting, base);
-      return base;
+      transportOf(setting.config);
+      return this.probeNative(setting, base);
     } catch (error) { return { state: "unavailable", reason: error instanceof Error ? error.message : String(error) }; }
   }
   /** 原生模式无模型协议探测；按连接指纹缓存，配置变化立即失效（新指纹未命中）。 */
@@ -336,12 +315,12 @@ export class CliProvider implements AgentProvider {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(new AppError("TIMEOUT", "原生模式探测超时")), this.options.initializeTimeoutMs ?? DEFAULT_AGENT_LIMITS.initializeTimeoutMs);
       timer.unref();
-      try { await this.options.native!.probe(setting, controller.signal); } finally { clearTimeout(timer); }
+      try { await this.options.native.probe(setting, controller.signal); } finally { clearTimeout(timer); }
       // 能力与 readiness 不可混淆：探测通过仅表示协议可用，不等于账号或模型可用性。
       readiness = { ...base, transport: "native" };
     } catch (error) {
       const detail = error instanceof AppError ? error : new AppError("PROTOCOL_UNSUPPORTED", error instanceof Error ? error.message : String(error), 503);
-      readiness = { state: "unavailable", transport: "native", errorCode: detail.code, version: base.version, reason: `原生模式探测失败：${detail.message}；可在设置中切回兼容模式` };
+      readiness = { state: "unavailable", transport: "native", errorCode: detail.code, version: base.version, reason: `原生模式探测失败：${detail.message}；请检查 CLI 版本和连接配置` };
     }
     this.probeCache.set(fingerprint, { at: Date.now(), readiness });
     return readiness;
@@ -361,63 +340,6 @@ export class CliProvider implements AgentProvider {
       }
       return { models: [...new Map(models.map(m => [m.id, m])).values()], ...(models.length ? {} : { warning: "模型目录为空，可在设置中补充明确的模型 ID" }) };
     } catch (error) { return { models: [], warning: `模型目录读取失败，可手动补充：${error instanceof Error ? error.message : String(error)}` }; }
-  }
-  async turn(setting: ProviderSetting, request: TurnRequest): Promise<ProviderResult> {
-    if (this.id === "codex-cli") readCodexConfig();
-    const directory = mkdtempSync(join(request.cwd, ".agent-"));
-    let text: string | undefined, modelId = request.modelId, modelSource: "reported" | "requested" = "requested", usage: unknown, reportedError: string | undefined, pending = "";
-    const finalFile = join(directory, "result.txt");
-    const args = this.id === "codex-cli"
-      ? ["exec", "--json", "--ephemeral", "--skip-git-repo-check",
-        ...["shell_tool", "unified_exec", "apps", "plugins", "hooks", "multi_agent", "browser_use", "computer_use", "in_app_browser", "image_generation"].flatMap(feature => ["--disable", feature]),
-        "-c", "mcp_servers={}", "-c", "notify=[]", "-c", 'web_search="disabled"', "-s", "read-only", "-m", request.modelId, "-o", finalFile, "-"]
-      : ["-p", "--mode", "json", "--no-session", "--no-extensions", "--no-mcp", "--no-tools", "--thinking", "off", "--model", request.modelId];
-    const parseLine = (line: string) => {
-      if (!line.trim()) return;
-      let event: Record<string, unknown>;
-      try { event = JSON.parse(line); } catch { return; }
-      if (typeof event.model === "string") { modelId = event.model; modelSource = "reported"; }
-      if (event.type === "error" || event.type === "turn.failed") reportedError = JSON.stringify(event).slice(0, 2000);
-      if (event.type === "turn.completed") usage = event.usage;
-      if (this.id === "pi-cli") {
-        const message = event.message as { role?: string; content?: { type: string; text?: string }[]; model?: string; usage?: unknown; stopReason?: string; errorMessage?: string } | undefined;
-        if ((event.type === "turn_end" || event.type === "message_end") && message?.role === "assistant") {
-          text = (message.content ?? []).filter(c => c.type === "text").map(c => c.text ?? "").join("");
-          modelId = message.model ?? request.modelId; modelSource = message.model ? "reported" : "requested"; usage = message.usage;
-          if (message.stopReason === "error" || message.stopReason === "aborted") reportedError = message.errorMessage ?? message.stopReason;
-        }
-        const delta = event.assistantMessageEvent as { type?: string; delta?: string } | undefined;
-        if (delta?.type === "text_delta") request.emit({ type: "provider.text", payload: { text: delta.delta } });
-      }
-    };
-    try {
-      const schemaPrompt = request.schema === undefined ? "" : `\nReturn only valid JSON matching this JSON Schema:\n${JSON.stringify(request.schema)}`;
-      const result = await executeProcess({
-        executable: this.executable(setting), args, cwd: directory, input: request.prompt + schemaPrompt,
-        signal: request.signal, timeoutMs: request.timeoutMs, maxBytes: 8 * 1024 * 1024,
-        onLog: (stream, chunk) => {
-          if (stream === "stderr") request.emit({ type: "provider.diagnostic", payload: { text: chunk } });
-          else {
-            pending += chunk; let index: number;
-            while ((index = pending.indexOf("\n")) >= 0) { parseLine(pending.slice(0, index).replace(/\r$/, "")); pending = pending.slice(index + 1); }
-          }
-        },
-      });
-      if (pending) parseLine(pending);
-      check(result.exitCode === 0 && !reportedError, "PROVIDER_FAILED", reportedError ?? result.stderr.slice(-2000) ?? `CLI exited ${result.exitCode}`);
-      if (this.id === "codex-cli") {
-        const info = lstatSync(finalFile);
-        check(info.isFile() && !info.isSymbolicLink() && info.size <= 8 * 1024 * 1024, "OUTPUT_LIMIT", "Codex 最终消息文件无效或超过 8 MiB");
-        text = readFileSync(finalFile, "utf8");
-      }
-      check(typeof text === "string" && text.length > 0, "INVALID_AGENT_OUTPUT", "CLI 未返回最终消息");
-      let output: unknown = text;
-      if (request.schema !== undefined) {
-        try { output = JSON.parse(text); } catch { throw new AppError("INVALID_AGENT_OUTPUT", `Agent 结果不是合法 JSON: ${text.slice(0, 200)}`); }
-        assertSchema(output, request.schema, "Agent 输出");
-      }
-      return { output, modelId, modelSource, providerId: this.id, ...(usage === undefined ? {} : { usage }) };
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   }
   private executable(setting: ProviderSetting) {
     const executable = setting.config.executable;

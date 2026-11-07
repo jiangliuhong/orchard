@@ -30,6 +30,14 @@ export function WebBridgeSettings() {
     try { await action(); if (success) setNotice(success); }
     catch (e) { setError((e as Error).message); }
   };
+  const copyExtensionDirectory = () => {
+    const directory = extension.data?.directory;
+    if (!directory) return;
+    void run(async () => {
+      try { await navigator.clipboard.writeText(directory); }
+      catch { throw new Error("复制失败，请允许剪贴板访问后重试。"); }
+    }, "浏览器插件目录已复制");
+  };
   const createApplication = () => run(async () => {
     await send("/web-bridge/applications", { id: applicationId.trim(), name: applicationName.trim() });
     setApplicationId(""); setApplicationName(""); await apps.reload();
@@ -66,12 +74,12 @@ export function WebBridgeSettings() {
     setTestOutput(JSON.stringify(result, null, 2));
   });
 
-  return <section className="panel web-bridge-settings" aria-label="Web Bridge 设置">
+  return <section className="web-bridge-settings" aria-label="Web Bridge 设置">
     <div className="preference-row"><div><h2><Globe size={17} /> Web Bridge</h2><p>先定义应用和工具，再进入应用管理环境与测试。</p></div><span className="readiness readiness-ready"><span className="status-dot" />本机服务已就绪</span></div>
     <div className="management-section">
       <label className="field" htmlFor="web-bridge-extension-directory">浏览器插件目录</label>
-      <Input id="web-bridge-extension-directory" className="font-mono" readOnly value={extension.data?.directory ?? ""} placeholder={extension.error ? "目录加载失败" : "正在加载目录…"} />
-      <p className="field-hint">在 Chrome 中打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择此目录。</p>
+      <Input id="web-bridge-extension-directory" className="font-mono" readOnly value={extension.data?.directory ?? ""} onDoubleClick={copyExtensionDirectory} title="双击复制目录" placeholder={extension.error ? "目录加载失败" : "正在加载目录…"} />
+      <p className="field-hint">双击输入框可复制目录。在 Chrome 中打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择此目录。</p>
       <ErrorNotice message={extension.error} />
     </div>
     <section className="management-section" aria-label="浏览器资料列表">

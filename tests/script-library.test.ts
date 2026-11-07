@@ -121,6 +121,33 @@ test("script Agent previews without mutations, checks ownership, and confirms on
   assert.throws(() => scriptAgent.start("library-script", { ...payload, expectedRevision: 1, conversationId: historicalConversation, requestId: randomUUID() }), { code: "CONVERSATION_DRAFT_CONFLICT" });
 });
 
+test("script Agent groups and filters conversations and persists archival without deleting turns", async context => {
+  const { store, providers, provider } = setup(context), { app, scripts, scriptAgent } = createApp(store, providers);
+  context.after(() => app.close());
+  await scripts.create(definition());
+  provider.handler = async request => ({ output: proposal(), providerId: provider.id, modelId: request.modelId });
+  const input = { providerId: provider.id, modelId: "test-model", prompt: "第一轮", expectedRevision: 0, requestId: randomUUID(), conversationId: randomUUID() };
+  const first = scriptAgent.start("library-script", input);
+  await until(() => scriptAgent.get("library-script", first.id).status === "succeeded");
+  const second = scriptAgent.start("library-script", { ...input, prompt: "继续修改", requestId: randomUUID() });
+  await until(() => scriptAgent.get("library-script", second.id).status === "succeeded");
+  const other = scriptAgent.start("library-script", { ...input, conversationId: randomUUID(), requestId: randomUUID() });
+  await until(() => scriptAgent.get("library-script", other.id).status === "succeeded");
+  const groups = await app.inject({ url: "/api/scripts/library-script/agent/conversations" });
+  assert.equal(groups.json().items.length, 2);
+  assert.equal(groups.json().items.find((item: { id: string }) => item.id === input.conversationId).title, "第一轮");
+  const filtered = await app.inject({ url: `/api/scripts/library-script/agent/turns?conversationId=${input.conversationId}&limit=1` });
+  assert.equal(filtered.json().total, 2);
+  assert.equal(filtered.json().items.length, 1);
+  assert.equal(filtered.json().items[0].conversationId, input.conversationId);
+  const archived = await app.inject({ method: "POST", url: `/api/scripts/library-script/agent/conversations/${input.conversationId}/archive` });
+  assert.equal(archived.statusCode, 200);
+  assert.equal(scriptAgent.conversations("library-script").items.find(item => item.id === input.conversationId)?.archived, true);
+  assert.ok(scriptAgent.journal.read("library-script", first.id)?.archivedAt);
+  assert.equal(scriptAgent.list("library-script", 0, 20, input.conversationId).total, 2);
+  assert.throws(() => scriptAgent.start("library-script", { ...input, requestId: randomUUID() }), { code: "CONVERSATION_ARCHIVED" });
+});
+
 test("Agent stale proposals cannot overwrite edits; cancelled and recovered turns never mutate drafts", async context => {
   const { store, providers, provider } = setup(context), library = new ScriptLibrary(store), service = new ScriptAgentService(store, providers);
   context.after(async () => { await service.close(); store.close(); });

@@ -64,7 +64,8 @@ export const TOOL_POLICY_VERSION = "codex-appserver-v1";
 export function connectionFingerprint(setting: ProviderSetting): string {
   const executable = String(setting.config.executable ?? "");
   check(typeof executable === "string" && isAbsolute(executable), "INVALID_EXECUTABLE", "CLI 路径必须为绝对路径");
-  const transport = setting.config.transport === "native" ? "native" : "legacy";
+  check(setting.config.transport === undefined || setting.config.transport === "native", "PROTOCOL_UNSUPPORTED", "仅支持原生协议");
+  const transport = "native";
   const homeSource = setting.id === "codex-cli"
     ? `codex-home:${codexHome()}`
     : `pi-config:default`;

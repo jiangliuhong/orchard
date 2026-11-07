@@ -17,8 +17,7 @@
   "entryNodeId": "a",
   "defaults": {
     "agent": {
-      "providerId": "codex-cli",
-      "modelId": "your-model-id"
+      "agentConfigId": "your-agent-model-config-id"
     }
   },
   "nodes": [

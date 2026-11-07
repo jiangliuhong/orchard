@@ -106,6 +106,8 @@ test("ensureForTurn lazily creates on empty drafts, forces rebuild after needs_r
   assert.throws(() => conversations.ensureForTurn(draft.id, { ...selection, conversationId: lazy.id }), /只能向当前会话提交/);
   const created = await conversations.create(draft.id, { ...selection, ...command() });
   store.markConversation(created.id, "needs_rebuild");
+  const historyTime = Date.now() + 1000;
+  store.exec("UPDATE agent_conversations SET created_at=? WHERE id=?", historyTime, created.id);
   assert.throws(() => conversations.ensureForTurn(draft.id, { ...selection, conversationId: created.id }), /SESSION_REBUILD_REQUIRED|重建上下文/);
   // 无 current 且存在 needs_rebuild：隐式提交同样要求显式重建。
   assert.throws(() => conversations.ensureForTurn(draft.id, selection), /SESSION_REBUILD_REQUIRED|重建上下文/);
@@ -113,7 +115,40 @@ test("ensureForTurn lazily creates on empty drafts, forces rebuild after needs_r
   // 重建后新的 current 恢复隐式提交；归档 current 后隐式提交要求显式选择。
   assert.equal(conversations.ensureForTurn(draft.id, selection).id, rebuilt.id);
   await conversations.archive(draft.id, rebuilt.id, command());
+  store.exec("UPDATE agent_conversations SET created_at=? WHERE id=?", historyTime + 1, rebuilt.id);
   assert.throws(() => conversations.ensureForTurn(draft.id, selection), /请新建或继续一个对话/);
+});
+
+test("native rebuilding includes source history only on the first turn and single calls stay isolated", async t => {
+  const { store, provider, authoring } = setup(t);
+  t.after(async () => { await authoring.close(); store.close(); });
+  const draft = await authoring.create(undefined, randomUUID());
+  provider.handler = async request => ({ output: { summary: "上下文暗号", changes: [] }, providerId: provider.id, modelId: request.modelId });
+  const first = await authoring.start(draft.id, { providerId: provider.id, prompt: "请记住暗号", expectedRevision: 0, requestId: randomUUID() });
+  await authoring.wait(first.id);
+  const source = store.currentConversation(draft.id)!;
+  store.markConversation(source.id, "needs_rebuild");
+  const rebuilt = await authoring.conversations.rebuild(draft.id, source.id, {
+    providerId: provider.id, modelId: "test-model", ...command(),
+  });
+  const start = () => authoring.start(draft.id, {
+    providerId: provider.id, prompt: "继续", expectedRevision: 0, requestId: randomUUID(), conversationId: rebuilt.id,
+  });
+  const second = await start();
+  await authoring.wait(second.id);
+  assert.equal(store.turn(second.id).status, "succeeded");
+  assert.match(provider.calls.at(-1)!.prompt, /explicit_rebuild/);
+  assert.match(provider.calls.at(-1)!.prompt, /请记住暗号/);
+  const third = await start();
+  await authoring.wait(third.id);
+  assert.doesNotMatch(provider.calls.at(-1)!.prompt, /historyExcerpt/);
+  await authoring.conversations.create(draft.id, { providerId: provider.id, modelId: "test-model", mode: "single", ...command() });
+  for (let index = 0; index < 2; index++) {
+    const turn = await authoring.start(draft.id, { providerId: provider.id, prompt: "单次", mode: "single", expectedRevision: 0, requestId: randomUUID() });
+    await authoring.wait(turn.id);
+    assert.equal(store.turn(turn.id).status, "succeeded");
+    assert.doesNotMatch(provider.calls.at(-1)!.prompt, /historyExcerpt/);
+  }
 });
 
 test("first user message backfills a deterministic title and manual renames survive later turns", async t => {

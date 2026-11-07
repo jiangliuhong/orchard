@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Menu, MessageSquare } from "lucide-react";
 import type { AgentChoice, ProviderView } from "../../domain/types.js";
 import type { ScriptAgentService } from "../../authoring/script-agent.js";
 import { api, requestId, send, useCommandKey, useResource } from "../lib/api";
@@ -9,6 +10,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { ProviderPicker } from "./ProviderPicker";
 import { ScriptDiff, versionFiles } from "./ScriptVersionPanels";
 import type { ScriptDetail } from "./ScriptPages";
+import { ConversationDrawer } from "./ConversationDrawer";
+import { ArchiveConversationButton } from "./ArchiveConversationButton";
 
 type AgentTurn = ReturnType<ScriptAgentService["get"]>;
 type AgentHistory = ReturnType<ScriptAgentService["list"]>;
@@ -16,7 +19,9 @@ type AgentHistory = ReturnType<ScriptAgentService["list"]>;
 export function ScriptAgentPanel({ script, dirty, onApplied, onTestInput, testRefresh = 0 }: { script: ScriptDetail; dirty: boolean; onApplied: () => void; onTestInput: (input: unknown) => void; testRefresh?: number }) {
   const providers = useResource<{ items: ProviderView[] }>("/providers");
   const [choice, setChoice] = useState<AgentChoice>(() => { try { return JSON.parse(localStorage.getItem("orchard-workbench-agent") ?? "{}"); } catch { return {}; } });
-  const [prompt, setPrompt] = useState(""), [conversationId, setConversationId] = useState(script.currentDraftVersionId ?? requestId());
+  const [prompt, setPrompt] = useState(""), [conversationId, setConversationId] = useState<string>(() => requestId());
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const conversations = useResource<ReturnType<ScriptAgentService["conversations"]>>(`/scripts/${script.id}/agent/conversations`);
   const [history, setHistory] = useState<AgentHistory>(), [selected, setSelected] = useState(""), [offset, setOffset] = useState(0), [refresh, setRefresh] = useState(0);
   const [error, setError] = useState(""), [busy, setBusy] = useState(false), [testId, setTestId] = useState("");
   const [submission, setSubmission] = useState(0);
@@ -24,14 +29,14 @@ export function ScriptAgentPanel({ script, dirty, onApplied, onTestInput, testRe
   const commandKey = useCommandKey();
   useEffect(() => { tests.reload(); }, [testRefresh]);
   useEffect(() => {
-    setConversationId(script.currentDraftVersionId ?? requestId()); setPrompt(""); setTestId("");
-  }, [script.currentDraftVersionId]);
+    setConversationId(requestId()); setPrompt(""); setTestId(""); setSelected(""); setOffset(0); setHistoryOpen(false);
+  }, [script.id, script.currentDraftVersionId]);
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
-        const result = await api<AgentHistory>(`/scripts/${script.id}/agent/turns?offset=${offset}&limit=10`, { signal: controller.signal });
+        const result = await api<AgentHistory>(`/scripts/${script.id}/agent/turns?offset=${offset}&limit=10&conversationId=${encodeURIComponent(conversationId)}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
         setHistory(result);
         if (result.activeCount) timer = setTimeout(() => void load(), 750);
@@ -39,7 +44,17 @@ export function ScriptAgentPanel({ script, dirty, onApplied, onTestInput, testRe
     };
     void load();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [script.id, offset, refresh]);
+  }, [script.id, conversationId, offset, refresh]);
+  useEffect(() => { conversations.reload(); }, [refresh, history?.activeCount]);
+  const startNew = () => { setConversationId(requestId()); setSelected(""); setHistory(undefined); setOffset(0); setPrompt(""); setTestId(""); setHistoryOpen(false); };
+  const archive = async (id: string) => {
+    setBusy(true); setError("");
+    try {
+      await send(`/scripts/${script.id}/agent/conversations/${encodeURIComponent(id)}/archive`);
+      if (id === conversationId) startNew();
+      conversations.reload();
+    } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
+  };
   const generate = async () => {
     setBusy(true); setError("");
     try {
@@ -48,19 +63,35 @@ export function ScriptAgentPanel({ script, dirty, onApplied, onTestInput, testRe
       setSelected(turn.id); setOffset(0); setRefresh(value => value + 1); setPrompt(""); setSubmission(value => value + 1);
     } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
   };
-  const selectedId = selected || history?.items[0]?.id;
-  const locked = dirty || busy || !script.draft || script.status === "archived";
-  return <section className="panel script-agent-panel"><div className="section-heading"><h2>与 Agent 编辑脚本</h2><Button variant="outline" disabled={!!history?.activeCount || busy} onClick={() => { setConversationId(requestId()); setPrompt(""); }}>新对话</Button></div>
+  const selectedId = selected || history?.items.find(turn => turn.conversationId === conversationId)?.id;
+  const selectedConversation = conversations.data?.items.find(item => item.id === conversationId);
+  const selectedProvider = providers.data?.items.find(provider => provider.id === choice.providerId);
+  const providerAvailable = selectedProvider?.enabled && selectedProvider.readiness.state !== "unavailable";
+  const conversationName = selectedConversation?.title.trim() || history?.items.filter(turn => turn.conversationId === conversationId).at(-1)?.prompt.trim() || "新对话";
+  const locked = dirty || busy || !script.draft || script.status === "archived" || !!selectedConversation?.archived || (!!selectedConversation && selectedConversation.draftVersionId !== script.currentDraftVersionId);
+  return <section className="panel script-agent-panel"><div className="section-heading conversation-heading"><Button variant="ghost" size="icon" aria-label="历史对话" aria-expanded={historyOpen} onClick={() => setHistoryOpen(value => !value)}><Menu size={16} /></Button><h2 className="conversation-heading-title" title={conversationName}>{conversationName}</h2><Button variant="outline" disabled={!!history?.activeCount || busy} onClick={startNew}>新对话</Button></div>
+    <ConversationDrawer open={historyOpen} onOpenChange={setHistoryOpen}><div className="conversation-panel" aria-label="历史对话记录">
+      {!conversations.data?.items.length && <p className="field-hint">暂无历史对话，首次发送后自动保存。</p>}
+      {conversations.data?.items.map(item => <article className="conversation-item" key={item.id} data-viewed={item.id === conversationId}>
+        <button className="conversation-item-title" onClick={() => { setConversationId(item.id); setSelected(""); setHistory(undefined); setOffset(0); setPrompt(""); setTestId(""); setHistoryOpen(false); }}>{item.title.slice(0, 120)}</button>
+        <span className="conversation-item-meta">{new Date(item.updatedAt).toLocaleString("zh-CN")}{item.archived ? " · 已归档" : ""}{item.draftVersionId !== script.currentDraftVersionId ? " · 历史草稿，只读" : ""}</span>
+        <div className="conversation-item-actions">
+          {!item.archived && item.draftVersionId === script.currentDraftVersionId && <Button size="xs" variant="ghost" disabled={busy || !!history?.activeCount} onClick={() => { setConversationId(item.id); setSelected(""); setHistory(undefined); setOffset(0); setPrompt(""); setTestId(""); setHistoryOpen(false); }}><MessageSquare size={12} />继续对话</Button>}
+          {!item.archived && <ArchiveConversationButton disabled={busy || item.active} onConfirm={() => void archive(item.id)} />}
+        </div>
+      </article>)}
+      <ErrorNotice message={conversations.error} />
+    </div></ConversationDrawer>
     <p className="field-hint">绑定当前脚本草稿修订 {script.draft?.revision ?? "—"} · 对话 {conversationId.slice(0, 8)}。每轮重建受限上下文，读取本脚本与选定测试；变更需预览并确认后保存，不会自动执行或发布。</p>
-    <ProviderPicker providers={providers.data?.items ?? []} value={choice} disabled={locked} onChange={value => { setChoice(value); localStorage.setItem("orchard-workbench-agent", JSON.stringify(value)); }} />
+    <div className="script-agent-composer"><ProviderPicker providers={providers.data?.items ?? []} value={choice} enabledOnly disabled={locked} onChange={value => { setChoice(value); localStorage.setItem("orchard-workbench-agent", JSON.stringify(value)); }} />
     <label htmlFor="script-agent-test">引用测试结果</label><select id="script-agent-test" disabled={locked} value={testId} onChange={event => setTestId(event.target.value)}><option value="">不引用测试</option>{tests.data?.items.map(test => <option value={test.id} key={test.id}>{new Date(test.createdAt).toLocaleString("zh-CN")} · {test.status}</option>)}</select>
     <label htmlFor="script-agent-prompt">描述脚本需求或修复要求</label><Textarea id="script-agent-prompt" rows={4} value={prompt} disabled={locked} onChange={event => setPrompt(event.target.value)} placeholder="例如：增加输入校验，并生成一组测试输入…" />
-    <Button disabled={locked || !!history?.activeCount || !prompt.trim() || !choice.providerId || !choice.modelId} onClick={() => void generate()}>生成变更预览</Button>
+    <Button disabled={locked || !!history?.activeCount || !prompt.trim() || !providerAvailable || !choice.modelId} onClick={() => void generate()}>生成变更预览</Button>
     <ErrorNotice message={error || providers.error || tests.error} />{dirty && <p className="field-hint">先保存或放弃本地修改，再向 Agent 提交需求。</p>}
-    <div className="script-agent-history">{history?.items.map(turn => <button type="button" key={turn.id} className={selectedId === turn.id ? "is-active" : ""} onClick={() => { setSelected(turn.id); if (turn.draftVersionId === script.currentDraftVersionId) setConversationId(turn.conversationId); }}><Status value={turn.status} /><span>{turn.prompt.slice(0, 120)}</span><small>修订 {turn.baseRevision}{turn.appliedRevision !== null ? ` → ${turn.appliedRevision}` : ""}</small></button>)}</div>
+    </div><div className="script-agent-messages"><div className="script-agent-history">{history?.items.filter(turn => turn.conversationId === conversationId).map(turn => <button type="button" key={turn.id} className={selectedId === turn.id ? "is-active" : ""} onClick={() => setSelected(turn.id)}><Status value={turn.status} /><span>{turn.prompt.slice(0, 120)}</span><small>修订 {turn.baseRevision}{turn.appliedRevision !== null ? ` → ${turn.appliedRevision}` : ""}</small></button>)}</div>
     {history && <div className="actions"><Button variant="outline" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 10))}>上一页</Button><span>{history.total} 条记录</span><Button variant="outline" disabled={offset + 10 >= history.total} onClick={() => setOffset(offset + 10)}>下一页</Button></div>}
-    {selectedId && <ScriptAgentPreview key={selectedId} script={script} turnId={selectedId} disabled={dirty || busy || script.status === "archived"} onApplied={() => { onApplied(); setRefresh(value => value + 1); }} onTestInput={onTestInput} />}
-  </section>;
+    {selectedId && <ScriptAgentPreview key={selectedId} script={script} turnId={selectedId} disabled={locked} onApplied={() => { onApplied(); setRefresh(value => value + 1); }} onTestInput={onTestInput} />}
+  </div></section>;
 }
 
 export function ScriptAgentPreview({ script, turnId, disabled, onApplied, onTestInput }: { script: ScriptDetail; turnId: string; disabled: boolean; onApplied: () => void; onTestInput: (input: unknown) => void }) {

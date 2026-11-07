@@ -151,43 +151,36 @@ test("close rejects queued waiters, closes entries and tolerates close failures"
   await manager.close();
 });
 
-test("legacy one-shot turns also consume scheduler slots and queue behind the cap", async t => {
+test("native single turns release the only scheduler slot for the next call", async t => {
   const { setup } = await import("./helpers.js");
-  const { store, provider, providers } = setup(t);
+  const { installFixture } = await import("./agent-transport.test.js");
+  const { CliProvider, ProviderRegistry } = await import("../src/providers/registry.js");
+  const { codexNativeAdapter } = await import("../src/providers/codex-app-server.js");
+  const { store } = setup(t);
   t.after(() => store.close());
-  void providers;
   const manager = new SessionManager({ maxAgentProcesses: 1, queueWaitTimeoutMs: 5000 });
   t.after(() => manager.close());
-  const registry = new (await import("../src/providers/registry.js")).ProviderRegistry(store, manager).register(provider, process.execPath);
-  registry.update(provider.id, { enabled: true, defaultModel: "test-model" });
-  let release!: () => void;
-  let released = false;
-  const done = { providerId: provider.id, modelId: "test-model", output: "done" };
-  provider.handler = () => new Promise(resolve => {
-    if (released) return resolve(done);
-    release = () => { released = true; resolve(done); };
-  });
-  const first = registry.run({ providerId: provider.id }, { cwd: store.root, prompt: "one", signal: new AbortController().signal, emit: () => {} });
-  await new Promise(resolve => setTimeout(resolve, 60));
-  const second = registry.run({ providerId: provider.id }, { cwd: store.root, prompt: "two", signal: new AbortController().signal, emit: () => {} });
-  let secondDone = false;
-  void second.then(() => { secondDone = true; });
-  await new Promise(resolve => setTimeout(resolve, 80));
-  assert.equal(secondDone, false); // 槽位被 legacy 进程占用，第二轮排队等待
-  release();
+  const { executable } = installFixture(t, "codex-server.mjs", "default");
+  const registry = new ProviderRegistry(store).register(new CliProvider("codex-cli", {
+    native: codexNativeAdapter(manager, manager.limits),
+  }), executable);
+  registry.update("codex-cli", { enabled: true, defaultModel: "test-model" });
+  await registry.detect("codex-cli");
+  const first = registry.run({ providerId: "codex-cli" }, { cwd: store.root, prompt: "RETURN:done", signal: signal(), emit: () => {} });
+  const second = registry.run({ providerId: "codex-cli" }, { cwd: store.root, prompt: "RETURN:done", signal: signal(), emit: () => {} });
   assert.equal((await first).output, "done");
   assert.equal((await second).output, "done");
 });
 
 test("connection fingerprints distinguish transport, executable and policy without leaking config", () => {
   const base: ProviderSetting = {
-    id: "codex-cli", enabled: true, config: { executable: "/usr/local/bin/codex", transport: "legacy" },
+    id: "codex-cli", enabled: true, config: { executable: "/usr/local/bin/codex", transport: "native" },
     models: [], defaultModel: "", revision: 3, updatedAt: 0,
   };
   const fingerprint = connectionFingerprint(base);
   assert.equal(fingerprint, connectionFingerprint({ ...base, revision: 9, models: [{ id: "m", name: "m", source: "configured" }] }));
-  assert.notEqual(fingerprint, connectionFingerprint({ ...base, config: { ...base.config, transport: "native" } }));
-  assert.notEqual(fingerprint, connectionFingerprint({ ...base, config: { executable: "/opt/other/codex", transport: "legacy" } }));
+  assert.throws(() => connectionFingerprint({ ...base, config: { ...base.config, transport: "legacy" } }), { code: "PROTOCOL_UNSUPPORTED" });
+  assert.notEqual(fingerprint, connectionFingerprint({ ...base, config: { executable: "/opt/other/codex", transport: "native" } }));
   assert.notEqual(fingerprint, connectionFingerprint({ ...base, id: "pi-cli" }));
   assert.match(fingerprint, /^[0-9a-f]{64}$/);
   assert.ok(TOOL_POLICY_VERSION.length > 0);

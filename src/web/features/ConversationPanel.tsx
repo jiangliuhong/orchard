@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Archive, Check, MessageSquare, Pencil, RotateCcw, Undo2 } from "lucide-react";
+import { Check, MessageSquare, Pencil, RotateCcw, Undo2 } from "lucide-react";
 import type { AgentChoice, ConversationView } from "../../domain/types.js";
 import { Button } from "../components/ui/button";
 import { requestId, send } from "../lib/api";
+import { ArchiveConversationButton } from "./ArchiveConversationButton";
 
 const statusLabels: Record<ConversationView["status"], string> = {
   current: "当前对话", idle: "历史", archived: "已归档", needs_rebuild: "需要重建",
@@ -25,14 +26,14 @@ export interface ConversationPanelProps {
 
 /** 创作区对话选择器：当前 / 历史 / 需要重建 / 已归档（history-feature.md）。 */
 export function ConversationPanel({ draftId, revision, conversations, currentId, locked, busy, choice, viewedId, onView, run }: ConversationPanelProps) {
-  const [pendingArchive, setPendingArchive] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const disabled = locked || !!busy;
   const command = (name: string, conversationId: string, body?: Record<string, unknown>) =>
     run(name, async () => {
       const view = await send<ConversationView>(`/drafts/${draftId}/conversations/${conversationId}/${name}`, { expectedRevision: revision, requestId: requestId(), ...body });
-      if (view.status === "current") onView(view.id);
+      if (name === "resume" || name === "restore") onView(conversationId);
+      else if (view.status === "current") onView(view.id);
     });
   const row = (conversation: ConversationView) => {
     const viewed = viewedId === conversation.id;
@@ -49,19 +50,16 @@ export function ConversationPanel({ draftId, revision, conversations, currentId,
       </span>
       {conversation.lastUserMessage && <span className="conversation-item-excerpt">{conversation.lastUserMessage}</span>}
       {conversation.status === "needs_rebuild" && <span className="conversation-item-excerpt warning">后端上下文已中断，仅可阅读；重建会开启新上下文并保留此对话作诊断历史。</span>}
-      {pendingArchive === conversation.id
-        ? <div className="conversation-item-actions"><span className="conversation-item-excerpt">确认归档？消息与审计记录保留，对话停止接收新消息。</span>
-          <Button size="xs" variant="ghost" disabled={disabled} onClick={() => setPendingArchive(null)}>取消</Button>
-          <Button size="xs" variant="destructive" disabled={disabled} onClick={() => { void command("archive", conversation.id); setPendingArchive(null); }}>确认归档</Button></div>
-        : <div className="conversation-item-actions">
-          {conversation.status === "idle" && <Button size="xs" variant="outline" disabled={disabled} onClick={() => void command("resume", conversation.id)}><MessageSquare size={12} />继续</Button>}
-          {conversation.status === "archived" && <Button size="xs" variant="outline" disabled={disabled} onClick={() => void command("restore", conversation.id)}><Undo2 size={12} />恢复</Button>}
-          {conversation.status === "needs_rebuild" && <Button size="xs" variant="outline" disabled={disabled} onClick={() => void command("rebuild", conversation.id, { ...choice, mode: conversation.mode })}><RotateCcw size={12} />重建上下文</Button>}
+      <div className="conversation-item-actions">
+          {conversation.status === "current" && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => onView(conversation.id)}><MessageSquare size={12} />继续对话</Button>}
+          {conversation.status === "idle" && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void command("resume", conversation.id)}><MessageSquare size={12} />继续</Button>}
+          {conversation.status === "archived" && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void command("restore", conversation.id)}><Undo2 size={12} />恢复</Button>}
+          {conversation.status === "needs_rebuild" && <Button size="xs" variant="ghost" disabled={disabled} onClick={() => void command("rebuild", conversation.id, { ...choice, mode: conversation.mode })}><RotateCcw size={12} />重建上下文</Button>}
           {(conversation.status === "current" || conversation.status === "idle") && <>
             <Button size="xs" variant="ghost" disabled={disabled} aria-label={`重命名对话 ${conversation.title ?? conversation.id}`} onClick={() => { setRenaming(conversation.id); setTitleDraft(conversation.title ?? ""); }}><Pencil size={12} />改名</Button>
-            <Button size="xs" variant="ghost" disabled={disabled} aria-label={`归档对话 ${conversation.title ?? conversation.id}`} onClick={() => setPendingArchive(conversation.id)}><Archive size={12} />归档</Button>
+            <ArchiveConversationButton disabled={disabled} label={`归档对话 ${conversation.title ?? conversation.id}`} onConfirm={() => void command("archive", conversation.id)} />
           </>}
-        </div>}
+        </div>
     </article>;
   };
   const history = conversations.filter(conversation => conversation.status === "idle");

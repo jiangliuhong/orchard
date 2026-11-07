@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Clock3, GitBranch, RefreshCw, Square } from "lucide-react";
-import type { NodeRun, Run, RunExecution, StreamEvent, Version } from "../../domain/types.js";
+import type { NodeRun, Run, RunAgentBinding, RunExecution, StreamEvent, Version } from "../../domain/types.js";
 import { mergeEvents, send, useResource, useStream } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
@@ -10,7 +10,7 @@ import { applyEventStatus } from "./graph";
 import { RunButton } from "./WorkflowPages";
 import { FinalResult } from "./FinalResult";
 
-interface RunDetail extends Run { version: Version | null; execution: RunExecution; nodes: NodeRun[]; lastSequence: number; attempts: { id: string; nodeRunId: string; execution: unknown; status: string }[] }
+interface RunDetail extends Run { version: Version | null; execution: RunExecution; agentBindings?: RunAgentBinding[]; nodes: NodeRun[]; lastSequence: number; attempts: { id: string; nodeRunId: string; execution: unknown; status: string }[] }
 export function RunsPage() {
   const { data, error, reload } = useResource<{ items: Run[] }>("/runs");
   useEffect(() => { const timer = setInterval(reload, 3000); return () => clearInterval(timer); }, []);
@@ -33,6 +33,7 @@ export function RunPage({ id }: { id: string }) {
     }
   });
   const node = liveNodes.find(n => n.nodeId === selected);
+  const agentBinding = run?.agentBindings?.find(binding => binding.nodeId === selected);
   const selectNode = (nodeId: string) => {
     manualView.current = true;
     if (nodeId === "__end") setView("result");
@@ -46,7 +47,7 @@ export function RunPage({ id }: { id: string }) {
         <TabsContent value="output"><div className="detail-stack">{node?.skipReason && <div className="notice">{({ branch_not_selected: "条件未选择此分支", upstream_failed: "上游失败，未启动此节点", run_terminated: "运行已终止" } as Record<string, string>)[node.skipReason] ?? node.skipReason}</div>}<ErrorNotice message={node?.error?.message} />{node?.startedAt && <p className="field-hint">耗时：{((Number(node.endedAt ?? Date.now()) - node.startedAt) / 1000).toFixed(2)} 秒</p>}{node?.route && <><label>路由决策</label><Payload value={node.route} /></>}<label>节点输出</label><Payload value={node?.output} /></div></TabsContent>
         <TabsContent value="input"><div className="detail-stack"><label>节点实际输入</label><Payload value={node?.input} /><label>工作流输入</label><Payload value={run.input} /></div></TabsContent>
         <TabsContent value="logs"><div className="logs"><p className="field-hint">展示最近 500 个事件中的此节点日志；完整记录可通过事件接口分页读取。</p>{logs.length ? logs.map(event => <div className="log-line" key={event.sequence}><time>{new Date(event.createdAt).toLocaleTimeString("zh-CN")}</time><pre>{String((event.payload as { text?: string }).text ?? JSON.stringify(event.payload))}</pre></div>) : <p className="field-hint">此节点暂无日志。</p>}</div></TabsContent>
-        <TabsContent value="attempts"><div className="detail-stack"><Payload value={run.attempts.filter(a => a.nodeRunId === node?.id)} /></div></TabsContent>
+        <TabsContent value="attempts"><div className="detail-stack">{agentBinding && <div className="run-agent-binding"><strong>{agentBinding.name} · 修订 {agentBinding.configRevision}</strong><p>{agentBinding.providerId} · {agentBinding.modelId}</p><span className="field-hint">创建运行时固定的模型配置</span></div>}<Payload value={run.attempts.filter(a => a.nodeRunId === node?.id)} /></div></TabsContent>
       </Tabs></aside>
     </div></TabsContent></Tabs></> : <Loading />}
   </>;

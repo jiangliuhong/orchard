@@ -7,6 +7,7 @@ import { Store } from "../src/persistence/store.js";
 import { ProviderRegistry, type AgentProvider, type TurnRequest, type ProviderResult } from "../src/providers/registry.js";
 import { AuthoringService } from "../src/authoring/service.js";
 import type { SourceFiles, Workflow } from "../src/domain/types.js";
+import type { ProviderSessionHandle, SessionOpenRequest, SessionProvider, SessionTurnRequest } from "../src/providers/session.js";
 
 export function temporary(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "orchard-workbench-"));
@@ -14,11 +15,23 @@ export function temporary(t: TestContext) {
 }
 export class TestProvider implements AgentProvider {
   readonly name = "Test Provider";
-  readonly capabilities = { modelCatalog: true, structuredOutput: "validated" as const, tools: false, nativeResume: false, textStream: false };
+  readonly capabilities = { modelCatalog: true, structuredOutput: "validated" as const, tools: false, nativeResume: false, textStream: false, sessions: "memory" as const };
   readonly configSchema = { type: "object", required: ["executable"], properties: { executable: { type: "string" } }, additionalProperties: false };
   calls: TurnRequest[] = [];
   handler?: (request: TurnRequest) => Promise<ProviderResult>;
   constructor(readonly id = "test-provider") {}
+  readonly sessionProvider: SessionProvider = {
+    openSession: async (_setting: unknown, request: SessionOpenRequest): Promise<ProviderSessionHandle> => ({
+      key: request.key, generation: 1,
+      ref: { version: 1, kind: "codex", threadId: request.key, cwd: request.cwd },
+    }),
+    sendTurn: async (_handle: ProviderSessionHandle, request: SessionTurnRequest) => {
+      await request.onAccepted(randomUUID());
+      return this.turn(undefined, request);
+    },
+    interruptTurn: async () => {},
+    releaseSession: async () => {},
+  };
   async detect() { return { state: "ready" as const, version: "fixture" }; }
   async models() { return { models: [{ id: "test-model", name: "Test", source: "discovered" as const }] }; }
   async turn(_setting: unknown, request: TurnRequest): Promise<ProviderResult> {
@@ -31,7 +44,7 @@ export class TestProvider implements AgentProvider {
 export function exampleFiles(id = "example"): SourceFiles {
   const definition: Workflow = {
     formatVersion: 1, id, name: "检查并执行", inputSchema: { type: "object", properties: { action: { type: "string" } }, additionalProperties: false }, outputSchema: { type: "object" },
-    entryNodeId: "a", defaults: { agent: { providerId: "test-provider", modelId: "test-model" } },
+    entryNodeId: "a", defaults: { agent: { agentConfigId: "test-agent-config" } },
     nodes: [
       { id: "a", name: "读取输入", type: "code.nodejs", input: { source: "workflow" }, outputSchema: { type: "object" }, config: { script: "scripts/a.ts" } },
       { id: "b", name: "Agent 决策", type: "agent", input: { source: "node", nodeId: "a" }, outputSchema: { type: "object", required: ["action"], properties: { action: { type: "string" }, reason: { type: "string" } } }, config: { prompt: "Analyze input and choose execute or skip" } },
@@ -47,9 +60,12 @@ export function exampleFiles(id = "example"): SourceFiles {
     "scripts/c.sh": "#!/bin/bash\nread -r input\nprintf 'executed\\n'\n",
   };
 }
-export function setup(t: TestContext) {
+export function setup(t: TestContext, options: { models?: boolean } = {}) {
   const root = temporary(t), store = new Store(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
-  providers.update(provider.id, { enabled: true, defaultModel: "test-model" });
+  providers.update(provider.id, { enabled: true, defaultModel: "test-model", ...(options.models === false ? {} : { models: [{ id: "test-model", name: "Test", source: "configured", enabled: true }] }) });
+  const now = Date.now();
+  store.exec("INSERT INTO agent_model_configs VALUES('test-agent-config','测试分析','',?,'test-model',1,1,?,?)", provider.id, now, now);
+  store.exec("INSERT INTO agent_model_config_revisions VALUES('test-agent-config',1,'测试分析','',?,'test-model',1,?)", provider.id, now);
   const authoring = new AuthoringService(store, providers);
   return { root, store, provider, providers, authoring };
 }

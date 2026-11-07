@@ -23,7 +23,7 @@ export function projectGraph(workflow: Workflow, layout: Layout = {}, records: N
     const depth = depths.get(node.id) ?? 0, row = levels.get(depth) ?? 0; levels.set(depth, row + 1);
     return { id: node.id, type: "workflow", position: layout[node.id] ?? { x: (row - ((counts.get(depth) ?? 1) - 1) / 2) * 224, y: depth * 128 }, data: {
       label: node.name, kind: node.type, status: records.find(r => r.nodeId === node.id)?.status,
-      subtitle: node.type === "agent" ? [node.config.providerId ?? "继承默认", node.config.modelId].filter(Boolean).join(" · ") : node.type === "switch" ? `${node.config.cases?.length ?? 0} 个条件 + 默认` : node.config.script ?? "",
+      subtitle: node.type === "agent" ? node.config.agentConfigId ? "指定模型配置" : "继承默认模型配置" : node.type === "switch" ? `${node.config.cases?.length ?? 0} 个条件 + 默认` : node.config.script ?? "",
     } };
   });
   const chosen = new Set(records.map(n => n.route?.edgeId).filter(Boolean));

@@ -11,6 +11,9 @@
 | 模型列表 / 手动添加 | `GET /providers/:id/models` / `POST /providers/:id/models` |
 | 修改模型 / 删除 | `PATCH /providers/:id/models/:modelId` / `DELETE /providers/:id/models/:modelId` |
 | 验证模型可用性 | `POST /providers/:id/models/:modelId/verify` |
+| Agent 模型配置列表 / 创建 | `GET /agent-model-configs` / `POST /agent-model-configs` |
+| 模型配置详情 / 修改 | `GET /agent-model-configs/:id` / `PATCH /agent-model-configs/:id` |
+| 模型配置引用 | `GET /agent-model-configs/:id/references` |
 | 草稿列表 / 创建 | `GET /drafts` / `POST /drafts` |
 | 草稿快照 / 保存文件 | `GET /drafts/:id` / `PATCH /drafts/:id` |
 | 对话列表 / 创建重置 | `GET /drafts/:id/conversations` / `POST /drafts/:id/conversations` |
@@ -76,6 +79,10 @@ Agent 生成包含 `providerId,modelId,prompt,expectedRevision,requestId`，可�
 删除端点不发送请求体，成功返回 `{id, deleted: true}`，重复删除同一 ID 仍返回成功。删除工作流会在同一事务中清理全部发布版本、关联草稿（包括首次发布的原始草稿）、对话、正式及草稿测试运行、节点执行、事件和相关请求回执。存在生成、发布、排队、运行或取消尚未完成的任务时返回 409 / WORKFLOW_BUSY。删除草稿仅清理该草稿及其测试记录，不影响已发布版本；已发布草稿需通过工作流删除入口处理。独立复制出的工作流及草稿不受影响。共享的摘要文件和产物保留，避免破坏其他引用，不执行磁盘文件回收。
 
 ## 模型管理
+
+具名 Agent 模型配置与 Provider 模型目录分开管理。创建配置请求为 `{name, description?, providerId, modelId, enabled?, requestId}`；修改支持同样的业务字段，并要求 `expectedRevision`、`requestId`。列表支持 `?enabled=true|false`，返回可用性、不可用原因、去重工作流数与草稿数；引用接口返回草稿和全部发布版本。详情见[Agent 模型配置](../product/agent-model-configs.md)。
+
+工作流默认值及 Agent 节点仅接受 `agentConfigId`。发布保留配置 ID，正式运行和草稿测试入队时保存节点绑定。运行详情返回 `agentBindings`，包括 `nodeId`、`configId`、`configRevision`、`name`、`providerId`、`modelId` 和创建时的 `providerRevision`；节点执行信息另记录实际调用时的 Provider 修订。
 
 模型列表返回 `{items, defaultModel}`，items 包括 id、name、source 与 enabled，旧条目缺少 enabled 时返回 true。列表包含禁用模型，不包含已删除条目。
 

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, join } from "node:path";
 import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, SCHEMA, SCHEMA_VERSION } from "./schema.js";
+import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, SCHEMA, SCHEMA_VERSION } from "./schema.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
 import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, ScriptVersion, ScriptView, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
@@ -23,7 +23,7 @@ export interface ConversationRecord {
   providerId: string;
   providerRevision: number;
   modelId: string;
-  transport: "legacy" | "native";
+  transport: "native";
   connectionFingerprint: string;
   cliVersion: string | null;
   backendRef: BackendRef | null;
@@ -71,7 +71,7 @@ export class Store {
         this.db.exec(`BEGIN; ${SCHEMA} COMMIT;`);
       } else {
         // §20.3：接受所有受支持旧版本（1、2、3），顺序执行增量迁移至当前版本。
-        check([1, 2, 3, 4, 5, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
+        check([1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
         if (version < SCHEMA_VERSION) {
           // 服务尚未启动且已持有独占数据目录锁。先完成 WAL checkpoint，关闭连接后
           // 再复制主文件，绝不复制正在写入的 WAL 数据库。备份失败则拒绝迁移。
@@ -106,6 +106,8 @@ export class Store {
             if (version <= 3) this.db.exec(MIGRATE_V3_TO_V4);
             if (version <= 4) this.db.exec(MIGRATE_V4_TO_V5);
             if (version <= 5) this.db.exec(MIGRATE_V5_TO_V6);
+            if (version <= 6) this.db.exec(MIGRATE_V6_TO_V7);
+            if (version <= 7) this.db.exec(MIGRATE_V7_TO_V8);
             check(this.db.prepare("PRAGMA foreign_key_check").all().length === 0, "MIGRATION_FAILED", "数据库升级外键校验失败");
             for (const { name, count } of counts) {
               check(this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n === count,
@@ -459,7 +461,7 @@ export class Store {
     return {
       id: String(r.id), draftId: String(r.draft_id), mode: String(r.mode) as ConversationMode, contextMode: String(r.context_mode) as ContextMode,
       status: String(r.status) as ConversationStatus, providerId: String(r.provider_id), providerRevision: Number(r.provider_revision),
-      modelId: String(r.model_id), transport: String(r.transport) as "legacy" | "native", connectionFingerprint: String(r.connection_fingerprint),
+      modelId: String(r.model_id), transport: String(r.transport) as "native", connectionFingerprint: String(r.connection_fingerprint),
       cliVersion: (r.cli_version as string | null) ?? null, backendRef: parsed<BackendRef>(r.backend_ref_json) ?? null,
       backendGeneration: Number(r.backend_generation ?? 0), syncedRevision: r.synced_revision === null || r.synced_revision === undefined ? null : Number(r.synced_revision),
       rebuildFromId: (r.rebuild_from_id as string | null) ?? null, title: (r.title as string | null) ?? null,
@@ -511,8 +513,9 @@ export class Store {
     const target = this.conversation(id);
     check(target !== undefined && target.draftId === draftId, "NOT_FOUND", "会话不属于该草稿", 404);
     check(target.status === "archived", "CONVERSATION_CONFLICT", "仅可恢复已归档对话", 409);
-    this.demoteCurrentConversation(draftId);
-    const changed = Number(this.exec("UPDATE agent_conversations SET status='current',updated_at=? WHERE id=? AND draft_id=? AND status='archived'", Date.now(), id, draftId).changes);
+    const status = target.mode === "multi" && target.connectionFingerprint === "" ? "needs_rebuild" : "current";
+    if (status === "current") this.demoteCurrentConversation(draftId);
+    const changed = Number(this.exec("UPDATE agent_conversations SET status=?,updated_at=? WHERE id=? AND draft_id=? AND status='archived'", status, Date.now(), id, draftId).changes);
     check(changed === 1, "CONVERSATION_CONFLICT", "仅可恢复已归档对话", 409);
     return this.conversation(id)!;
   }

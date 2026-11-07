@@ -151,12 +151,14 @@ export class AuthoringService {
       appliedRevision: previous.status === "succeeded" ? (previous.baseRevision === this.store.draft(id).revision ? this.store.draft(id).revision : null) : null,
       errorCode: previous.error?.code ?? null,
     } : null;
-    const history: ContextHistoryMessage[] = conversation.contextMode === "reconstructed" ? this.store.messages(id, conversation.id).map(message => ({ sequence: message.sequence, role: message.role, content: message.content })) : [];
+    const rebuilding = conversation.mode === "multi" && conversation.rebuildFromId !== null && conversation.backendRef === null;
+    const history: ContextHistoryMessage[] | undefined = rebuilding
+      ? this.store.messages(id, conversation.rebuildFromId!).map(message => ({ sequence: message.sequence, role: message.role, content: message.content }))
+      : undefined;
     const context = buildAuthoringContext({
       kind: conversation.backendRef === null ? "initial" : "continuation", draftId: id, baseRevision: input.expectedRevision,
-      files: snapshot.files, providers: this.providers.views(), previousOutcome,
-      history: conversation.contextMode === "reconstructed" ? history : undefined,
-      historySource: conversation.rebuildFromId ? "explicit_rebuild" : "legacy", userRequest: input.prompt,
+      files: snapshot.files, providers: this.providers.views(), modelConfigs: this.providers.modelConfigs.list(true).items, previousOutcome,
+      history, historySource: rebuilding ? "explicit_rebuild" : undefined, userRequest: input.prompt,
     });
     const prompt = composeAuthoringPrompt(this.providers.views(), context);
     const turn = this.store.command(`turn:${id}`, input.requestId, input, () => this.store.transaction(() => {
@@ -190,7 +192,9 @@ export class AuthoringService {
       const conversation = turn.conversationId ? this.store.conversation(turn.conversationId) : undefined;
       const setting = this.providers.setting(turn.providerId);
       const adapter = this.providers.adapter(turn.providerId);
-      const useNativeConversation = !!conversation && conversation.mode === "multi" && transportOf(setting.config) === "native" && !!adapter.sessionProvider;
+      transportOf(setting.config);
+      check(adapter.sessionProvider, "PROTOCOL_UNSUPPORTED", "Provider 不支持原生会话协议");
+      const useNativeConversation = !!conversation && conversation.mode === "multi";
       let result;
       if (useNativeConversation) {
         const workspace = this.store.files.path(`agent-workspaces/${conversation!.id}`);
@@ -272,7 +276,8 @@ export class AuthoringService {
     });
     try {
       const original = this.store.files.readTree(draft.artifactPath).files;
-      const definition = await this.providers.freeze(readDefinition(original));
+      const definition = readDefinition(original);
+      this.providers.modelConfigs.resolveWorkflow(definition);
       const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
       const compiled = await compileScripts(files, definition), layout = readLayout(files);
       this.store.assertWorkflowScriptContracts(definition);
@@ -288,7 +293,7 @@ export class AuthoringService {
           check(!this.store.one("SELECT id FROM workflows WHERE id=?", workflowId), "IDENTITY_CONFLICT", "工作流 ID 已存在");
           this.store.exec("INSERT INTO workflows VALUES(?,?,NULL,?,?)", workflowId, definition.name, now, now);
         }
-        for (const node of definition.nodes) if (node.type === "agent") this.providers.resolve(node.config);
+        this.providers.modelConfigs.resolveWorkflow(definition);
         const versionId = randomUUID(), number = Number(this.store.one("SELECT coalesce(max(version_no),0)+1 AS n FROM workflow_versions WHERE workflow_id=?", workflowId)!.n);
         this.store.exec("INSERT INTO workflow_versions VALUES(?,?,?,?,?,?,?,?)", versionId, workflowId, number, json(definition), json(layout), tree.path, tree.hash, now);
         this.store.exec("UPDATE workflows SET name=?,current_version_id=?,updated_at=? WHERE id=?", definition.name, versionId, now, workflowId);

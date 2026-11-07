@@ -109,7 +109,7 @@ export class ConversationService {
     const current = this.store.currentConversation(draftId);
     const setting = this.providers.setting(selection.providerId);
     const transport = transportOf(setting.config);
-    const contextMode = mode === "single" ? "isolated" : transport === "native" ? "native" : "reconstructed";
+    const contextMode = mode === "single" ? "isolated" : "native";
     const matches = (candidate: ConversationRecord) => candidate.providerId === selection.providerId && candidate.modelId === selection.modelId
       && candidate.mode === mode && candidate.transport === transport && candidate.connectionFingerprint === connectionFingerprint(setting);
     if (selection.conversationId !== undefined && selection.conversationId !== null) {
@@ -158,7 +158,7 @@ export class ConversationService {
     const transport = transportOf(setting.config);
     return {
       id: randomUUID(), draftId, mode,
-      contextMode: mode === "single" ? "isolated" : transport === "native" ? "native" : "reconstructed",
+      contextMode: mode === "single" ? "isolated" : "native",
       status: "current", providerId, providerRevision, modelId, transport,
       connectionFingerprint: connectionFingerprint(setting), cliVersion: null, backendRef: null,
       backendGeneration: 0, syncedRevision: null, rebuildFromId, title: null, archivedAt: null,

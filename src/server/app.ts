@@ -41,7 +41,7 @@ function cursor(value: unknown) {
 export function createApp(store: Store, suppliedProviders?: ProviderRegistry, sessionManager?: SessionManager) {
   // 常驻会话连接管理器：全局进程配额、空闲回收与连接代次（§23.1）。
   const manager = sessionManager ?? new SessionManager(agentLimits());
-  const providers = suppliedProviders ?? new ProviderRegistry(store, manager)
+  const providers = suppliedProviders ?? new ProviderRegistry(store)
     .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
     .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
   const bridge = new WebBridgeGateway(new WebBridgeClient(store.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(store.root));
@@ -134,6 +134,14 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     return bridge.call(input.application, input.tool, input.args, { requestId: input.requestId, timeoutMs: input.timeoutMs });
   });
   app.get("/api/providers", async () => ({ items: providers.views() }));
+  app.get<{ Querystring: { enabled?: string } }>("/api/agent-model-configs", async request => {
+    check(request.query.enabled === undefined || ["true", "false"].includes(request.query.enabled), "INVALID_REQUEST", "启用状态无效");
+    return providers.modelConfigs.list(request.query.enabled === undefined ? undefined : request.query.enabled === "true");
+  });
+  app.post("/api/agent-model-configs", async (request, reply) => reply.code(201).send(providers.modelConfigs.create(request.body)));
+  app.get<{ Params: { id: string } }>("/api/agent-model-configs/:id", async request => providers.modelConfigs.view(request.params.id));
+  app.patch<{ Params: { id: string } }>("/api/agent-model-configs/:id", async request => providers.modelConfigs.update(request.params.id, request.body));
+  app.get<{ Params: { id: string } }>("/api/agent-model-configs/:id/references", async request => providers.modelConfigs.references(request.params.id));
   app.patch<{ Params: { id: string } }>("/api/providers/:id", async request => providers.update(request.params.id, request.body));
   app.post<{ Params: { id: string } }>("/api/providers/:id/detect", async request => providers.detect(request.params.id));
   app.post<{ Params: { id: string } }>("/api/providers/:id/models/refresh", async request => providers.models(request.params.id));
@@ -189,7 +197,9 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   app.post<{ Params: { id: string } }>("/api/scripts/:id/archive", async request => {
     const result = store.archiveScript(request.params.id); scriptAgent.cancelScript(request.params.id); return result;
   });
-  app.get<{ Params: { id: string }; Querystring: { offset?: string; limit?: string } }>("/api/scripts/:id/agent/turns", async request => scriptAgent.list(request.params.id, cursor(request.query.offset), request.query.limit === undefined ? 20 : cursor(request.query.limit)));
+  app.get<{ Params: { id: string } }>("/api/scripts/:id/agent/conversations", async request => scriptAgent.conversations(request.params.id));
+  app.post<{ Params: { id: string; cid: string } }>("/api/scripts/:id/agent/conversations/:cid/archive", async request => scriptAgent.archiveConversation(request.params.id, request.params.cid));
+  app.get<{ Params: { id: string }; Querystring: { offset?: string; limit?: string; conversationId?: string } }>("/api/scripts/:id/agent/turns", async request => scriptAgent.list(request.params.id, cursor(request.query.offset), request.query.limit === undefined ? 20 : cursor(request.query.limit), request.query.conversationId));
   app.post<{ Params: { id: string } }>("/api/scripts/:id/agent/turns", async (request, reply) => {
     const input = body<ScriptAgentRequest>(request.body, {
       prompt: { type: "string", minLength: 1, maxLength: 100000 }, providerId: { type: "string", minLength: 1 },

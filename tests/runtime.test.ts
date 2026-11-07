@@ -244,8 +244,9 @@ test("draft tests freeze Agent models, reject revisions changed during preparati
     return { output: { action: "skip" }, providerId: provider.id, modelId: request.modelId };
   };
   const run = await runner.createDraft(draft.id, 1, {}, randomUUID());
-  const frozen = runner.snapshot(run.id).execution.definition.nodes.find(node => node.id === "b")!;
-  assert.equal(frozen.config.modelId, "test-model");
+  const frozen = runner.snapshot(run.id);
+  assert.equal(frozen.execution.definition.defaults?.agent?.agentConfigId, "test-agent-config");
+  assert.equal(frozen.agentBindings.find(binding => binding.nodeId === "b")!.modelId, "test-model");
   await until(() => typeof release === "function");
   const queued = await runner.createDraft(draft.id, 1, {}, randomUUID());
   runner.cancel(queued.id);
@@ -253,10 +254,10 @@ test("draft tests freeze Agent models, reject revisions changed during preparati
   runner.cancel(run.id); release();
   await until(() => store.run(run.id).status === "cancelled");
   assert.equal(store.nodes(run.id).find(node => node.nodeId === "c")!.skipReason, "run_terminated");
-  const freeze = providers.freeze.bind(providers);
-  providers.freeze = async workflow => {
-    const result = await freeze(workflow);
-    await authoring.update(draft.id, 1, authoring.snapshot(draft.id).files);
+  const saveTree = store.files.saveTree.bind(store.files);
+  store.files.saveTree = (...args: Parameters<typeof saveTree>) => {
+    const result = saveTree(...args);
+    store.exec("UPDATE drafts SET revision=revision+1 WHERE id=?", draft.id);
     return result;
   };
   await assert.rejects(runner.createDraft(draft.id, 1, {}, randomUUID()), /草稿已更新/);

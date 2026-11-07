@@ -15,7 +15,7 @@ const bindingSchema = {
   ],
 };
 ajv.addSchema(bindingSchema);
-const choiceSchema = { type: "object", properties: { providerId: { type: "string", minLength: 1 }, modelId: { type: "string", minLength: 1 } }, additionalProperties: false };
+const choiceSchema = { type: "object", properties: { agentConfigId: { type: "string", minLength: 1, maxLength: 200 } }, additionalProperties: false };
 const validateShape = ajv.compile({
   type: "object", required: ["formatVersion", "id", "name", "inputSchema", "outputSchema", "entryNodeId", "nodes", "edges", "result"],
   properties: {
@@ -33,7 +33,7 @@ const validateShape = ajv.compile({
 const timeout = { type: "integer", minimum: 1, maximum: 1800000 };
 function validateConfig(node: WorkflowNode) {
   const properties = node.type === "agent"
-    ? { providerId: { type: "string", minLength: 1 }, modelId: { type: "string", minLength: 1 }, prompt: { type: "string", minLength: 1, maxLength: 100000 }, timeoutMs: timeout }
+    ? { agentConfigId: { type: "string", minLength: 1, maxLength: 200 }, prompt: { type: "string", minLength: 1, maxLength: 100000 }, timeoutMs: timeout }
     : node.type === "switch"
       ? { cases: { type: "array", maxItems: 100, items: { type: "object", required: ["label", "value"], properties: { label: { type: "string", minLength: 1 }, value: { type: ["string", "number", "boolean", "null"] } }, additionalProperties: false } }, defaultLabel: { type: "string", minLength: 1 } }
       : node.type === "script"
@@ -43,7 +43,6 @@ function validateConfig(node: WorkflowNode) {
           : { script: { type: "string", pattern: "^scripts/" }, timeoutMs: timeout, ...(node.type === "shell" ? { resultMode: { enum: ["process", "json"] } } : {}) };
   const required = node.type === "agent" ? ["prompt"] : node.type === "switch" ? ["cases", "defaultLabel"] : node.type === "script" ? ["scriptId", "scriptVersionId"] : node.type === "web-bridge" ? ["application", "tool"] : ["script"];
   assertSchema(node.config, { type: "object", required, properties, additionalProperties: false }, `${node.id} 配置`);
-  if (node.config.modelId) check(!/^\s*-|[\0\r\n]/.test(node.config.modelId), "INVALID_MODEL", "模型 ID 无效");
 }
 export function assertSchema(value: unknown, schema: JsonSchema, context = "值") {
   let validate;
@@ -111,6 +110,7 @@ export function validateWorkflow(value: unknown): Workflow {
   });
   for (const node of graph.nodes) {
     validateConfig(node);
+    if (node.type === "agent") check(node.config.agentConfigId || graph.defaults?.agent?.agentConfigId, "AGENT_CONFIG_REQUIRED", `${node.name} 请选择 Agent 模型配置或设置工作流默认配置`);
     const outgoing = graph.edges.filter(e => e.from === node.id);
     if (node.type === "switch") {
       const cases = node.config.cases!, labels = [...cases.map(c => c.label), node.config.defaultLabel!];

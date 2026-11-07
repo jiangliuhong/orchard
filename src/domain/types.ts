@@ -7,6 +7,18 @@ export type Binding =
   | { source: "object"; properties: Record<string, Binding> }
   | { source: "array"; items: Binding[] };
 export interface AgentChoice { providerId?: string; modelId?: string }
+export interface AgentConfigReference { agentConfigId?: string }
+export interface AgentModelConfig {
+  id: string; name: string; description: string; providerId: string; modelId: string;
+  enabled: boolean; revision: number; createdAt: number; updatedAt: number;
+}
+export interface AgentModelConfigView extends AgentModelConfig {
+  available: boolean; unavailableReason?: string; workflowCount: number; draftCount: number;
+}
+export interface RunAgentBinding {
+  nodeId: string; configId: string; configRevision: number; name: string;
+  providerId: string; modelId: string; providerRevision: number;
+}
 export interface WorkflowNode {
   id: string;
   name: string;
@@ -19,8 +31,7 @@ export interface WorkflowNode {
     scriptId?: string;
     scriptVersionId?: string;
     resultMode?: "process" | "json";
-    providerId?: string;
-    modelId?: string;
+    agentConfigId?: string;
     prompt?: string;
     cases?: { label: string; value: Scalar }[];
     defaultLabel?: string;
@@ -38,7 +49,7 @@ export interface Workflow {
   inputSchema: JsonSchema;
   outputSchema: JsonSchema;
   entryNodeId: string;
-  defaults?: { agent?: AgentChoice };
+  defaults?: { agent?: AgentConfigReference };
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   result: Binding;
@@ -90,11 +101,11 @@ export interface ProviderSetting {
 }
 export interface ProviderView extends ProviderSetting {
   name: string; capabilities: ProviderCapabilities; configSchema: JsonSchema;
-  readiness: { state: "ready" | "unavailable" | "unknown"; reason?: string; version?: string; transport?: "legacy" | "native"; errorCode?: string };
+  readiness: { state: "ready" | "unavailable" | "unknown"; reason?: string; version?: string; transport?: "native"; errorCode?: string };
 }
 // ---- Agent 对话契约（设计文档 §18.1）；历史管理扩展见 history-feature.md ----
 export type ConversationMode = "single" | "multi";
-export type ContextMode = "isolated" | "native" | "reconstructed";
+export type ContextMode = "isolated" | "native";
 export type ConversationStatus = "current" | "idle" | "archived" | "needs_rebuild";
 export type ConnectionState = "absent" | "starting" | "ready" | "stopping" | "broken";
 export type AuthoringTurnStatus =
@@ -110,7 +121,7 @@ export interface ConversationView {
   providerId: string;
   providerRevision: number;
   modelId: string;
-  transport: "native" | "legacy";
+  transport: "native";
   cliVersion: string | null;
   syncedRevision: number | null;
   rebuildFromId: string | null;

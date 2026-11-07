@@ -1,6 +1,6 @@
 # 流程格式和脚本协议
 
-工作流由 `workflow.json`、可选 `layout.json` 和 `scripts/` 中的脚本构成。示例完整文件位于 `examples/decision/`，该示例中的 Provider / 模型 ID 需要按本地配置修改后发布。
+工作流由 `workflow.json`、可选 `layout.json` 和 `scripts/` 中的脚本构成。示例完整文件位于 `examples/decision/`，需要将示例中的 `agentConfigId` 替换为本地创建的 Agent 模型配置 ID 后发布。
 
 ## 定义
 
@@ -11,12 +11,12 @@
 | 类型 | config | 输出 |
 | --- | --- | --- |
 | `code.nodejs` | `script`，可选 `timeoutMs` | 默认导出函数的 JSON 返回值 |
-| `agent` | `prompt`，可选 `providerId` / `modelId` / `timeoutMs` | 经输出 Schema 校验的 JSON |
+| `agent` | `prompt`，可选 `agentConfigId` / `timeoutMs` | 经输出 Schema 校验的 JSON |
 | `shell` | `script`，可选 `resultMode` / `timeoutMs` | 默认 `{stdout,stderr,exitCode}`；`json` 模式读取结果文件 |
 | `script` | `scriptId`、`scriptVersionId`，可选 `timeoutMs` | 固定脚本版本的输出；运行时校验该版本 Schema |
 | `switch` | `cases: [{label,value}]`、`defaultLabel` | `{edgeId,value,reason}` |
 
-默认 Agent 选择位于 `defaults.agent`。发布时按节点、工作流默认、Provider 默认模型解析有效选择，保存明确 Provider / 模型。覆盖 Provider 时不会继承另一个 Provider 的模型。
+默认 Agent 引用位于 `defaults.agent.agentConfigId`，节点通过 `config.agentConfigId` 整体覆盖，缺省继承工作流默认配置。Agent 节点缺少有效配置来源时校验失败；不接受直接的 `providerId`、`modelId` 字段。发布保留配置 ID，新建运行时统一解析并保存配置修订和明确模型，详见[Agent 模型配置](../product/agent-model-configs.md)。
 
 连线包含 `id`、`from`、`to`，`to: null` 表示结束。普通节点至多一个后继，也可以无后继表示结束。Switch 每个 case 和默认分支都需要唯一 label 连线，按 JSON 标量等值比较，重复条件会被拒绝。未匹配进入默认分支。
 

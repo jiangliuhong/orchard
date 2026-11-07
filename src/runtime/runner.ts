@@ -17,17 +17,16 @@ export class GraphRunner {
   private closing = false;
   constructor(readonly store: Store, readonly providers: ProviderRegistry, readonly webBridge?: WebBridgeGateway) { this.wake(); }
   create(versionId: string, input: unknown, requestId: string) {
-    const version = this.store.version(versionId);
-    assertSchema(input, version.definition.inputSchema, "工作流输入");
-    this.store.assertWorkflowScripts(version.definition, true);
-    for (const node of version.definition.nodes) {
-      if (node.type === "agent") this.providers.resolve(node.config);
-      if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
-    }
     const result = this.store.command(`run:${versionId}`, requestId, input, () => {
+      const version = this.store.version(versionId);
+      assertSchema(input, version.definition.inputSchema, "工作流输入");
+      this.store.assertWorkflowScripts(version.definition, true);
+      const bindings = this.providers.modelConfigs.resolveWorkflow(version.definition);
+      for (const node of version.definition.nodes) if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
       const id = randomUUID(), now = Date.now();
       this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
       for (const node of version.definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+      this.providers.modelConfigs.saveBindings(id, bindings);
       this.store.append("run", id, "run.queued", { versionId });
       return this.store.run(id);
     });
@@ -47,7 +46,7 @@ export class GraphRunner {
     }
     const draft = this.editableDraft(draftId, revision);
     const original = this.store.files.readTree(draft.artifactPath).files;
-    const definition = await this.providers.freeze(readDefinition(original));
+    const definition = readDefinition(original);
     assertSchema(input, definition.inputSchema, "工作流输入");
     const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
     readLayout(files);
@@ -55,13 +54,14 @@ export class GraphRunner {
     const result = this.store.command(scope, requestId, command, () => {
       this.editableDraft(draftId, revision);
       this.store.assertWorkflowScripts(definition);
+      const bindings = this.providers.modelConfigs.resolveWorkflow(definition);
       for (const node of definition.nodes) {
-        if (node.type === "agent") this.providers.resolve(node.config);
         if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
       }
       const id = randomUUID(), now = Date.now();
       this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
       for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+      this.providers.modelConfigs.saveBindings(id, bindings);
       this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
       return this.store.run(id);
     });
@@ -76,7 +76,7 @@ export class GraphRunner {
   snapshot(id: string) {
     return this.store.transaction(() => {
       const run = this.store.run(id);
-      return { ...run, version: run.workflowVersionId ? this.store.version(run.workflowVersionId) : null, execution: this.execution(run), nodes: this.store.nodes(id), attempts: this.store.attempts(id), lastSequence: this.store.lastSequence("run", id) };
+      return { ...run, version: run.workflowVersionId ? this.store.version(run.workflowVersionId) : null, execution: this.execution(run), agentBindings: this.providers.modelConfigs.bindings(id), nodes: this.store.nodes(id), attempts: this.store.attempts(id), lastSequence: this.store.lastSequence("run", id) };
     });
   }
   cancel(id: string) {
@@ -116,6 +116,8 @@ export class GraphRunner {
       const run = this.store.run(id), execution = this.execution(run);
       const tree = this.store.files.readTree(execution.artifactPath), workflow = readDefinition(tree.files);
       check(json(workflow) === json(execution.definition), "ARTIFACT_MISMATCH", "流程定义与运行快照不一致");
+      const bindings = new Map(this.providers.modelConfigs.bindings(id).map(binding => [binding.nodeId, binding]));
+      for (const node of workflow.nodes) if (node.type === "agent") check(bindings.has(node.id), "AGENT_BINDING_MISSING", `${node.name} 缺少运行模型绑定`);
       this.store.transaction(() => {
         check(this.store.run(id).status === "queued", "RUN_ENDED", "运行已结束");
         this.store.exec("UPDATE runs SET status='running',started_at=? WHERE id=?", Date.now(), id);
@@ -126,6 +128,7 @@ export class GraphRunner {
       while (next !== null) {
         signal.throwIfAborted();
         const node = workflow.nodes.find(n => n.id === next)!;
+        const agentBinding = bindings.get(node.id);
         active = this.store.nodes(id).find(n => n.nodeId === node.id)!; attemptId = randomUUID();
         const value = resolveBinding(node.input, run.input, outputs);
         assertSchema(value, node.inputSchema ?? true, `${node.id} 输入`);
@@ -134,10 +137,12 @@ export class GraphRunner {
           this.store.exec("UPDATE runs SET active_node_id=? WHERE id=?", node.id, id);
           const inputRef = this.store.reference(value), now = Date.now();
           this.store.exec("UPDATE node_runs SET status='running',input_ref=?,started_at=? WHERE id=?", inputRef, now, active!.id);
-          this.store.exec("INSERT INTO node_attempts(id,node_run_id,attempt_no,status,execution_json,input_ref,started_at) VALUES(?,?,1,'running',?,?,?)", attemptId!, active!.id, json({ nodeType: node.type, config: node.config }), inputRef, now);
+          this.store.exec("INSERT INTO node_attempts(id,node_run_id,attempt_no,status,execution_json,input_ref,started_at) VALUES(?,?,1,'running',?,?,?)", attemptId!, active!.id, json({ nodeType: node.type, config: node.config, ...(agentBinding ? { agentModelConfig: agentBinding } : {}) }), inputRef, now);
           this.store.append("run", id, "node.started", { input: value }, node.id, attemptId);
         });
+        let actualProviderRevision: number | undefined;
         const emit = (type: string, payload: unknown) => {
+          if (type === "provider.started") actualProviderRevision = (payload as { revision?: number }).revision;
           if (!signal.aborted) this.store.append("run", id, type, payload, node.id, attemptId);
         };
         let output: unknown, execution: unknown, route: NodeRun["route"];
@@ -150,10 +155,10 @@ export class GraphRunner {
           const result = node.type === "web-bridge"
             ? await this.webBridgeCall(node, value, signal)
             : node.type === "agent"
-            ? await this.providers.run(node.config, {
+            ? await this.providers.run(agentBinding!, {
               signal, cwd: this.store.root, prompt: `${node.config.prompt}\nNode input (data):\n${json(value)}`, schema: node.outputSchema, timeoutMs: node.config.timeoutMs,
               emit: event => emit(event.type, event.payload),
-            }).then(result => ({ output: result.output, execution: { providerId: result.providerId, modelId: result.modelId, modelSource: result.modelSource, usage: result.usage } }))
+            }).then(result => ({ output: result.output, execution: { agentModelConfig: agentBinding, providerId: result.providerId, modelId: result.modelId, providerRevision: actualProviderRevision, modelSource: result.modelSource, usage: result.usage } }))
             : node.type === "script"
               ? await this.libraryScript(node, value, signal)
               : await this.script(id, attemptId, node, value, tree.compiled[node.id], tree.files[node.config.script!], signal, emit);

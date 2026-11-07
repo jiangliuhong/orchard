@@ -15,7 +15,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error?: string 
 export default function App() {
   const path = window.location.pathname, parts = path.split("/").filter(Boolean), studio = parts[0] === "drafts";
   const page = parts[0] === "scripts" ? parts[1] ? <ScriptPage key={parts[1]} id={parts[1]} /> : <ScriptsPage /> : parts[0] === "settings" ? <SettingsPage /> : parts[0] === "drafts" && parts[1] ? <DraftPage key={parts[1]} id={parts[1]} /> : parts[0] === "workflows" && parts[1] ? <WorkflowPage key={parts[1]} id={parts[1]} /> : parts[0] === "runs" && parts[1] ? <RunPage key={parts[1]} id={parts[1]} /> : parts[0] === "runs" ? <RunsPage /> : <WorkflowsPage />;
-  return <div className={`app-shell ${studio ? "studio-shell" : ""}`}>
+  return <div className={`app-shell ${studio ? "studio-shell" : ""} ${parts[0] === "scripts" && parts[1] ? "script-shell" : ""}`}>
     <header className="app-header">
       <a href="/" className="brand"><Leaf size={21} /><span>orchard</span></a>
       <nav className="app-nav" aria-label="主导航">

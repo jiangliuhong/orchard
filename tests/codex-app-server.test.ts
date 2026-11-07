@@ -52,7 +52,6 @@ test("handshake order, no-tool policy args, structured output and backend turn i
   // 握手顺序：initialize → initialized → thread/start → turn/start。
   const methods = log.lines.map(line => JSON.parse(line) as { method?: string }).map(entry => entry.method).filter(Boolean);
   assert.deepEqual(methods.slice(0, 4), ["initialize", "initialized", "thread/start", "turn/start"]);
-  // 无工具边界：与 legacy exec 一致的配置覆盖必须随进程启动传入。
   for (const pair of [["-c", "mcp_servers={}"], ["-c", "notify=[]"], ["-c", 'web_search="disabled"'], ["-c", "features.shell_tool=false"], ["-c", "features.browser_use=false"]]) {
     const index = log.argv.indexOf(pair[0]!, log.argv.includes(pair[1]!) ? log.argv.indexOf(pair[1]!) - 1 : 0);
     assert.ok(index >= 0 && log.argv[index + 1] === pair[1], `missing tool policy override ${pair.join(" ")} in ${JSON.stringify(log.argv)}`);
@@ -266,29 +265,27 @@ test("native readiness reports explicit failure codes without falling back silen
   assert.equal(readiness.state, "unavailable");
   assert.equal(readiness.transport, "native");
   assert.ok(readiness.errorCode === "TIMEOUT" || readiness.errorCode === "PROTOCOL_UNSUPPORTED");
-  // 原生不可用不等于 legacy 不可用：切回兼容模式仍可就绪。
-  providers.update("codex-cli", { config: { transport: "legacy" } });
-  assert.equal((await providers.detect("codex-cli")).state, "ready");
+  assert.throws(() => providers.update("codex-cli", { config: { transport: "legacy" } }));
 });
 
-test("legacy transport keeps using the one-shot CLI path unchanged", async t => {
+test("default Codex transport uses native and propagates session failure", async t => {
   const { store, providers } = setup(t);
   t.after(() => store.close());
-  const { executable } = installFixture(t, "codex-server.mjs", "legacy-unused");
+  const { executable } = installFixture(t, "codex-server.mjs", "default");
   const manager = new SessionManager(agentLimits({ probeCacheMs: 0 }));
   t.after(() => manager.close());
   const adapter = codexNativeAdapter(manager, manager.limits);
   let nativeUsed = false;
   providers.register(new CliProvider("codex-cli", {
-    native: { ...adapter, sessionProvider: { ...adapter.sessionProvider, async openSession() { nativeUsed = true; throw new Error("native must not be used"); } } },
+    native: { ...adapter, sessionProvider: { ...adapter.sessionProvider, async openSession() { nativeUsed = true; throw new Error("session failed"); } } },
   }), executable);
-  providers.update("codex-cli", { enabled: true, defaultModel: "m" }); // 未设置 transport → 默认 legacy
+  providers.update("codex-cli", { enabled: true, defaultModel: "m" });
   assert.equal((await providers.detect("codex-cli")).state, "ready");
-  assert.equal(providers.views().find(p => p.id === "codex-cli")!.capabilities.sessions, "none");
+  assert.notEqual(providers.views().find(p => p.id === "codex-cli")!.capabilities.sessions, "none");
   await assert.rejects(providers.run({ providerId: "codex-cli", modelId: "m" }, {
     cwd: store.root, prompt: "anything", signal: new AbortController().signal, emit: () => {},
-  }));
-  assert.equal(nativeUsed, false);
+  }), /session failed/);
+  assert.equal(nativeUsed, true);
 });
 
 test("outputSchema is only sent when the host schema satisfies codex strict structured output", async t => {

@@ -7,6 +7,7 @@
 - [页面使用说明](./product/interface.md)
 - [对话创作与发布](./product/authoring.md)
 - [脚本库、Agent 创作与版本复用](./product/script-library.md)
+- [Agent 模型配置与工作流引用](./product/agent-model-configs.md)
 
 ## 技术规范
 
@@ -21,8 +22,12 @@
 
 ## 决策记录
 
+- [仅支持原生协议的设计与数据库迁移方案](../features/2026-11-06-native-only/design.md)
+
 - [草稿运行测试设计](./decisions/draft-testing-design.md)
 
 功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（设计中）](../features/2026-11-06-data-migration/design.md)。
+
+- [Agent 模型配置与工作流动态引用](../features/2026-11-07-agent-model-configs/design.md)
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

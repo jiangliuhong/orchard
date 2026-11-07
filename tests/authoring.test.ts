@@ -22,7 +22,8 @@ test("authoring applies files, persists conversation and publishes explicitly wi
   const version = await authoring.publish(draft.id, 1, "publish");
   assert.equal((await authoring.publish(draft.id, 1, "publish")).id, version.id);
   assert.equal(store.runs().length, 0);
-  assert.equal(version.definition.nodes.find(n => n.id === "b")!.config.modelId, "test-model");
+  assert.equal(version.definition.defaults?.agent?.agentConfigId, "test-agent-config");
+  assert.equal(Object.hasOwn(version.definition.nodes.find(n => n.id === "b")!.config, "modelId"), false);
   assert.throws(() => store.exec("UPDATE workflow_versions SET definition_json='{}' WHERE id=?", version.id), /immutable/);
 });
 test("invalid graph remains a repairable draft while invalid paths never commit", async t => {

@@ -6,7 +6,7 @@ import { canonicalJson, digest, FileStore } from "../src/persistence/files.js";
 import { Store } from "../src/persistence/store.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { join } from "node:path";
-import { RUN_SCHEMA, MIGRATE_V2_TO_V3 } from "../src/persistence/schema.js";
+import { RUN_SCHEMA, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6 } from "../src/persistence/schema.js";
 
 const legacyRunSchema = `
 CREATE TABLE runs (
@@ -16,6 +16,110 @@ CREATE TABLE runs (
  created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER
 );
 `;
+
+function versionSixDatabase(root: string) {
+  const database = new DatabaseSync(join(root, "workbench.db"));
+  database.exec(SCHEMA_V2);
+  database.exec(MIGRATE_V2_TO_V3);
+  database.exec(MIGRATE_V3_TO_V4);
+  database.exec(MIGRATE_V4_TO_V5);
+  database.exec(MIGRATE_V5_TO_V6);
+  return database;
+}
+
+test("v6 native-only migration preserves history, invalidates old sessions and guards archived restoration", t => {
+  const root = temporary(t), database = versionSixDatabase(root);
+  database.exec(`INSERT INTO provider_settings VALUES('codex-cli',1,'{"executable":"/test/codex"}','[]','model',3,123);
+    INSERT INTO provider_settings VALUES('pi-cli',1,'{"executable":"/test/pi","transport":"legacy"}','[]','model',4,456);`);
+  const insert = (sql: string, ...params: SQLInputValue[]) => database.prepare(sql).run(...params);
+  const records = [
+    ["old-current", "multi", "current", "legacy"],
+    ["old-idle", "multi", "idle", "legacy"],
+    ["old-archived", "multi", "archived", "legacy"],
+    ["old-needs", "multi", "needs_rebuild", "legacy"],
+    ["old-single", "single", "current", "legacy"],
+    ["native-current", "multi", "current", "native"],
+  ];
+  for (const [id, mode, status, transport] of records) {
+    insert("INSERT INTO drafts(id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES(?,0,'unused','{}','draft',10,20)", id!);
+    insert(`INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,
+      transport,connection_fingerprint,cli_version,backend_ref_json,backend_generation,synced_revision,title,archived_at,created_at,updated_at,last_used_at)
+      VALUES(?,?,?,?,?,'codex-cli',3,'model',?,'fingerprint','fixture',?,4,8,'原有标题',?,10,20,30)`,
+    id!, id!, mode!, mode === "single" ? "isolated" : transport === "native" ? "native" : "reconstructed", status!, transport!,
+    JSON.stringify({ version: 1, kind: "codex", threadId: id, cwd: "/tmp" }), status === "archived" ? 15 : null);
+  }
+  insert("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,created_at,conversation_id) VALUES('turn','old-current','codex-cli','model',3,'succeeded',0,10,'old-current')");
+  insert("INSERT INTO authoring_messages(id,draft_id,turn_id,sequence,role,content_json,created_at,conversation_id) VALUES('message','old-current','turn',1,'user',?,10,'old-current')", JSON.stringify({ text: "保留历史" }));
+  database.close();
+  const store = new Store(root);
+  t.after(() => { if (store.db.isOpen) store.close(); });
+  assert.equal(store.one("PRAGMA user_version")!.user_version, 8);
+  assert.deepEqual(store.all("PRAGMA foreign_key_check"), []);
+  assert.equal(store.all("SELECT id FROM agent_conversations").length, records.length);
+  for (const id of ["old-current", "old-idle", "old-needs"]) assert.equal(store.conversation(id)!.status, "needs_rebuild");
+  const previous = store.conversation("old-current")!;
+  assert.equal(previous.transport, "native");
+  assert.equal(previous.contextMode, "native");
+  assert.equal(previous.backendRef, null);
+  assert.equal(previous.backendGeneration, 5);
+  assert.equal(previous.syncedRevision, null);
+  assert.equal(previous.connectionFingerprint, "");
+  assert.equal(previous.title, "原有标题");
+  assert.equal(previous.createdAt, 10);
+  assert.equal(previous.updatedAt, 20);
+  assert.equal(previous.lastUsedAt, 30);
+  assert.equal(store.conversation("old-single")!.contextMode, "isolated");
+  assert.equal(store.conversation("old-single")!.status, "current");
+  const native = store.conversation("native-current")!;
+  assert.equal(native.status, "current");
+  assert.equal(native.backendRef!.kind, "codex");
+  assert.equal(native.connectionFingerprint, "fingerprint");
+  assert.equal(native.backendGeneration, 4);
+  assert.equal(native.syncedRevision, 8);
+  assert.deepEqual(store.messages("old-current")[0]!.content, { text: "保留历史" });
+  assert.equal(store.turn("turn").conversationId, "old-current");
+  assert.equal(store.provider("codex-cli")!.config.executable, "/test/codex");
+  assert.equal(store.provider("codex-cli")!.config.transport, "native");
+  assert.equal(store.provider("codex-cli")!.revision, 4);
+  assert.equal(store.provider("pi-cli")!.config.transport, "native");
+  assert.equal(store.provider("pi-cli")!.revision, 5);
+  assert.equal(store.conversation("old-archived")!.status, "archived");
+  const restored = store.restoreConversation("old-archived", "old-archived");
+  assert.equal(restored.status, "needs_rebuild");
+  assert.equal(restored.archivedAt, 15);
+  assert.throws(() => store.exec("UPDATE agent_conversations SET transport='legacy' WHERE id='old-current'"), /CHECK/);
+  assert.throws(() => store.exec("UPDATE agent_conversations SET context_mode='reconstructed' WHERE id='old-current'"), /CHECK/);
+  assert.ok(store.migrationBackupPath);
+  const backup = new DatabaseSync(store.migrationBackupPath!, { readOnly: true });
+  try {
+    assert.equal(backup.prepare("PRAGMA user_version").get()!.user_version, 6);
+    assert.equal(backup.prepare("SELECT transport FROM agent_conversations WHERE id='old-current'").get()!.transport, "legacy");
+  } finally { backup.close(); }
+  store.close();
+  const reopened = new Store(root);
+  assert.equal(reopened.provider("codex-cli")!.revision, 4);
+  assert.equal(reopened.conversation("old-current")!.backendGeneration, 5);
+  reopened.close();
+});
+
+test("failed v6 native-only migration rolls back provider settings and table constraints", t => {
+  const root = temporary(t), database = versionSixDatabase(root);
+  database.exec("PRAGMA foreign_keys=OFF;");
+  database.exec(`INSERT INTO provider_settings VALUES('codex-cli',1,'{"executable":"/test/codex","transport":"legacy"}','[]','model',3,123);
+    INSERT INTO drafts(id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('draft',0,'unused','{}','draft',10,20);
+    INSERT INTO agent_conversations(id,draft_id,mode,context_mode,status,provider_id,provider_revision,model_id,transport,connection_fingerprint,rebuild_from_id,created_at,updated_at)
+      VALUES('old','draft','multi','reconstructed','current','codex-cli',3,'model','legacy','fp','missing',10,20);`);
+  database.close();
+  assert.throws(() => new Store(root), /升级外键校验失败/);
+  const original = new DatabaseSync(join(root, "workbench.db"));
+  try {
+    assert.equal(original.prepare("PRAGMA user_version").get()!.user_version, 6);
+    assert.equal(original.prepare("SELECT revision FROM provider_settings").get()!.revision, 3);
+    assert.equal(original.prepare("SELECT transport FROM agent_conversations").get()!.transport, "legacy");
+    assert.equal(original.prepare("SELECT name FROM sqlite_master WHERE name='agent_conversations_v7'").get(), undefined);
+    assert.match(String(original.prepare("SELECT sql FROM sqlite_master WHERE name='agent_conversations'").get()!.sql), /reconstructed/);
+  } finally { original.close(); }
+});
 
 // 冻结的 v2 库结构（git 历史快照，RUN_SCHEMA 不变），用于构造旧版本数据库做升级测试。
 const SCHEMA_V2 = `
@@ -83,9 +187,9 @@ PRAGMA application_id = 1331110449;
 PRAGMA user_version = 2;
 `;
 
-test("approved schema has sixteen tables and isolates unknown databases", t => {
+test("approved schema has nineteen tables and isolates unknown databases", t => {
   const root = temporary(t), store = new Store(root);
-  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, 16);
+  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, 19);
   assert.throws(() => new Store(root), /已有/); store.close();
   const unknownRoot = temporary(t), database = new DatabaseSync(join(unknownRoot, "workbench.db"));
   database.exec("CREATE TABLE old_data(id TEXT)"); database.close();
@@ -139,7 +243,7 @@ test("schema v1 upgrades atomically and preserves runs, node references, events,
   insert("INSERT INTO command_receipts(scope,request_id,request_hash,result_json,created_at) VALUES('migration-test','request',?,?,?)", digest(canonicalJson({})), JSON.stringify({ id: runId }), now);
   database.close();
   const upgraded = new Store(root);
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 6);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 8);
   assert.equal(upgraded.one("PRAGMA foreign_keys")!.foreign_keys, 1);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   assert.deepEqual(upgraded.run(runId), { id: runId, workflowVersionId: versionId, draftId: null, draftRevision: null, snapshotPath: null, status: "succeeded", input, output: { done: true }, activeNodeId: null, error: undefined, createdAt: now, startedAt: now, endedAt: now });
@@ -182,7 +286,7 @@ const turnColumns = (store: Store) =>
 const indexNames = (store: Store) =>
   store.all("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).sort();
 
-test("v2 databases upgrade to an equivalent v6 schema and old rows keep NULL associations", t => {
+test("v2 databases upgrade to an equivalent v7 schema and old rows keep NULL associations", t => {
   const root = temporary(t), now = Date.now();
   const legacyTurnId = randomUUID();
   const legacy = new DatabaseSync(join(root, "workbench.db"));
@@ -196,7 +300,7 @@ test("v2 databases upgrade to an equivalent v6 schema and old rows keep NULL ass
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 6);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 8);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // 旧行保留且关联为 NULL；不自动创建对话。
   assert.equal(upgraded.one("SELECT conversation_id FROM authoring_turns WHERE id=?", legacyTurnId)!.conversation_id, null);
@@ -231,7 +335,7 @@ test("conversation writes validate cross-draft and turn ownership, deletion clea
   const draftB = await authoring.create(undefined, randomUUID());
   const now = Date.now();
   const conversationId = randomUUID();
-  store.insertConversation({ id: conversationId, draftId: draftA.id, mode: "multi", contextMode: "reconstructed", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
+  store.insertConversation({ id: conversationId, draftId: draftA.id, mode: "multi", contextMode: "native", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
   const turnId = randomUUID();
   store.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,conversation_id,created_at) VALUES(?,?,?,'m',1,'succeeded',0,?,?)", turnId, draftA.id, "test-provider", conversationId, now);
   store.message(draftA.id, turnId, "user", { text: "ok" }, conversationId);
@@ -246,7 +350,7 @@ test("conversation writes validate cross-draft and turn ownership, deletion clea
   // 自引用重建链：删除草稿时置 NULL 后删除，不触发外键失败。
   const rebuildId = randomUUID();
   store.demoteCurrentConversation(draftA.id);
-  store.insertConversation({ id: rebuildId, draftId: draftA.id, mode: "multi", contextMode: "reconstructed", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: conversationId, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
+  store.insertConversation({ id: rebuildId, draftId: draftA.id, mode: "multi", contextMode: "native", status: "current", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: conversationId, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
   assert.doesNotThrow(() => store.deleteDraft(draftA.id));
   assert.equal(store.one("SELECT id FROM agent_conversations WHERE draft_id=?", draftA.id), undefined);
 });
@@ -283,7 +387,7 @@ test("recovery interrupts active turns and marks uncertain conversations needs_r
   assert.doesNotThrow(() => recovered.exec("INSERT INTO authoring_turns(id,draft_id,provider_id,model_id,provider_revision,status,base_revision,created_at) VALUES(?,?,'test-provider','m',1,'queued',0,?)", randomUUID(), draftId, Date.now()));
 });
 
-test("v3 databases upgrade to v6: rotation archived rows become idle, archived_at approximates, diagnostics coexist with current", t => {
+test("v3 databases upgrade to v7: old multi conversations require rebuilding and history remains", t => {
   const root = temporary(t), now = Date.now();
   const legacy = new DatabaseSync(join(root, "workbench.db"));
   legacy.exec(SCHEMA_V2);
@@ -301,19 +405,19 @@ test("v3 databases upgrade to v6: rotation archived rows become idle, archived_a
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 6);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 8);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // §4.1/§4.2：存量 archived 为轮换产物 → idle；archived_at 取迁移前 updated_at 近似。
   const archived = upgraded.conversation("c-archived")!;
-  assert.equal(archived.status, "idle");
+  assert.equal(archived.status, "needs_rebuild");
   assert.equal(archived.title, null);
   assert.equal(archived.archivedAt, now + 5000);
-  assert.equal(upgraded.conversation("c-current")!.status, "current");
+  assert.equal(upgraded.conversation("c-current")!.status, "needs_rebuild");
   assert.equal(upgraded.conversation("c-current")!.archivedAt, null);
   // needs_rebuild 诊断历史与 current 并存（索引谓词收窄为仅 current）。
-  upgraded.insertConversation({ id: "c-needs", draftId: "draft-v3", mode: "multi", contextMode: "reconstructed", status: "needs_rebuild", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
+  upgraded.insertConversation({ id: "c-needs", draftId: "draft-v3", mode: "multi", contextMode: "native", status: "needs_rebuild", providerId: "test-provider", providerRevision: 1, modelId: "test-model", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0, syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: now, lastUsedAt: null });
   assert.equal(upgraded.conversation("c-needs")!.status, "needs_rebuild");
-  assert.equal(upgraded.currentConversation("draft-v3")!.id, "c-current");
+  assert.equal(upgraded.currentConversation("draft-v3"), undefined);
   assert.equal(upgraded.userMessageText("c-archived", "first"), "旧会话首条");
   // 新库与升级库结构等价。
   const freshRoot = temporary(t), fresh = new Store(freshRoot); t.after(() => fresh.close());
@@ -325,8 +429,8 @@ test("conversation history state machine: demote, resume, archive, restore, rena
   const { store, authoring } = setup(t); t.after(() => store.close());
   const draft = await authoring.create(undefined, randomUUID());
   const insert = (id: string, status: "current" | "idle" | "archived" | "needs_rebuild") => store.insertConversation({
-    id, draftId: draft.id, mode: "multi", contextMode: "reconstructed", status, providerId: "test-provider", providerRevision: 1,
-    modelId: "test-model", transport: "legacy", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0,
+    id, draftId: draft.id, mode: "multi", contextMode: "native", status, providerId: "test-provider", providerRevision: 1,
+    modelId: "test-model", transport: "native", connectionFingerprint: "fp", cliVersion: null, backendRef: null, backendGeneration: 0,
     syncedRevision: null, rebuildFromId: null, title: null, archivedAt: null, createdAt: Date.now(), lastUsedAt: null,
   });
   insert("c1", "current");
