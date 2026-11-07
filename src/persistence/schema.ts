@@ -319,7 +319,7 @@ CREATE TABLE agent_conversations (
  last_used_at INTEGER,
  CHECK (
   (mode='single' AND context_mode='isolated')
-  OR (mode='multi' AND transport='native' AND context_mode='native')
+  OR (mode='multi' AND context_mode='native')
  ),
  CHECK (status != 'archived' OR archived_at IS NOT NULL)
 );

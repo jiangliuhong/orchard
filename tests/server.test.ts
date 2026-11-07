@@ -83,6 +83,7 @@ test("HTTP enforces local origins, body schemas, object ownership and event curs
 test("HTTP draft tests run without publishing and expose immutable execution snapshots", async t => {
   const { store, providers } = setup(t), { app, authoring } = createApp(store, providers);
   t.after(() => app.close());
+  await app.ready();
   const draft = await authoring.create(undefined, randomUUID());
   const url = `/api/drafts/${draft.id}/runs`, payload = { expectedRevision: 0, input: { hello: "draft" }, requestId: randomUUID() };
   const response = await app.inject({ method: "POST", url, payload });

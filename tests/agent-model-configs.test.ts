@@ -4,14 +4,20 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { setup, temporary, until } from "./helpers.js";
-import { Store } from "../src/persistence/store.js";
-import { AGENT_MODEL_SCHEMA, SCHEMA } from "../src/persistence/schema.js";
+import { TestStore as Store } from "./helpers.js";
+import { AGENT_MODEL_SCHEMA, SCHEMA, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8 } from "../src/persistence/schema.js";
+import { sql, initializationSql } from "../src/migrations/frozen.js";
 import { GraphRunner } from "../src/runtime/runner.js";
 import { createApp } from "../src/server/app.js";
 import { validateWorkflow } from "../src/domain/validation.js";
 import type { Workflow } from "../src/domain/types.js";
 
 const command = () => ({ requestId: randomUUID() });
+test("registered Agent migration SQL and initialization match the reviewed schema constants", () => {
+  assert.equal(sql[6], MIGRATE_V6_TO_V7);
+  assert.equal(sql[7], MIGRATE_V7_TO_V8);
+  assert.equal(initializationSql, SCHEMA);
+});
 function workflow(id: string): Workflow {
   return {
     formatVersion: 1, id, name: "具名模型工作流", inputSchema: true, outputSchema: true, entryNodeId: "first",

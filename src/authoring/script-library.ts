@@ -1,3 +1,4 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { Store } from "../persistence/store.js";
 import { check } from "../domain/errors.js";
 import { validateScript, type ScriptDefinition } from "../domain/scripts.js";
@@ -19,11 +20,15 @@ export class ScriptLibrary {
     }
   }
   private commit<T>(scope: string, requestId: string | undefined, input: unknown, action: () => T) {
-    return requestId === undefined ? this.store.transaction(action) : this.store.command(scope, requestId, input, action);
+    return configCoordinator(this.store).withWrite(() => {
+      return requestId === undefined ? this.store.transaction(action) : this.store.command(scope, requestId, input, action);
+    });
   }
   saveTree(definition: ScriptDefinition) {
-    const { files, ...manifest } = definition;
-    return this.store.files.saveScriptTree(files, { ...manifest, timeoutMs: definition.timeoutMs ?? 300000, resultMode: definition.resultMode ?? (definition.runtime === "shell" ? "process" : "json") });
+    return configCoordinator(this.store).withWrite(() => {
+      const { files, ...manifest } = definition;
+      return this.store.files.saveScriptTree(files, { ...manifest, timeoutMs: definition.timeoutMs ?? 300000, resultMode: definition.resultMode ?? (definition.runtime === "shell" ? "process" : "json") });
+    });
   }
   version(scriptId: string, versionId: string) {
     const version = this.store.scriptVersion(versionId), definition = this.store.scriptDefinition(scriptId, versionId);
@@ -38,44 +43,65 @@ export class ScriptLibrary {
     return { ...script, versions, draft: script.currentDraftVersionId ? this.version(scriptId, script.currentDraftVersionId) : null };
   }
   async create(input: ScriptDefinition & { requestId?: string }) {
-    check(input !== null && typeof input === "object" && !Array.isArray(input), "INVALID_SCRIPT", "脚本定义必须是对象");
-    const prior = this.replay<ReturnType<Store["createScript"]>>("script-create", input.requestId, input);
-    if (prior) return prior;
-    const definition = validateScript(input), validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
-    return this.commit("script-create", input.requestId, input, () => this.store.createScript(definition, tree.path, tree.hash, validation));
+    return configCoordinator(this.store).withActivity("ScriptLibrary.create", async () => {
+      check(input !== null && typeof input === "object" && !Array.isArray(input), "INVALID_SCRIPT", "脚本定义必须是对象");
+      const prior = this.replay<ReturnType<Store["createScript"]>>("script-create", input.requestId, input);
+      if (prior) return prior;
+      const definition = validateScript(input), validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
+      return this.commit("script-create", input.requestId, input, () => this.store.createScript(definition, tree.path, tree.hash, validation));
+    });
   }
   async update(scriptId: string, input: ScriptDefinition & { expectedRevision: number; expectedDraftVersionId?: string | null; requestId?: string }) {
-    check(input !== null && typeof input === "object" && !Array.isArray(input), "INVALID_SCRIPT", "脚本定义必须是对象");
-    check(input.id === undefined || input.id === scriptId, "IDENTITY_CONFLICT", "脚本身份不能修改", 409);
-    const scope = `script-update:${scriptId}`;
-    const prior = this.replay<ReturnType<Store["updateScriptDraft"]>>(scope, input.requestId, input);
-    if (prior) return prior;
-    check(Number.isInteger(input.expectedRevision) && input.expectedRevision >= 0, "INVALID_REQUEST", "草稿修订号无效");
-    const definition = validateScript({ ...input, id: scriptId }), validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
-    return this.commit(scope, input.requestId, input, () => {
-      const script = this.store.script(scriptId);
-      if (Object.hasOwn(input, "expectedDraftVersionId")) check(script.currentDraftVersionId === input.expectedDraftVersionId, "REVISION_CONFLICT", "草稿版本已改变，请刷新后重试", 409);
-      return this.store.updateScriptDraft(scriptId, input.expectedRevision, definition, tree.path, tree.hash, validation);
+    return configCoordinator(this.store).withActivity("ScriptLibrary.update", async () => {
+      check(input !== null && typeof input === "object" && !Array.isArray(input), "INVALID_SCRIPT", "脚本定义必须是对象");
+      check(input.id === undefined || input.id === scriptId, "IDENTITY_CONFLICT", "脚本身份不能修改", 409);
+      const scope = `script-update:${scriptId}`;
+      const prior = this.replay<ReturnType<Store["updateScriptDraft"]>>(scope, input.requestId, input);
+      if (prior) return prior;
+      check(Number.isInteger(input.expectedRevision) && input.expectedRevision >= 0, "INVALID_REQUEST", "草稿修订号无效");
+      const definition = validateScript({ ...input, id: scriptId }), validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
+      return this.commit(scope, input.requestId, input, () => {
+        const script = this.store.script(scriptId);
+        if (Object.hasOwn(input, "expectedDraftVersionId")) check(script.currentDraftVersionId === input.expectedDraftVersionId, "REVISION_CONFLICT", "草稿版本已改变，请刷新后重试", 409);
+        return this.store.updateScriptDraft(scriptId, input.expectedRevision, definition, tree.path, tree.hash, validation);
+      });
     });
   }
   async copy(scriptId: string, input: { id: string; name: string; versionId: string; requestId: string }) {
-    const scope = `script-copy:${scriptId}`, prior = this.replay<ReturnType<Store["createScript"]>>(scope, input.requestId, input);
-    if (prior) return prior;
-    const source = this.store.scriptDefinition(scriptId, input.versionId), definition = validateScript({ ...source, id: input.id, name: input.name });
-    const validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
-    return this.commit(scope, input.requestId, input, () => this.store.createScript(definition, tree.path, tree.hash, validation));
+    return configCoordinator(this.store).withActivity("ScriptLibrary.copy", async () => {
+      const scope = `script-copy:${scriptId}`, prior = this.replay<ReturnType<Store["createScript"]>>(scope, input.requestId, input);
+      if (prior) return prior;
+      const source = this.store.scriptDefinition(scriptId, input.versionId), definition = validateScript({ ...source, id: input.id, name: input.name });
+      const validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
+      return this.commit(scope, input.requestId, input, () => this.store.createScript(definition, tree.path, tree.hash, validation));
+    });
   }
   async restore(scriptId: string, input: { versionId: string; expectedRevision: number; expectedDraftVersionId: string | null; replaceDraft: boolean; requestId: string }) {
-    const scope = `script-restore:${scriptId}`, prior = this.replay<ReturnType<Store["updateScriptDraft"]>>(scope, input.requestId, input);
-    if (prior) return prior;
-    const version = this.store.scriptVersion(input.versionId);
-    check(version.scriptId === scriptId && version.status === "published", "INVALID_STATE", "只能还原已发布版本");
-    const definition = this.store.scriptDefinition(scriptId, version.id), validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
-    return this.commit(scope, input.requestId, input, () => {
+    return configCoordinator(this.store).withActivity("ScriptLibrary.restore", async () => {
+      const scope = `script-restore:${scriptId}`, prior = this.replay<ReturnType<Store["updateScriptDraft"]>>(scope, input.requestId, input);
+      if (prior) return prior;
+      const version = this.store.scriptVersion(input.versionId);
+      check(version.scriptId === scriptId && version.status === "published", "INVALID_STATE", "只能还原已发布版本");
+      const definition = this.store.scriptDefinition(scriptId, version.id), validation = await scriptDiagnostics(definition), tree = this.saveTree(definition);
+      return this.commit(scope, input.requestId, input, () => {
+        const script = this.store.script(scriptId);
+        check(script.currentDraftVersionId === input.expectedDraftVersionId, "REVISION_CONFLICT", "草稿版本已改变，请刷新后重试", 409);
+        check(!script.currentDraftVersionId || input.replaceDraft, "DRAFT_EXISTS", "已有草稿，确认替换后才能还原", 409);
+        return this.store.updateScriptDraft(scriptId, input.expectedRevision, definition, tree.path, tree.hash, validation);
+      });
+    });
+  }
+  async publish(scriptId: string, input: { expectedRevision: number; requestId: string }) {
+    return configCoordinator(this.store).withActivity("ScriptLibrary.publish", async () => {
+      const scope = `script-publish:${scriptId}`;
+      const prior = this.replay<ReturnType<Store["publishScript"]>>(scope, input.requestId, input);
+      if (prior) return prior;
       const script = this.store.script(scriptId);
-      check(script.currentDraftVersionId === input.expectedDraftVersionId, "REVISION_CONFLICT", "草稿版本已改变，请刷新后重试", 409);
-      check(!script.currentDraftVersionId || input.replaceDraft, "DRAFT_EXISTS", "已有草稿，确认替换后才能还原", 409);
-      return this.store.updateScriptDraft(scriptId, input.expectedRevision, definition, tree.path, tree.hash, validation);
+      if (script.currentDraftVersionId) {
+        const draft = this.store.scriptVersion(script.currentDraftVersionId);
+        await checkScriptSource({ runtime: script.runtime, entryFile: draft.entryFile, files: this.store.files.readScriptTree(draft.sourceRef).files });
+      }
+      return this.commit(scope, input.requestId, input, () => this.store.publishScript(scriptId, input.expectedRevision));
     });
   }
   tests(scriptId: string, offset = 0, limit = 20) {

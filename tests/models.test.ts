@@ -2,7 +2,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { setup as setupProviders, TestProvider, until } from "./helpers.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
-import { Store } from "../src/persistence/store.js";
+import { TestStore as Store } from "./helpers.js";
 import { createApp } from "../src/server/app.js";
 const setup = (context: TestContext) => setupProviders(context, { models: false });
 

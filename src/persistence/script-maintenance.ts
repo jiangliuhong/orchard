@@ -1,3 +1,4 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { existsSync, readFileSync, readdirSync, lstatSync, rmSync } from "node:fs";
 import { Store } from "./store.js";
 import { canonicalJson, digest } from "./files.js";
@@ -66,40 +67,42 @@ export class ScriptMaintenance {
     return roots;
   }
   clean(scriptId: string, input: ScriptRetention & { token: string; requestId: string }) {
-    const scope = `script-clean:${scriptId}`;
-    if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) return this.store.command(scope, input.requestId, input, () => { throw new Error("unreachable"); });
-    const policy = { keepDays: input.keepDays, keepLatest: input.keepLatest }, selection = this.selection(scriptId, policy);
-    const preview = this.describe(scriptId, policy, selection.rows);
-    check(preview.token === input.token, "CLEANUP_CONFLICT", "清理范围已变化，请重新预览", 409);
-    const paths: string[] = [];
-    const result = this.store.command(scope, input.requestId, input, () => {
-      const candidates = new Set<string>();
-      let deletedTests = 0;
-      for (const row of selection.rows) {
-        const current = this.store.one<{ status: string }>("SELECT status FROM script_tests WHERE id=?", row.id);
-        check(current && !["queued", "running"].includes(current.status), "CLEANUP_CONFLICT", "清理范围已变化，请重新预览", 409);
-        for (const reference of [row.input_ref, row.output_ref, row.stdout_ref, row.stderr_ref]) this.referenceIds(reference, candidates);
-        this.store.exec("DELETE FROM script_tests WHERE id=?", row.id); deletedTests++;
-      }
-      const roots = this.reachable();
-      let freedBytes = 0;
-      for (const hash of candidates) {
-        if (roots.has(hash)) continue;
-        const artifact = this.store.one<{ relative_path: string; byte_size: number }>("SELECT relative_path,byte_size FROM artifacts WHERE id=?", hash);
-        if (!artifact || artifact.relative_path !== `artifacts/blobs/${hash}.json`) continue;
-        paths.push(this.store.files.path(artifact.relative_path));
-        this.store.exec("DELETE FROM artifacts WHERE id=?", hash); freedBytes += artifact.byte_size;
-      }
-      const scriptsDirectory = this.store.files.path("artifacts/scripts");
-      if (existsSync(scriptsDirectory)) for (const hash of readdirSync(scriptsDirectory)) {
-        if (!/^[a-f0-9]{64}$/.test(hash) || roots.has(hash)) continue;
-        const path = this.store.files.path(`artifacts/scripts/${hash}`), info = lstatSync(path);
-        if (!info.isDirectory() || info.mtimeMs >= selection.cutoff) continue;
-        paths.push(path);
-      }
-      return { deletedTests, freedBytes, deletedArtifacts: paths.length };
+    return configCoordinator(this.store).withWrite(() => {
+      const scope = `script-clean:${scriptId}`;
+      if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) return this.store.command(scope, input.requestId, input, () => { throw new Error("unreachable"); });
+      const policy = { keepDays: input.keepDays, keepLatest: input.keepLatest }, selection = this.selection(scriptId, policy);
+      const preview = this.describe(scriptId, policy, selection.rows);
+      check(preview.token === input.token, "CLEANUP_CONFLICT", "清理范围已变化，请重新预览", 409);
+      const paths: string[] = [];
+      const result = this.store.command(scope, input.requestId, input, () => {
+        const candidates = new Set<string>();
+        let deletedTests = 0;
+        for (const row of selection.rows) {
+          const current = this.store.one<{ status: string }>("SELECT status FROM script_tests WHERE id=?", row.id);
+          check(current && !["queued", "running"].includes(current.status), "CLEANUP_CONFLICT", "清理范围已变化，请重新预览", 409);
+          for (const reference of [row.input_ref, row.output_ref, row.stdout_ref, row.stderr_ref]) this.referenceIds(reference, candidates);
+          this.store.exec("DELETE FROM script_tests WHERE id=?", row.id); deletedTests++;
+        }
+        const roots = this.reachable();
+        let freedBytes = 0;
+        for (const hash of candidates) {
+          if (roots.has(hash)) continue;
+          const artifact = this.store.one<{ relative_path: string; byte_size: number }>("SELECT relative_path,byte_size FROM artifacts WHERE id=?", hash);
+          if (!artifact || artifact.relative_path !== `artifacts/blobs/${hash}.json`) continue;
+          paths.push(this.store.files.path(artifact.relative_path));
+          this.store.exec("DELETE FROM artifacts WHERE id=?", hash); freedBytes += artifact.byte_size;
+        }
+        const scriptsDirectory = this.store.files.path("artifacts/scripts");
+        if (existsSync(scriptsDirectory)) for (const hash of readdirSync(scriptsDirectory)) {
+          if (!/^[a-f0-9]{64}$/.test(hash) || roots.has(hash)) continue;
+          const path = this.store.files.path(`artifacts/scripts/${hash}`), info = lstatSync(path);
+          if (!info.isDirectory() || info.mtimeMs >= selection.cutoff) continue;
+          paths.push(path);
+        }
+        return { deletedTests, freedBytes, deletedArtifacts: paths.length };
+      });
+      for (const path of paths) rmSync(path, { force: true, recursive: true });
+      return result;
     });
-    for (const path of paths) rmSync(path, { force: true, recursive: true });
-    return result;
   }
 }

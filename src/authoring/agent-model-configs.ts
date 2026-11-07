@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { configCoordinator } from "../config-git/coordinator.js";
 import type { AgentModelConfig, AgentModelConfigView, RunAgentBinding, Workflow } from "../domain/types.js";
 import { check } from "../domain/errors.js";
 import { isModelEnabled } from "../domain/models.js";
@@ -43,7 +44,7 @@ export class AgentModelConfigs {
   create(value: unknown): AgentModelConfig {
     assertSchema(value, { type: "object", properties: fields, required: ["name", "providerId", "modelId", "requestId"], additionalProperties: false }, "模型配置");
     const input = value as { name: string; description?: string; providerId: string; modelId: string; enabled?: boolean; requestId: string };
-    return this.store.command("agent-model-config:create", input.requestId, input, () => {
+    return configCoordinator(this.store).withWrite(() => this.store.command("agent-model-config:create", input.requestId, input, () => {
       const now = Date.now(), config: AgentModelConfig = {
         id: randomUUID(), name: input.name.trim(), description: input.description?.trim() ?? "", providerId: input.providerId, modelId: input.modelId,
         enabled: input.enabled ?? true, revision: 1, createdAt: now, updatedAt: now,
@@ -53,12 +54,12 @@ export class AgentModelConfigs {
         config.id, config.name, config.description, config.providerId, config.modelId, config.enabled ? 1 : 0, config.revision, now, now);
       this.recordRevision(config);
       return config;
-    });
+    }));
   }
   update(id: string, value: unknown): AgentModelConfig {
     assertSchema(value, { type: "object", properties: { ...fields, expectedRevision: { type: "integer", minimum: 1 } }, required: ["expectedRevision", "requestId"], minProperties: 3, additionalProperties: false }, "模型配置");
     const input = value as Partial<Pick<AgentModelConfig, "name" | "description" | "providerId" | "modelId" | "enabled">> & { expectedRevision: number; requestId: string };
-    return this.store.command(`agent-model-config:update:${id}`, input.requestId, input, () => {
+    return configCoordinator(this.store).withWrite(() => this.store.command(`agent-model-config:update:${id}`, input.requestId, input, () => {
       const current = this.get(id);
       check(current.revision === input.expectedRevision, "REVISION_CONFLICT", "模型配置已更新，请刷新后重试", 409);
       const { requestId, expectedRevision, ...patch } = input;
@@ -69,7 +70,7 @@ export class AgentModelConfigs {
         config.name, config.description, config.providerId, config.modelId, config.enabled ? 1 : 0, config.revision, config.updatedAt, id);
       this.recordRevision(config);
       return config;
-    });
+    }));
   }
   references(id: string) {
     this.get(id);

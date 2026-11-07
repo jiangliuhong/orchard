@@ -12,6 +12,7 @@ import { ErrorNotice, Loading } from "../components/common";
 import { ModelManager } from "./ModelManager";
 import { WebBridgeSettings } from "./WebBridgeSettings";
 import { AgentModelConfigSettings } from "./AgentModelConfigSettings";
+import { ConfigGitSettings } from "./ConfigGitSettings";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
   const localCli = typeof provider.config.executable === "string";
@@ -113,7 +114,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  const [section, setSection] = useState<"general" | "providers" | "web-bridge" | "agent-models">("general");
+  const [section, setSection] = useState<"general" | "providers" | "web-bridge" | "agent-models" | "config-git">("general");
   return <>
     <div className="settings-layout">
       <aside className="settings-sidebar" aria-label="设置分类">
@@ -123,9 +124,11 @@ export function SettingsPage() {
           <button className={section === "providers" ? "active" : ""} aria-current={section === "providers" ? "page" : undefined} onClick={() => setSection("providers")}><PlugZap size={16} />Provider</button>
           <button className={section === "agent-models" ? "active" : ""} aria-current={section === "agent-models" ? "page" : undefined} onClick={() => setSection("agent-models")}><Boxes size={16} />Agent 模型配置</button>
           <button className={section === "web-bridge" ? "active" : ""} aria-current={section === "web-bridge" ? "page" : undefined} onClick={() => setSection("web-bridge")}><Globe size={16} />Web Bridge</button>
+          <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}>Git 配置存储</button>
         </nav>
       </aside>
       <section className="settings-content">
+      {section === "config-git" && <ConfigGitSettings />}
       {section === "providers" && <>
         <div className="settings-section-heading"><div><h2>Provider</h2><p>管理模型连接、默认模型与本机 CLI。</p></div><span className="field-hint">{data?.items.length ?? 0} 个连接</span></div>
         <ErrorNotice message={error} />

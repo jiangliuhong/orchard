@@ -91,6 +91,7 @@ test("Agent changes reject traversal, duplicate operations, identity fields and 
 test("script Agent previews without mutations, checks ownership, and confirms once per revision", async context => {
   const { store, providers, provider } = setup(context), { app, scripts, scriptAgent } = createApp(store, providers);
   context.after(() => app.close());
+  await app.ready();
   await scripts.create(definition());
   await scripts.create({ ...definition("private-script"), files: { "main.ts": "export default () => 'PRIVATE_SOURCE_MARKER'" } });
   provider.handler = async request => {
@@ -124,6 +125,7 @@ test("script Agent previews without mutations, checks ownership, and confirms on
 test("script Agent groups and filters conversations and persists archival without deleting turns", async context => {
   const { store, providers, provider } = setup(context), { app, scripts, scriptAgent } = createApp(store, providers);
   context.after(() => app.close());
+  await app.ready();
   await scripts.create(definition());
   provider.handler = async request => ({ output: proposal(), providerId: provider.id, modelId: request.modelId });
   const input = { providerId: provider.id, modelId: "test-model", prompt: "第一轮", expectedRevision: 0, requestId: randomUUID(), conversationId: randomUUID() };
@@ -233,6 +235,7 @@ test("workflow authoring rejects incompatible literal bindings and runs publishe
 
 test("script test HTTP history is paginated and large values use explicit artifacts", async context => {
   const { store, providers } = setup(context), { app, scripts } = createApp(store, providers); context.after(() => app.close());
+  await app.ready();
   const input = { text: "a".repeat(40000) };
   await scripts.create({ ...definition(), files: { "main.ts": "export default input => input" } });
   const payload = { draftRevision: 0, input, requestId: randomUUID() };
@@ -254,6 +257,7 @@ test("script test HTTP history is paginated and large values use explicit artifa
 
 test("cleanup refuses changed previews, never removes active tests and preserves retry receipts", async context => {
   const { store, providers } = setup(context), { app, scripts } = createApp(store, providers); context.after(() => app.close());
+  await app.ready();
   await scripts.create(definition());
   const makeOld = () => {
     const test = store.createScriptTest("library-script", null, 0, {});

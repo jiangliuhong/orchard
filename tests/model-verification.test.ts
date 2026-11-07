@@ -113,6 +113,7 @@ test("bodyless HTTP verification supports encoded model IDs and reports executio
   const { store, providers, provider } = setup(context);
   const { app } = createApp(store, providers);
   context.after(() => app.close());
+  await app.ready();
   providers.addModel(provider.id, { id: "remote/model" });
   provider.handler = async request => ({ output: "OK", modelId: request.modelId, providerId: provider.id });
   const url = `/api/providers/${provider.id}/models/${encodeURIComponent("remote/model")}/verify`;

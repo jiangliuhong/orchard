@@ -3,11 +3,39 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { TestContext } from "node:test";
-import { Store } from "../src/persistence/store.js";
+import { Store as BusinessStore } from "../src/persistence/store.js";
+import { DirectoryLease } from "../src/migrations/lock.js";
+import { initializeData, execute, baseline } from "../src/migrations/runner.js";
+import { plan } from "../src/migrations/planner.js";
+import { present, safe, writeJson, readJson } from "../src/migrations/journal.js";
+import type { Job } from "../src/migrations/types.js";
+export class TestStore extends BusinessStore {
+  private lease: DirectoryLease;
+  readonly migrationBackupPath?: string;
+  constructor(root: string) {
+    const lease = DirectoryLease.acquire(root);
+    let migrationBackupPath: string | undefined;
+    try {
+      if (!present(safe(root, "workbench.db")) && lease.original.length === 0) initializeData(root, "new_install", randomUUID());
+      baseline(root);
+      const current = plan(root);
+      if (current.steps.length) {
+        const now = new Date().toISOString(), id = randomUUID(), ledger = safe(root, "migrations/ledger.json");
+        const job: Job = { formatVersion: 1, jobId: id, requestId: id, requestScope: "test-explicit-migration", inputHmac: "test", plan: current, phase: "accepted", revision: 1, startedAt: now, updatedAt: now, steps: current.steps.map(s => ({id:s.id,state:"pending"})), processed: 0, install: [], ledgerBefore: present(ledger) ? readJson(ledger) : null };
+        writeJson(safe(root, `migrations/jobs/${id}/state.json`), job);
+        const result = execute(root, job); if (result.phase !== "committed") throw new Error(result.error?.code ?? result.phase);
+        migrationBackupPath = safe(root, `backups/migrations/${id}/snapshot/workbench.db`);
+      } else if (current.sourceVersions.webBridge === null) initializeData(root, "optional_config", randomUUID());
+      baseline(root);
+      super(root, lease); this.lease = lease; this.migrationBackupPath = migrationBackupPath; this.recoverBusiness();
+    } catch (error) { lease.release(); throw error; }
+  }
+  override close() { super.close(); if (present(safe(this.root, "workbench.lock"))) this.lease.release(); }
+}
 import { ProviderRegistry, type AgentProvider, type TurnRequest, type ProviderResult } from "../src/providers/registry.js";
 import { AuthoringService } from "../src/authoring/service.js";
+import type { SessionProvider, ProviderSessionHandle, SessionOpenRequest, SessionTurnRequest } from "../src/providers/session.js";
 import type { SourceFiles, Workflow } from "../src/domain/types.js";
-import type { ProviderSessionHandle, SessionOpenRequest, SessionProvider, SessionTurnRequest } from "../src/providers/session.js";
 
 export function temporary(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "orchard-workbench-"));
@@ -15,7 +43,7 @@ export function temporary(t: TestContext) {
 }
 export class TestProvider implements AgentProvider {
   readonly name = "Test Provider";
-  readonly capabilities = { modelCatalog: true, structuredOutput: "validated" as const, tools: false, nativeResume: false, textStream: false, sessions: "memory" as const };
+  readonly capabilities = { modelCatalog: true, structuredOutput: "validated" as const, tools: false, nativeResume: false, textStream: false };
   readonly configSchema = { type: "object", required: ["executable"], properties: { executable: { type: "string" } }, additionalProperties: false };
   calls: TurnRequest[] = [];
   handler?: (request: TurnRequest) => Promise<ProviderResult>;
@@ -61,7 +89,7 @@ export function exampleFiles(id = "example"): SourceFiles {
   };
 }
 export function setup(t: TestContext, options: { models?: boolean } = {}) {
-  const root = temporary(t), store = new Store(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
+  const root = temporary(t), store = new TestStore(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
   providers.update(provider.id, { enabled: true, defaultModel: "test-model", ...(options.models === false ? {} : { models: [{ id: "test-model", name: "Test", source: "configured", enabled: true }] }) });
   const now = Date.now();
   store.exec("INSERT INTO agent_model_configs VALUES('test-agent-config','测试分析','',?,'test-model',1,1,?,?)", provider.id, now, now);

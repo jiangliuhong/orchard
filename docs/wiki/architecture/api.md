@@ -1,6 +1,6 @@
 # API 与事件
 
-服务默认只监听 `127.0.0.1:7441`，校验 Host 和 Origin。以下端点以 `/api` 为前缀，JSON 请求错误返回 `{code,message}`。找不到资源 404，修订/基线/请求冲突 409，其余无效请求 400。
+服务默认只监听 `127.0.0.1:7441`，校验 Host 和 Origin。以下端点以 `/api` 为前缀，JSON 请求错误返回 `{code,message}`。找不到资源 404，修订/基线/请求冲突 409，其余无效请求 400。启动未就绪时业务接口统一返回 `503 / NOT_READY`，错误体还包含 `retryable` 和 `nextAction`；迁移答案错误为 422 并带 `fieldErrors`。
 
 | 操作 | 方法与路径 |
 | --- | --- |
@@ -33,6 +33,30 @@
 | 事件 / SSE | `GET /runs/:id/events?after=0` / `GET /runs/:id/stream?after=0` |
 | 创作事件 / SSE | `GET /turns/:id/events?after=0` / `GET /turns/:id/stream?after=0` |
 | 完整 JSON 产物 | `GET /artifacts/:id` |
+
+## 启动与迁移接口
+
+以下路径以 `/api` 为前缀，在业务服务启动前可用：
+
+| 操作 | 方法与路径 |
+| --- | --- |
+| HTTP 存活 / 业务就绪 | `GET /health` / `GET /ready` |
+| 同源会话 / 启动状态 | `GET /bootstrap/session` / `GET /bootstrap/status` |
+| 计划 / 验证答案并生成确认 | `GET /migrations/plan` / `POST /migrations/validate` |
+| 接受任务 / 读取任务 | `POST /migrations/jobs` / `GET /migrations/jobs/:jobId` |
+| 失败后新尝试 / 恢复已有尝试 | `POST /migrations/jobs/:jobId/retry` / `POST /migrations/jobs/:jobId/recover` |
+| 重试业务或数据初始化 | `POST /bootstrap/initialize` |
+| 下载脱敏报告 | `GET /migrations/jobs/:jobId/report` |
+
+会话握手需要 `X-Orchard-Bootstrap: 1` 和浏览器同源证据；返回仅本进程有效的 token 与 sessionId。迁移接口及初始化重试需要 `X-Orchard-Bootstrap-Token`，写请求还必须携带精确匹配的 Origin 和 JSON Content-Type。拒绝跨站、不同本机端口和未知 Host；不启用宽泛 CORS。匿名启动状态不包含数据路径和详细错误，会话与状态响应不缓存。
+
+验证请求为 `{planHash,answers}`，返回选定分支的 planHash、summary、有效期和 confirmationHash。答案的默认值、类型、条件父字段与隐藏字段由服务端验证；secret 不返回默认值或实际值。旧源数据或旧分支产生 `PLAN_STALE`，必须重新预览确认。
+
+任务及 retry 请求为 `{requestId,planHash,confirmationHash,answers}`，返回 202 和 `{jobId,statusUrl}`。同请求与相同语义输入返回原任务，刷新确认凭据不改变已接受请求的身份；同键不同答案返回 REQUEST_CONFLICT。不同标签页相同活动计划汇合到原任务，不同输入返回 MIGRATION_BUSY。任务进度包含持久化阶段、步骤、处理数量和实际备份结果，不回显答案、确认凭据或私密 HMAC。
+
+recover 与 initialize 请求只接受 `{requestId}`，返回 202 和 recoveryAttemptId / initializationAttemptId；恢复目标只能是服务端记录的 jobId。initialize 仅在 initialization_failed 可新建操作，recover 仅在 recovery_required 可执行。相同操作请求可跨进程重发；并发操作汇合。
+
+`GET /ready` 未就绪返回 503，`GET /health` 仍返回 200。前端按 revision 忽略过期状态，进程会话失效后重新握手并复用原请求标识。详见 [运行与恢复](../operations/runtime.md)及 [完整迁移协议](../../features/2026-11-06-data-migration/execution-protocol.md)。
 
 ## 脚本库接口
 

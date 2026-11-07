@@ -1,3 +1,4 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { randomUUID } from "node:crypto";
 import { AppError, check } from "../domain/errors.js";
 import type { ConversationMode, ConversationView } from "../domain/types.js";
@@ -44,19 +45,21 @@ export class ConversationService {
 
   /** 新建/重置逻辑对话：旧 current 转为 idle 历史；needs_rebuild 诊断历史不受影响。 */
   async create(draftId: string, input: ConversationSelection & { expectedRevision: number; requestId: string }) {
-    const selection = await this.providers.ready(input);
-    const body = { op: "create", providerId: input.providerId, modelId: input.modelId, mode: input.mode ?? "multi", expectedRevision: input.expectedRevision, rebuildFromId: input.rebuildFromId ?? null };
-    return this.store.command(`conversation:${draftId}`, input.requestId, body, () => this.store.transaction(() => {
-      this.guardCommand(draftId, input.expectedRevision);
-      if (input.rebuildFromId !== undefined && input.rebuildFromId !== null) {
-        const source = this.requireConversation(draftId, input.rebuildFromId);
-        check(source.status === "needs_rebuild", "CONVERSATION_CONFLICT", "仅可重建需要重建的对话", 409);
-      }
-      this.store.demoteCurrentConversation(draftId);
-      const record = this.newRecord(draftId, selection.providerId, selection.modelId, input.mode ?? "multi", input.rebuildFromId ?? null, selection.setting.revision);
-      this.store.insertConversation(record);
-      return this.toView(this.store.conversation(record.id)!);
-    }));
+    return configCoordinator(this.store).withActivity("ConversationService.create", async () => {
+      const selection = await this.providers.ready(input);
+      const body = { op: "create", providerId: input.providerId, modelId: input.modelId, mode: input.mode ?? "multi", expectedRevision: input.expectedRevision, rebuildFromId: input.rebuildFromId ?? null };
+      return this.store.command(`conversation:${draftId}`, input.requestId, body, () => this.store.transaction(() => {
+        this.guardCommand(draftId, input.expectedRevision);
+        if (input.rebuildFromId !== undefined && input.rebuildFromId !== null) {
+          const source = this.requireConversation(draftId, input.rebuildFromId);
+          check(source.status === "needs_rebuild", "CONVERSATION_CONFLICT", "仅可重建需要重建的对话", 409);
+        }
+        this.store.demoteCurrentConversation(draftId);
+        const record = this.newRecord(draftId, selection.providerId, selection.modelId, input.mode ?? "multi", input.rebuildFromId ?? null, selection.setting.revision);
+        this.store.insertConversation(record);
+        return this.toView(this.store.conversation(record.id)!);
+      }));
+    });
   }
 
   /** 重建上下文：等价于携带 rebuildFromId 的 create（同一事务与幂等语义），原会话保留为诊断历史。 */
@@ -66,40 +69,48 @@ export class ConversationService {
 
   /** idle → current 继续；原 current 自动转为 idle 历史。 */
   async resume(draftId: string, id: string, input: { expectedRevision: number; requestId: string }) {
-    return this.command(draftId, input.requestId, { op: "resume", conversationId: id, expectedRevision: input.expectedRevision }, () => {
-      this.guardCommand(draftId, input.expectedRevision);
-      const record = this.requireConversation(draftId, id);
-      check(record.status === "idle", "CONVERSATION_CONFLICT", "仅可继续历史对话（idle）", 409);
-      return this.toView(this.store.resumeConversation(draftId, id));
+    return configCoordinator(this.store).withActivity("ConversationService.resume", async () => {
+      return this.command(draftId, input.requestId, { op: "resume", conversationId: id, expectedRevision: input.expectedRevision }, () => {
+        this.guardCommand(draftId, input.expectedRevision);
+        const record = this.requireConversation(draftId, id);
+        check(record.status === "idle", "CONVERSATION_CONFLICT", "仅可继续历史对话（idle）", 409);
+        return this.toView(this.store.resumeConversation(draftId, id));
+      });
     });
   }
 
   /** current/idle → archived 用户主动归档；消息、轮次、模型信息与审计数据保留。 */
   async archive(draftId: string, id: string, input: { expectedRevision: number; requestId: string }) {
-    return this.command(draftId, input.requestId, { op: "archive", conversationId: id, expectedRevision: input.expectedRevision }, () => {
-      this.guardCommand(draftId, input.expectedRevision);
-      const record = this.requireConversation(draftId, id);
-      check(record.status === "current" || record.status === "idle", "CONVERSATION_CONFLICT", "仅可归档当前或历史对话", 409);
-      return this.toView(this.store.archiveConversation(draftId, id));
+    return configCoordinator(this.store).withActivity("ConversationService.archive", async () => {
+      return this.command(draftId, input.requestId, { op: "archive", conversationId: id, expectedRevision: input.expectedRevision }, () => {
+        this.guardCommand(draftId, input.expectedRevision);
+        const record = this.requireConversation(draftId, id);
+        check(record.status === "current" || record.status === "idle", "CONVERSATION_CONFLICT", "仅可归档当前或历史对话", 409);
+        return this.toView(this.store.archiveConversation(draftId, id));
+      });
     });
   }
 
   /** archived → current 恢复；原 current 自动转为 idle 历史，archived_at 保留作审计。 */
   async restore(draftId: string, id: string, input: { expectedRevision: number; requestId: string }) {
-    return this.command(draftId, input.requestId, { op: "restore", conversationId: id, expectedRevision: input.expectedRevision }, () => {
-      this.guardCommand(draftId, input.expectedRevision);
-      const record = this.requireConversation(draftId, id);
-      check(record.status === "archived", "CONVERSATION_CONFLICT", "仅可恢复已归档对话", 409);
-      return this.toView(this.store.restoreConversation(draftId, id));
+    return configCoordinator(this.store).withActivity("ConversationService.restore", async () => {
+      return this.command(draftId, input.requestId, { op: "restore", conversationId: id, expectedRevision: input.expectedRevision }, () => {
+        this.guardCommand(draftId, input.expectedRevision);
+        const record = this.requireConversation(draftId, id);
+        check(record.status === "archived", "CONVERSATION_CONFLICT", "仅可恢复已归档对话", 409);
+        return this.toView(this.store.restoreConversation(draftId, id));
+      });
     });
   }
 
   /** 手动修改标题；不影响消息内容和上下文。 */
   async rename(draftId: string, id: string, input: { title: string; expectedRevision: number; requestId: string }) {
-    return this.command(draftId, input.requestId, { op: "rename", conversationId: id, title: input.title, expectedRevision: input.expectedRevision }, () => {
-      this.guardCommand(draftId, input.expectedRevision);
-      this.requireConversation(draftId, id);
-      return this.toView(this.store.renameConversation(draftId, id, input.title));
+    return configCoordinator(this.store).withActivity("ConversationService.rename", async () => {
+      return this.command(draftId, input.requestId, { op: "rename", conversationId: id, title: input.title, expectedRevision: input.expectedRevision }, () => {
+        this.guardCommand(draftId, input.expectedRevision);
+        this.requireConversation(draftId, id);
+        return this.toView(this.store.renameConversation(draftId, id, input.title));
+      });
     });
   }
 

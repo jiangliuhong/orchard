@@ -9,6 +9,11 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:web": "vite",
+    "migration:check": "node scripts/check-migration-manifest.mjs --require-review && node scripts/generate-migration-bundle.mjs --check",
+    "prebuild": "npm run migration:check && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "postbuild": "node scripts/create-migration-integrity.mjs",
+    "predev": "npm run migration:check",
+    "pretest": "npm run migration:check",
     "build": "tsc -p tsconfig.server.json && mkdir -p dist/web-bridge/extension && cp -R src/web-bridge/extension/. dist/web-bridge/extension && cp src/web-bridge/catalog.json dist/web-bridge/catalog.json && vite build",
     "start": "node dist/server/main.js",
     "typecheck": "tsc --noEmit",
@@ -30,6 +35,7 @@
     "radix-ui": "1.8.1",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "rolldown": "1.2.16",
     "smol-toml": "1.9.1",
     "tailwind-merge": "3.7.0"
   },

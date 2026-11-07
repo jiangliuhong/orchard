@@ -9,6 +9,7 @@ test("workflow deletion removes all versions, original and later drafts, runs, c
   const { store, providers, provider } = setup(context);
   const { app, authoring, runner } = createApp(store, providers);
   context.after(() => app.close());
+  await app.ready();
   const original = await authoring.create(undefined, "create-original");
   const testRun = await runner.createDraft(original.id, 0, { sample: true }, "test-original");
   await until(() => store.run(testRun.id).status === "succeeded");
@@ -65,6 +66,7 @@ test("workflow deletion removes all versions, original and later drafts, runs, c
 test("workflow deletion rejects queued, running, cancelling and publishing work without partial deletion", async context => {
   const { store, providers } = setup(context), { app, authoring, runner } = createApp(store, providers);
   context.after(() => app.close());
+  await app.ready();
   await runner.close();
   const draft = await authoring.create(undefined, randomUUID());
   const version = await authoring.publish(draft.id, 0, randomUUID());
@@ -91,6 +93,7 @@ test("draft deletion clears only its tests and rejects active and still-finishin
   const { store, providers, provider } = setup(context), { app, authoring, runner } = createApp(store, providers);
   let release: (() => void) | undefined;
   context.after(async () => { release?.(); await app.close(); });
+  await app.ready();
   const source = await authoring.create(undefined, randomUUID()), version = await authoring.publish(source.id, 0, randomUUID());
   const draft = await authoring.editVersion(version.workflowId, undefined, "edit", randomUUID());
   const run = await runner.createDraft(draft.id, 0, {}, randomUUID());
@@ -118,6 +121,7 @@ test("draft deletion clears only its tests and rejects active and still-finishin
 test("a database failure during deletion rolls back removed child rows", async context => {
   const { store, providers } = setup(context), { app, authoring, runner } = createApp(store, providers);
   context.after(() => app.close());
+  await app.ready();
   const draft = await authoring.create(undefined, randomUUID()), version = await authoring.publish(draft.id, 0, randomUUID());
   const run = runner.create(version.id, {}, randomUUID());
   await until(() => store.run(run.id).status === "succeeded");

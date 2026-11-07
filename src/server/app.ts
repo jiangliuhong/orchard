@@ -26,6 +26,12 @@ import { WebBridgeClient } from "../web-bridge/client.js";
 import { catalogHash, extensionDirectory } from "../web-bridge/catalog.js";
 import { WebBridgeConfig } from "../web-bridge/config.js";
 import { LocalApiAuth } from "../web-bridge/auth.js";
+import type { Bootstrap } from "./bootstrap.js";
+import { configCoordinator } from "../config-git/coordinator.js";
+import { ConfigRestoreService } from "../config-git/restore.js";
+import { GitRepositoryService, type GitRepositoryOptions } from "../config-git/repository.js";
+import { ConfigGitService } from "../config-git/service.js";
+import { registerConfigGitRoutes } from "../config-git/routes.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -38,19 +44,64 @@ function cursor(value: unknown) {
   check(typeof value === "string" && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)), "INVALID_CURSOR", "游标必须为非负整数");
   return Number(value);
 }
-export function createApp(store: Store, suppliedProviders?: ProviderRegistry, sessionManager?: SessionManager) {
-  // 常驻会话连接管理器：全局进程配额、空闲回收与连接代次（§23.1）。
-  const manager = sessionManager ?? new SessionManager(agentLimits());
-  const providers = suppliedProviders ?? new ProviderRegistry(store)
-    .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
-    .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
-  const bridge = new WebBridgeGateway(new WebBridgeClient(store.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(store.root));
-  const apiAuth = new LocalApiAuth(store.root);
-  const authoring = new AuthoringService(store, providers), runner = new GraphRunner(store, providers, bridge), scriptTests = new ScriptTestRunner(store);
-  const scripts = new ScriptLibrary(store);
-  const scriptAgent = new ScriptAgentService(store, providers);
-  const scriptMaintenance = new ScriptMaintenance(store);
+export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegistry, sessionManager?: SessionManager, bootstrap?: Bootstrap, configGitOptions: GitRepositoryOptions = {}) {
+  let services: Record<string, any> = {};
+  let cleanup: (() => unknown | Promise<unknown>)[] = [];
+  let clean = true;
+  const proxy = <T extends object>(name: string): T => new Proxy({} as T, { get(_target, property) {
+    const target = services[name]; if (!target) throw new AppError("SERVICE_NOT_READY", "工作台尚未就绪", 503);
+    const value = target[property]; return typeof value === "function" ? value.bind(target) : value;
+  } });
+  const store = proxy<Store>("store"), providers = proxy<ProviderRegistry>("providers"), bridge = proxy<WebBridgeGateway>("bridge"), apiAuth = proxy<LocalApiAuth>("apiAuth");
+  const authoring = proxy<AuthoringService>("authoring"), runner = proxy<GraphRunner>("runner"), scriptTests = proxy<ScriptTestRunner>("scriptTests"), scripts = proxy<ScriptLibrary>("scripts"), scriptAgent = proxy<ScriptAgentService>("scriptAgent"), scriptMaintenance = proxy<ScriptMaintenance>("scriptMaintenance");
+  const closeServices = async () => {
+    let failure: unknown;
+    for (const close of cleanup.splice(0).reverse()) try { await close(); } catch (error) { failure ??= error; }
+    services = {}; clean = !failure; if (failure) throw failure;
+  };
+  const initialize = async (opened: Store) => {
+    if (!clean || cleanup.length) { opened.close(); throw new Error("初始化清理未完成，请重启服务"); }
+    clean = false;
+    const add = <T,>(name: string, value: T, close?: () => unknown | Promise<unknown>): T => { services[name] = value; if(close) cleanup.push(close); return value; };
+    try {
+      add("store", opened, () => opened.close());
+      const coordinator = configCoordinator(opened);
+      add("coordinator", coordinator);
+      const restore = new ConfigRestoreService(opened, coordinator, { afterRestore: async () => {
+        await services.providers?.reloadAfterRestore();
+        services.bridge?.reloadAfterRestore();
+      } });
+      add("restore", restore);
+      await new GitRepositoryService(opened.root, configGitOptions).recover();
+      await restore.recover();
+      opened.recoverBusiness();
+      const manager = sessionManager ?? new SessionManager(agentLimits()); add("manager", manager, () => manager.close());
+      const registry = suppliedProviders ?? new ProviderRegistry(opened)
+        .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
+        .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
+      add("providers", registry, () => registry.closeVerifications());
+      const gateway = new WebBridgeGateway(new WebBridgeClient(opened.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(opened.root, coordinator)); add("bridge", gateway, () => gateway.close());
+      add("apiAuth", new LocalApiAuth(opened.root));
+      const service = new AuthoringService(opened, registry); add("authoring", service, () => service.close());
+      const graph = new GraphRunner(opened, registry, gateway, false); add("runner", graph, () => graph.close());
+      const tests = new ScriptTestRunner(opened, false); add("scriptTests", tests, () => tests.close());
+      add("scripts", new ScriptLibrary(opened));
+      const agent = new ScriptAgentService(opened, registry); add("scriptAgent", agent, () => agent.close());
+      add("scriptMaintenance", new ScriptMaintenance(opened));
+      const configGit = new ConfigGitService(opened, gateway.config!, restore, configGitOptions);
+      add("configGit", configGit, () => configGit.close());
+      clean = true;
+    } catch (error) { await closeServices(); throw error; }
+  };
+  const activate = () => { services.runner.start(); services.scriptTests.start(); };
+  const initialization = initialStore ? initialize(initialStore).then(activate) : Promise.resolve();
+  // Keep rejection observed until Fastify's ready barrier reports startup failure.
+  void initialization.catch(() => {});
   const app = Fastify({ bodyLimit: 6 * 1024 * 1024, logger: false });
+  app.addHook("onReady", async () => { await initialization; });
+  const businessRoutes = new Set<string>();
+  if (bootstrap) bootstrap.register(app);
+  app.addHook("onRoute", route => { if (route.url.startsWith("/api/") && !route.url.startsWith("/api/bootstrap/") && !route.url.startsWith("/api/migrations/") && !["/api/health", "/api/ready"].includes(route.url)) businessRoutes.add(route.url); });
   const connections = new Set<() => void>();
   const publicValue = (value: unknown): unknown => {
     const text = json(value);
@@ -65,6 +116,10 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
       output: publicValue(test.output), stdout: publicValue(test.stdout), stderr: publicValue(test.stderr) };
   };
   app.addHook("onRequest", async (request, reply) => {
+    if (bootstrap) {
+      if (!businessRoutes.has(request.routeOptions.url ?? "")) return;
+      if (!bootstrap.ready) return reply.code(503).send({ code: bootstrap.status().state === "migration_required" ? "MIGRATION_REQUIRED" : "MIGRATION_IN_PROGRESS", message: "数据尚未就绪，请完成升级或初始化。", retryable: true, nextAction: "查看启动状态" });
+    }
     const host = request.headers.host ?? "";
     let hostname: string;
     try { hostname = new URL(`http://${host}`).hostname; } catch { return reply.code(403).send({ code: "INVALID_HOST", message: "无效本地 Host" }); }
@@ -80,6 +135,7 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     }
     const suppliedToken = request.headers["x-orchard-token"];
     if (suppliedToken !== undefined && !apiAuth.valid(suppliedToken)) return reply.code(401).send({ code: "UNAUTHORIZED", message: "本机 API 认证失败" });
+    if (request.url.startsWith("/api/") && !request.url.startsWith("/api/config-git/") && !["/api/health", "/api/ready"].includes(request.url)) services.coordinator?.assertAvailable();
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
   });
@@ -95,7 +151,11 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
       : (error as { statusCode?: number }).statusCode ?? 500;
     reply.code(status).send({ code: known ? error.code : "INTERNAL_ERROR", message: error instanceof Error ? error.message : String(error) });
   });
-  app.get("/api/health", async () => ({ ok: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount, webBridge: await bridge.status() }));
+  registerConfigGitRoutes(app, () => {
+    check(services.configGit, "SERVICE_NOT_READY", "配置服务尚未就绪", 503);
+    return services.configGit as ConfigGitService;
+  });
+  if (!bootstrap) app.get("/api/health", async () => ({ ok: true, ready: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount }));
   app.get("/api/web-bridge/auth", async () => apiAuth.view());
   app.get("/api/web-bridge/extension", async () => ({ directory: extensionDirectory() }));
   app.get("/api/web-bridge/status", async () => bridge.status());
@@ -216,16 +276,7 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
   });
   app.post<{ Params: { id: string } }>("/api/scripts/:id/publish", async request => {
     const input = body<{ expectedRevision: number; requestId: string }>(request.body, { expectedRevision, requestId }, ["expectedRevision", "requestId"]);
-    const scope = `script-publish:${request.params.id}`;
-    if (store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) {
-      return store.command(scope, input.requestId, input, () => { throw new Error("unreachable"); });
-    }
-    const script = store.script(request.params.id);
-    if (script.currentDraftVersionId) {
-      const draft = store.scriptVersion(script.currentDraftVersionId);
-      await checkScriptSource({ runtime: script.runtime, entryFile: draft.entryFile, files: store.files.readScriptTree(draft.sourceRef).files });
-    }
-    return store.command(scope, input.requestId, input, () => store.publishScript(request.params.id, input.expectedRevision));
+    return scripts.publish(request.params.id, input);
   });
   app.get<{ Params: { id: string; versionId: string } }>("/api/scripts/:id/versions/:versionId", async request => {
     return scripts.version(request.params.id, request.params.versionId);
@@ -381,9 +432,9 @@ export function createApp(store: Store, suppliedProviders?: ProviderRegistry, se
     app.register(staticPlugin, { root: assets });
     app.setNotFoundHandler((request, reply) => request.url.startsWith("/api/") ? reply.code(404).send({ code: "NOT_FOUND", message: "接口不存在" }) : reply.sendFile("index.html"));
   }
-  app.addHook("preClose", async () => { for (const close of connections) close(); await providers.closeVerifications(); });
+  app.addHook("preClose", async () => { await bootstrap?.close(); for (const close of connections) close(); if (services.providers) await services.providers.closeVerifications(); });
   // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
   // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
-  app.addHook("onClose", async () => { await scriptAgent.close(); await authoring.close(); await runner.close(); await scriptTests.close(); bridge.close(); await manager.close().catch(() => {}); store.close(); });
-  return { app, store, providers, authoring, runner, bridge, scripts, scriptAgent };
+  app.addHook("onClose", async () => { await closeServices(); bootstrap?.release(); });
+  return { app, store, providers, authoring, runner, bridge, scripts, scriptAgent, initialize, activate, ready: initialization };
 }

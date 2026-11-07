@@ -1,0 +1,41 @@
+{
+  "formatVersion": 1,
+  "sources": [
+    {
+      "version": 1,
+      "commit": "8a63292ae5aecc921bb8ecc7136478407fd0d7ea",
+      "path": "src/persistence/schema.ts",
+      "method": "Historical declarative SCHEMA, evaluated without importing current schema or migrations."
+    },
+    {
+      "version": 2,
+      "commit": "d6bacf92777f2bc53a80cb50d6e97850991358c1",
+      "path": "src/persistence/schema.ts",
+      "method": "Historical declarative SCHEMA, evaluated without importing current schema or migrations."
+    },
+    {
+      "version": 3,
+      "commit": "19ecca576797c0f7fd3ceaec69c2d5ae6253b364",
+      "path": "src/persistence/schema.ts",
+      "method": "Historical declarative SCHEMA, evaluated without importing current schema or migrations."
+    },
+    {
+      "version": 4,
+      "commit": "d759efdd06182b3455a3e546e04b47bb11c1ed86",
+      "path": "src/persistence/schema.ts",
+      "method": "Historical declarative SCHEMA, evaluated without importing current schema or migrations."
+    },
+    {
+      "version": 5,
+      "commit": "0fde3d30e96d8c9e27d0f517c026f94e60fa2ba8",
+      "path": "src/persistence/schema.ts",
+      "method": "Historical declarative v6 SCHEMA with only timeout_ms removed and user_version set to 5; v5 was an intermediate format in the same commit. No migration SQL is executed."
+    },
+    {
+      "version": 6,
+      "commit": "265d9489e0a492ea9bc78c9052caed7ab3e0949f",
+      "path": "src/persistence/schema.ts",
+      "method": "Historical declarative SCHEMA, evaluated without importing current schema or migrations."
+    }
+  ]
+}

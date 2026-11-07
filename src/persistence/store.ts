@@ -1,10 +1,13 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, join } from "node:path";
 import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
-import { MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, SCHEMA, SCHEMA_VERSION } from "./schema.js";
+import { SCHEMA_VERSION } from "./schema.js";
+import { DirectoryLease } from "../migrations/lock.js";
+import { safe, present } from "../migrations/journal.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
 import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, ScriptVersion, ScriptView, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
@@ -41,88 +44,26 @@ type Row = Record<string, unknown>;
 const parsed = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(value) as T : undefined as T;
 export class Store {
   readonly db!: DatabaseSync;
-  /** 自动升级前的完整数据库备份；不含认证或用户配置。 */
-  readonly migrationBackupPath?: string;
   readonly files: FileStore;
   readonly root: string;
   readonly events = new EventEmitter();
   private depth = 0;
   private pendingEvents: StreamEvent[] = [];
-  private lock: string;
-  constructor(root: string) {
-    mkdirSync(root, { recursive: true, mode: 0o700 }); this.root = realpathSync(root);
-    const old = join(homedir(), ".orchard");
-    check(this.root !== resolve(old) && !(existsSync(old) && realpathSync(old) === this.root) && !existsSync(join(this.root, "orchard.db")), "OLD_DATA_DIRECTORY", "请使用新工作台独立的数据目录");
-    this.files = new FileStore(this.root); this.lock = join(this.root, "workbench.lock");
-    if (existsSync(this.lock)) {
-      const pid = Number(readFileSync(this.lock, "utf8"));
-      let alive = true; try { process.kill(pid, 0); } catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
-      check(!alive && Number.isInteger(pid) && pid > 0, "INSTANCE_LOCKED", "此数据目录已有工作台实例");
-      unlinkSync(this.lock);
-    }
-    const fd = openSync(this.lock, "wx", 0o600); writeFileSync(fd, String(process.pid)); closeSync(fd);
-    const databasePath = this.files.path("workbench.db");
+  constructor(root: string, lease: DirectoryLease) {
+    this.root = realpathSync(root); DirectoryLease.validate(lease, this.root);
+    check(present(safe(this.root, "workbench.db")), "UNKNOWN_DATABASE", "数据库不存在，须由 Bootstrap 初始化");
+    this.db = new DatabaseSync(safe(this.root, "workbench.db"), { open: true });
     try {
-      this.db = new DatabaseSync(databasePath);
-      const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
-      const appId = Number(this.db.prepare("PRAGMA application_id").get()!.application_id);
-      if (version === 0) {
-        check(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().length === 0, "UNKNOWN_DATABASE", "拒绝初始化未知数据库");
-        this.db.exec(`BEGIN; ${SCHEMA} COMMIT;`);
-      } else {
-        // §20.3：接受所有受支持旧版本（1、2、3），顺序执行增量迁移至当前版本。
-        check([1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION].includes(version) && appId === 1331110449, "UNKNOWN_DATABASE", "不支持的工作台数据库版本");
-        if (version < SCHEMA_VERSION) {
-          // 服务尚未启动且已持有独占数据目录锁。先完成 WAL checkpoint，关闭连接后
-          // 再复制主文件，绝不复制正在写入的 WAL 数据库。备份失败则拒绝迁移。
-          const checkpoint = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get()!;
-          check(Number(checkpoint.busy) === 0, "MIGRATION_BACKUP_FAILED", "数据库正被其他连接占用，无法安全备份");
-          this.db.close();
-          const directory = this.files.path("backups");
-          mkdirSync(directory, { recursive: true, mode: 0o700 });
-          const backup = this.files.path(`backups/workbench-v${version}-${randomUUID()}.db`);
-          copyFileSync(databasePath, backup, constants.COPYFILE_EXCL);
-          chmodSync(backup, 0o600);
-          const fd = openSync(backup, "r");
-          try { fsyncSync(fd); } finally { closeSync(fd); }
-          const snapshot = new DatabaseSync(backup, { readOnly: true });
-          try {
-            check(snapshot.prepare("PRAGMA quick_check").get()!.quick_check === "ok"
-              && Number(snapshot.prepare("PRAGMA user_version").get()!.user_version) === version,
-            "MIGRATION_BACKUP_FAILED", "数据库备份完整性校验失败");
-          } finally { snapshot.close(); }
-          this.migrationBackupPath = backup;
-          this.db = new DatabaseSync(databasePath);
-          this.db.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;");
-          try {
-            // 升级期间不丢失旧行；终态恢复在迁移提交后独立执行。
-            const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all();
-            const counts = tables.map(row => {
-              const name = String(row.name).replaceAll('"', '""');
-              return { name, count: this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n };
-            });
-            if (version === 1) this.db.exec(MIGRATE_V1_TO_V2);
-            if (version <= 2) this.db.exec(MIGRATE_V2_TO_V3);
-            if (version <= 3) this.db.exec(MIGRATE_V3_TO_V4);
-            if (version <= 4) this.db.exec(MIGRATE_V4_TO_V5);
-            if (version <= 5) this.db.exec(MIGRATE_V5_TO_V6);
-            if (version <= 6) this.db.exec(MIGRATE_V6_TO_V7);
-            if (version <= 7) this.db.exec(MIGRATE_V7_TO_V8);
-            check(this.db.prepare("PRAGMA foreign_key_check").all().length === 0, "MIGRATION_FAILED", "数据库升级外键校验失败");
-            for (const { name, count } of counts) {
-              check(this.db.prepare(`SELECT count(*) AS n FROM "${name}"`).get()!.n === count,
-                "MIGRATION_FAILED", "数据库升级行数校验失败");
-            }
-            this.db.exec("COMMIT;");
-          } catch (error) { this.db.exec("ROLLBACK;"); throw error; }
-        }
-      }
+      check(Number(this.db.prepare("PRAGMA user_version").get()!.user_version) === SCHEMA_VERSION && Number(this.db.prepare("PRAGMA application_id").get()!.application_id) === 1331110449, "UNKNOWN_DATABASE", "数据库尚未就绪，须由 Bootstrap 检测和迁移");
       this.db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
-      rmSync(this.files.path("staging"), { force: true, recursive: true });
-      this.recover();
-    } catch (error) { if (this.db?.isOpen) this.db.close(); unlinkSync(this.lock); throw error; }
+      this.files = new FileStore(this.root);
+    } catch(error) { this.db.close(); throw error; }
   }
-  close() { this.db.close(); if (existsSync(this.lock)) unlinkSync(this.lock); }
+  close() { if(this.db.isOpen) this.db.close(); }
+  recoverBusiness() {
+    return configCoordinator(this).withWrite(() => { rmSync(this.files.path("staging"), { force: true, recursive: true }); this.recover();
+    });
+  }
   one<T = Row>(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).get(...params) as T | undefined; }
   all<T = Row>(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).all(...params) as T[]; }
   exec(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).run(...params); }
@@ -200,7 +141,10 @@ export class Store {
     const r = this.one("SELECT * FROM provider_settings WHERE id=?", id);
     return r ? { id: String(r.id), enabled: !!r.enabled, config: parsed(r.config_json), models: parsed(r.models_json), defaultModel: String(r.default_model), revision: Number(r.revision), updatedAt: Number(r.updated_at) } : undefined;
   }
-  saveProvider(setting: ProviderSetting) { this.exec("INSERT INTO provider_settings VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,models_json=excluded.models_json,default_model=excluded.default_model,revision=excluded.revision,updated_at=excluded.updated_at", setting.id, setting.enabled ? 1 : 0, json(setting.config), json(setting.models), setting.defaultModel, setting.revision, setting.updatedAt); }
+  saveProvider(setting: ProviderSetting) {
+    return configCoordinator(this).withWrite(() => { this.exec("INSERT INTO provider_settings VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,config_json=excluded.config_json,models_json=excluded.models_json,default_model=excluded.default_model,revision=excluded.revision,updated_at=excluded.updated_at", setting.id, setting.enabled ? 1 : 0, json(setting.config), json(setting.models), setting.defaultModel, setting.revision, setting.updatedAt);
+    });
+  }
   script(id: string): ScriptView {
     const row = this.one("SELECT * FROM scripts WHERE id=?", id); check(row, "NOT_FOUND", "脚本不存在");
     return { id: String(row.id), name: String(row.name), description: String(row.description), runtime: row.runtime as ScriptView["runtime"], status: row.status as ScriptView["status"], currentDraftVersionId: row.current_draft_version_id as string | null, currentPublishedVersionId: row.current_published_version_id as string | null, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), archivedAt: row.archived_at as number | null };
@@ -241,40 +185,52 @@ export class Store {
     return diagnostics;
   }
   createScript(definition: ScriptDefinition, sourceRef: string, contentHash: string, validation: ScriptVersion["validation"] = { valid: true, diagnostics: [] }) {
-    validateScript(definition); const now = Date.now(), scriptId = definition.id, versionId = randomUUID();
-    return this.transaction(() => {
-      check(!this.one("SELECT id FROM scripts WHERE id=?", scriptId), "IDENTITY_CONFLICT", "脚本 ID 已存在", 409);
-      this.exec("INSERT INTO scripts(id,name,description,runtime,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", scriptId, definition.name, definition.description, definition.runtime, "draft", now, now);
-      this.exec("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,timeout_ms,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", versionId, scriptId, 1, "draft", 0, definition.entryFile, definition.timeoutMs ?? 300000, json(definition.inputSchema), json(definition.outputSchema), sourceRef, contentHash, json(validation), now, now);
-      this.exec("UPDATE scripts SET current_draft_version_id=? WHERE id=?", versionId, scriptId);
-      return { script: this.script(scriptId), version: this.scriptVersion(versionId) };
+    return configCoordinator(this).withWrite(() => {
+      validateScript(definition); const now = Date.now(), scriptId = definition.id, versionId = randomUUID();
+      return this.transaction(() => {
+        check(!this.one("SELECT id FROM scripts WHERE id=?", scriptId), "IDENTITY_CONFLICT", "脚本 ID 已存在", 409);
+        this.exec("INSERT INTO scripts(id,name,description,runtime,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", scriptId, definition.name, definition.description, definition.runtime, "draft", now, now);
+        this.exec("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,timeout_ms,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", versionId, scriptId, 1, "draft", 0, definition.entryFile, definition.timeoutMs ?? 300000, json(definition.inputSchema), json(definition.outputSchema), sourceRef, contentHash, json(validation), now, now);
+        this.exec("UPDATE scripts SET current_draft_version_id=? WHERE id=?", versionId, scriptId);
+        return { script: this.script(scriptId), version: this.scriptVersion(versionId) };
+      });
     });
   }
   updateScriptDraft(scriptId: string, expectedRevision: number, definition: ScriptDefinition, sourceRef: string, contentHash: string, validation: ScriptVersion["validation"] = { valid: true, diagnostics: [] }) {
-    validateScript(definition); return this.transaction(() => {
-      const script = this.script(scriptId); check(script.status === "draft" || script.status === "published", "SCRIPT_ARCHIVED", "脚本已归档");
-      let current = script.currentDraftVersionId;
-      const now = Date.now();
-      if (!current) {
-        check(expectedRevision === 0, "REVISION_CONFLICT", "请使用新的草稿修订号");
-        current = randomUUID();
-        const latest = this.one<{ n: number }>("SELECT COALESCE(MAX(version_no),0) AS n FROM script_versions WHERE script_id=?", scriptId)!.n;
-        const published = script.currentPublishedVersionId ? this.scriptVersion(script.currentPublishedVersionId) : undefined;
-        this.exec("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,timeout_ms,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", current, scriptId, Number(latest) + 1, "draft", 0, published?.entryFile ?? definition.entryFile, definition.timeoutMs ?? published?.timeoutMs ?? 300000, json(published?.inputSchema ?? definition.inputSchema), json(published?.outputSchema ?? definition.outputSchema), published?.sourceRef ?? sourceRef, published?.contentHash ?? contentHash, json({ valid: true, diagnostics: [] }), now, now);
-        this.exec("UPDATE scripts SET current_draft_version_id=?,updated_at=? WHERE id=?", current, now, scriptId);
-      }
-      const version = this.scriptVersion(current); check(version.revision === expectedRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
-      check(definition.id === scriptId && definition.runtime === script.runtime, "IDENTITY_CONFLICT", "脚本身份或运行时不能修改");
-      this.exec("UPDATE script_versions SET revision=revision+1,entry_file=?,timeout_ms=?,input_schema_json=?,output_schema_json=?,source_ref=?,content_hash=?,validation_json=?,updated_at=? WHERE id=? AND status='draft'", definition.entryFile, definition.timeoutMs ?? 300000, json(definition.inputSchema), json(definition.outputSchema), sourceRef, contentHash, json(validation), now, current);
-      this.exec("UPDATE scripts SET name=?,description=?,updated_at=? WHERE id=?", definition.name, definition.description, now, scriptId);
-      return { script: this.script(scriptId), version: this.scriptVersion(current) };
+    return configCoordinator(this).withWrite(() => {
+      validateScript(definition); return this.transaction(() => {
+        const script = this.script(scriptId); check(script.status === "draft" || script.status === "published", "SCRIPT_ARCHIVED", "脚本已归档");
+        let current = script.currentDraftVersionId;
+        const now = Date.now();
+        if (!current) {
+          check(expectedRevision === 0, "REVISION_CONFLICT", "请使用新的草稿修订号");
+          current = randomUUID();
+          const latest = this.one<{ n: number }>("SELECT COALESCE(MAX(version_no),0) AS n FROM script_versions WHERE script_id=?", scriptId)!.n;
+          const published = script.currentPublishedVersionId ? this.scriptVersion(script.currentPublishedVersionId) : undefined;
+          this.exec("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,timeout_ms,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", current, scriptId, Number(latest) + 1, "draft", 0, published?.entryFile ?? definition.entryFile, definition.timeoutMs ?? published?.timeoutMs ?? 300000, json(published?.inputSchema ?? definition.inputSchema), json(published?.outputSchema ?? definition.outputSchema), published?.sourceRef ?? sourceRef, published?.contentHash ?? contentHash, json({ valid: true, diagnostics: [] }), now, now);
+          this.exec("UPDATE scripts SET current_draft_version_id=?,updated_at=? WHERE id=?", current, now, scriptId);
+        }
+        const version = this.scriptVersion(current); check(version.revision === expectedRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
+        check(definition.id === scriptId && definition.runtime === script.runtime, "IDENTITY_CONFLICT", "脚本身份或运行时不能修改");
+        this.exec("UPDATE script_versions SET revision=revision+1,entry_file=?,timeout_ms=?,input_schema_json=?,output_schema_json=?,source_ref=?,content_hash=?,validation_json=?,updated_at=? WHERE id=? AND status='draft'", definition.entryFile, definition.timeoutMs ?? 300000, json(definition.inputSchema), json(definition.outputSchema), sourceRef, contentHash, json(validation), now, current);
+        this.exec("UPDATE scripts SET name=?,description=?,updated_at=? WHERE id=?", definition.name, definition.description, now, scriptId);
+        return { script: this.script(scriptId), version: this.scriptVersion(current) };
+      });
     });
   }
   archiveScript(scriptId: string) {
-    return this.transaction(() => { const script = this.script(scriptId); check(script.status !== "archived", "INVALID_STATE", "脚本已归档"); const now = Date.now(); this.exec("UPDATE scripts SET status='archived',archived_at=?,updated_at=? WHERE id=?", now, now, scriptId); return this.script(scriptId); });
+    return configCoordinator(this).withWrite(() => {
+      return this.transaction(() => { const script = this.script(scriptId); check(script.status !== "archived", "INVALID_STATE", "脚本已归档"); const now = Date.now(); this.exec("UPDATE scripts SET status='archived',archived_at=?,updated_at=? WHERE id=?", now, now, scriptId); return this.script(scriptId); });
+    });
+  }
+  private readonly scriptTestActivities = new Map<string, () => void>();
+  trackScriptTestActivity(id: string) {
+    if (!this.scriptTestActivities.has(id)) this.scriptTestActivities.set(id, configCoordinator(this).beginActivity(`script-test:${id}`));
   }
   createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown) {
-    return this.transaction(() => {
+    const release = configCoordinator(this).beginActivity("script-test:accept");
+    try {
+    const test = this.transaction(() => {
       const script = this.script(scriptId); check(script.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
       if (versionId) {
         const version = this.scriptVersion(versionId); check(version.scriptId === scriptId && version.status === "published", "INVALID_STATE", "只能测试已发布版本");
@@ -285,6 +241,9 @@ export class Store {
       this.exec("INSERT INTO script_tests(id,script_id,script_version_id,draft_revision,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, scriptId, versionId, draftRevision, inputRef, now);
       return this.scriptTest(id);
     });
+    this.scriptTestActivities.set(test.id, release);
+    return test;
+    } catch (error) { release(); throw error; }
   }
   scriptTestSnapshot(id: string): ScriptDefinition | undefined {
     const row = this.one("SELECT input_ref FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在");
@@ -293,16 +252,22 @@ export class Store {
   }
   scriptTest(id: string) { const row = this.one("SELECT * FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在"); return { id: String(row.id), scriptId: String(row.script_id), scriptVersionId: row.script_version_id as string | null, draftRevision: row.draft_revision as number | null, status: String(row.status), input: this.dereference(row.input_ref), output: row.output_ref ? this.dereference(row.output_ref) : undefined, error: row.error_json ? parsed(row.error_json) : undefined, stdout: row.stdout_ref ? this.dereference(row.stdout_ref) : undefined, stderr: row.stderr_ref ? this.dereference(row.stderr_ref) : undefined, exitCode: row.exit_code as number | null, durationMs: row.duration_ms as number | null, createdAt: Number(row.created_at), startedAt: row.started_at as number | null, endedAt: row.ended_at as number | null }; }
   scriptTests(scriptId: string) { this.script(scriptId); return this.all<{ id: string }>("SELECT id FROM script_tests WHERE script_id=? ORDER BY created_at DESC", scriptId).map(row => this.scriptTest(row.id)); }
-  setScriptTestRunning(id: string) { this.exec("UPDATE script_tests SET status='running',started_at=? WHERE id=? AND status='queued'", Date.now(), id); }
-  finishScriptTest(id: string, result: { status: "succeeded" | "failed" | "cancelled"; output?: unknown; error?: unknown; stdout: string; stderr: string; exitCode?: number | null; durationMs?: number }) { this.transaction(() => { const now = Date.now(); this.exec("UPDATE script_tests SET status=?,output_ref=?,error_json=?,stdout_ref=?,stderr_ref=?,exit_code=?,duration_ms=?,ended_at=? WHERE id=? AND status='running'", result.status, result.output === undefined ? null : this.reference(result.output), result.error === undefined ? null : json(result.error), this.reference(result.stdout), this.reference(result.stderr), result.exitCode ?? null, result.durationMs ?? null, now, id); }); return this.scriptTest(id); }
+  setScriptTestRunning(id: string) { this.trackScriptTestActivity(id); this.exec("UPDATE script_tests SET status='running',started_at=? WHERE id=? AND status='queued'", Date.now(), id); }
+  finishScriptTest(id: string, result: { status: "succeeded" | "failed" | "cancelled"; output?: unknown; error?: unknown; stdout: string; stderr: string; exitCode?: number | null; durationMs?: number }) { this.transaction(() => { const now = Date.now(); this.exec("UPDATE script_tests SET status=?,output_ref=?,error_json=?,stdout_ref=?,stderr_ref=?,exit_code=?,duration_ms=?,ended_at=? WHERE id=? AND status='running'", result.status, result.output === undefined ? null : this.reference(result.output), result.error === undefined ? null : json(result.error), this.reference(result.stdout), this.reference(result.stderr), result.exitCode ?? null, result.durationMs ?? null, now, id); });
+    const test = this.scriptTest(id);
+    if (!["queued", "running"].includes(test.status)) { this.scriptTestActivities.get(id)?.(); this.scriptTestActivities.delete(id); }
+    return test;
+  }
   publishScript(scriptId: string, expectedRevision: number) {
-    return this.transaction(() => {
-      const script = this.script(scriptId), draftId = script.currentDraftVersionId; check(draftId, "NOT_FOUND", "脚本没有草稿");
-      check(script.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
-      const draft = this.scriptVersion(draftId); check(draft.revision === expectedRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
-      const now = Date.now(); this.exec("UPDATE script_versions SET status='published',published_at=?,updated_at=? WHERE id=?", now, now, draftId);
-      this.exec("UPDATE scripts SET status='published',current_published_version_id=?,current_draft_version_id=NULL,updated_at=? WHERE id=?", draftId, now, scriptId);
-      return { script: this.script(scriptId), version: this.scriptVersion(draftId) };
+    return configCoordinator(this).withWrite(() => {
+      return this.transaction(() => {
+        const script = this.script(scriptId), draftId = script.currentDraftVersionId; check(draftId, "NOT_FOUND", "脚本没有草稿");
+        check(script.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
+        const draft = this.scriptVersion(draftId); check(draft.revision === expectedRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
+        const now = Date.now(); this.exec("UPDATE script_versions SET status='published',published_at=?,updated_at=? WHERE id=?", now, now, draftId);
+        this.exec("UPDATE scripts SET status='published',current_published_version_id=?,current_draft_version_id=NULL,updated_at=? WHERE id=?", draftId, now, scriptId);
+        return { script: this.script(scriptId), version: this.scriptVersion(draftId) };
+      });
     });
   }
   version(id: string): Version {
@@ -344,24 +309,28 @@ export class Store {
     }
   }
   deleteWorkflow(id: string) {
-    return this.transaction(() => {
-      if (!this.one("SELECT id FROM workflows WHERE id=?", id)) return { id, deleted: true };
-      const versions = this.all<{ id: string }>("SELECT id FROM workflow_versions WHERE workflow_id=?", id);
-      this.deleteContent(this.workflowDraftIds(id), versions.map(version => version.id));
-      this.exec("UPDATE workflows SET current_version_id=NULL WHERE id=?", id);
-      for (const version of versions) this.exec("DELETE FROM command_receipts WHERE scope=? OR json_extract(result_json,'$.id')=?", `run:${version.id}`, version.id);
-      this.exec("DELETE FROM command_receipts WHERE scope=?", `version-draft:${id}`);
-      this.exec("DELETE FROM workflow_versions WHERE workflow_id=?", id);
-      this.exec("DELETE FROM workflows WHERE id=?", id);
-      return { id, deleted: true };
+    return configCoordinator(this).withWrite(() => {
+      return this.transaction(() => {
+        if (!this.one("SELECT id FROM workflows WHERE id=?", id)) return { id, deleted: true };
+        const versions = this.all<{ id: string }>("SELECT id FROM workflow_versions WHERE workflow_id=?", id);
+        this.deleteContent(this.workflowDraftIds(id), versions.map(version => version.id));
+        this.exec("UPDATE workflows SET current_version_id=NULL WHERE id=?", id);
+        for (const version of versions) this.exec("DELETE FROM command_receipts WHERE scope=? OR json_extract(result_json,'$.id')=?", `run:${version.id}`, version.id);
+        this.exec("DELETE FROM command_receipts WHERE scope=?", `version-draft:${id}`);
+        this.exec("DELETE FROM workflow_versions WHERE workflow_id=?", id);
+        this.exec("DELETE FROM workflows WHERE id=?", id);
+        return { id, deleted: true };
+      });
     });
   }
   deleteDraft(id: string) {
-    return this.transaction(() => {
-      if (!this.one("SELECT id FROM drafts WHERE id=?", id)) return { id, deleted: true };
-      check(this.draft(id).status !== "published", "DRAFT_BUSY", "已发布草稿请通过工作流详情删除");
-      this.deleteContent([id], []);
-      return { id, deleted: true };
+    return configCoordinator(this).withWrite(() => {
+      return this.transaction(() => {
+        if (!this.one("SELECT id FROM drafts WHERE id=?", id)) return { id, deleted: true };
+        check(this.draft(id).status !== "published", "DRAFT_BUSY", "已发布草稿请通过工作流详情删除");
+        this.deleteContent([id], []);
+        return { id, deleted: true };
+      });
     });
   }
   draft(id: string): Draft {
