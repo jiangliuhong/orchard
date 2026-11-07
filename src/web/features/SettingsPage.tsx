@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { ErrorNotice, Loading, PageHeading } from "../components/common";
 import { ModelManager } from "./ModelManager";
 import { WebBridgeSettings } from "./WebBridgeSettings";
+import { ConfigGitSettings } from "./ConfigGitSettings";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
   const localCli = typeof provider.config.executable === "string";
@@ -114,7 +115,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  const [section, setSection] = useState<"general" | "providers" | "web-bridge">("general");
+  const [section, setSection] = useState<"general" | "providers" | "web-bridge" | "config-git">("general");
   return <>
     <div className="settings-layout">
       <h1 className="sr-only">设置</h1>
@@ -123,9 +124,11 @@ export function SettingsPage() {
           <button className={section === "general" ? "active" : ""} onClick={() => setSection("general")}>常规</button>
           <button className={section === "providers" ? "active" : ""} onClick={() => setSection("providers")}>Provider</button>
           <button className={section === "web-bridge" ? "active" : ""} onClick={() => setSection("web-bridge")}>Web Bridge</button>
+          <button className={section === "config-git" ? "active" : ""} onClick={() => setSection("config-git")}>Git 配置存储</button>
         </nav>
       </aside>
       <section className="settings-content">
+      {section === "config-git" && <ConfigGitSettings />}
       {section === "providers" && <>
         <div className="section-label"><span>Provider</span><span>{data?.items.length ?? 0} 个连接</span></div>
         <ErrorNotice message={error} />

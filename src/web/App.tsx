@@ -5,6 +5,7 @@ import { WorkflowsPage, WorkflowPage } from "./features/WorkflowPages";
 import { DraftPage } from "./features/DraftPage";
 import { RunPage, RunsPage } from "./features/RunPages";
 import { SettingsPage } from "./features/SettingsPage";
+import { ConfigGitGeneralDelivery } from "./features/ConfigGitSettings";
 import { ErrorNotice } from "./components/common";
 import { ThemePicker } from "./lib/theme";
 import { BootstrapGate } from "./Bootstrap";
@@ -31,6 +32,6 @@ export function BusinessApp() {
       </nav>
       <div className="header-actions"><span className="local-indicator"><i />本地</span><ThemePicker /></div>
     </header>
-    <main className="app-main"><ErrorBoundary>{page}</ErrorBoundary></main>
+    <main className="app-main"><ErrorBoundary><ConfigGitGeneralDelivery />{page}</ErrorBoundary></main>
   </div>;
 }

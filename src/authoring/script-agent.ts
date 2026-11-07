@@ -1,3 +1,4 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { digest, canonicalJson } from "../persistence/files.js";
 import { ScriptJournal } from "../persistence/script-journal.js";
@@ -51,6 +52,7 @@ export class ScriptAgentService {
     return { total: records.length, activeCount: records.filter(turn => ["queued", "running"].includes(turn.status)).length, items: records.slice(offset, offset + limit).map(turn => ({ ...turn, appliedRevision: this.applied(scriptId, turn.id)?.version.revision ?? null })) };
   }
   start(scriptId: string, input: ScriptAgentRequest) {
+    configCoordinator(this.store).assertAvailable();
     check(!this.closed, "SERVICE_CLOSED", "脚本 Agent 已关闭");
     check(typeof input.requestId === "string" && input.requestId.length > 0 && input.requestId.length <= 200, "INVALID_REQUEST_ID", "requestId 无效");
     const id = digest(input.requestId), requestHash = digest(canonicalJson(input)), prior = this.journal.read(scriptId, id);
@@ -70,9 +72,10 @@ export class ScriptAgentService {
     check(/^[a-zA-Z0-9-]{1,100}$/.test(conversationId), "INVALID_REQUEST", "对话 ID 无效");
     check(!this.journal.list(scriptId).some(turn => turn.conversationId === conversationId && turn.draftVersionId !== draft.id), "CONVERSATION_DRAFT_CONFLICT", "此对话属于历史草稿，请新建对话", 409);
     const turn: ScriptAgentTurn = { id, scriptId, conversationId, draftVersionId: draft.id, baseRevision: draft.revision, snapshot, requestHash, prompt: input.prompt, choice, testId: input.testId, status: "queued", createdAt: Date.now(), endedAt: null };
-    this.journal.save(turn);
+    const release = configCoordinator(this.store).beginActivity("script-agent");
+    try { this.journal.save(turn); } catch (error) { release(); throw error; }
     const controller = new AbortController();
-    const job = Promise.resolve().then(() => this.run(turn, controller)).finally(() => this.jobs.delete(`${scriptId}:${id}`));
+    const job = Promise.resolve().then(() => this.run(turn, controller)).finally(() => { this.jobs.delete(`${scriptId}:${id}`); release(); });
     this.jobs.set(`${scriptId}:${id}`, { scriptId, controller, job });
     return this.get(scriptId, id);
   }
@@ -113,25 +116,27 @@ export class ScriptAgentService {
     } finally { clearTimeout(timer); rmSync(cwd, { recursive: true, force: true }); }
   }
   async apply(scriptId: string, input: { turnId: string; expectedRevision: number; requestId: string }) {
-    const scope = `script-agent-confirm:${scriptId}`;
-    if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) {
-      return this.store.command<ReturnType<Store["updateScriptDraft"]>>(scope, input.requestId, input, () => { throw new Error("unreachable"); });
-    }
-    const turn = this.journal.read(scriptId, input.turnId); check(turn, "NOT_FOUND", "脚本 Agent 轮次不存在", 404);
-    const applied = this.applied(scriptId, turn.id);
-    if (applied) {
-      check(input.expectedRevision === turn.baseRevision, "REVISION_CONFLICT", "应用修订号与提案不匹配", 409);
-      return this.store.command(scope, input.requestId, input, () => applied);
-    }
-    check(turn.status === "succeeded" && turn.proposal, "INVALID_STATE", "提案尚不可应用");
-    check(turn.proposal.changes.length || Object.keys(turn.proposal.metadata).length, "NO_CHANGES", "提案仅提供说明或测试输入，无需应用");
-    check(input.expectedRevision === turn.baseRevision, "REVISION_CONFLICT", "提案基于不同修订", 409);
-    const prepared = prepareScriptProposal(turn.snapshot, turn.proposal), validation = await scriptDiagnostics(prepared.definition), tree = this.library.saveTree(prepared.definition);
-    return this.store.command(scope, input.requestId, input, () => this.store.command(`script-agent-apply:${scriptId}`, turn.id, { turnId: turn.id, expectedRevision: input.expectedRevision }, () => {
-      const script = this.store.script(scriptId);
-      check(script.currentDraftVersionId === turn.draftVersionId, "REVISION_CONFLICT", "提案所属草稿已改变，请重新生成", 409);
-      return this.store.updateScriptDraft(scriptId, turn.baseRevision, prepared.definition, tree.path, tree.hash, validation);
-    }));
+    return configCoordinator(this.store).withActivity("ScriptAgentService.apply", async () => {
+      const scope = `script-agent-confirm:${scriptId}`;
+      if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) {
+        return configCoordinator(this.store).withWrite(() => this.store.command<ReturnType<Store["updateScriptDraft"]>>(scope, input.requestId, input, () => { throw new Error("unreachable"); }));
+      }
+      const turn = this.journal.read(scriptId, input.turnId); check(turn, "NOT_FOUND", "脚本 Agent 轮次不存在", 404);
+      const applied = this.applied(scriptId, turn.id);
+      if (applied) {
+        check(input.expectedRevision === turn.baseRevision, "REVISION_CONFLICT", "应用修订号与提案不匹配", 409);
+        return configCoordinator(this.store).withWrite(() => this.store.command(scope, input.requestId, input, () => applied));
+      }
+      check(turn.status === "succeeded" && turn.proposal, "INVALID_STATE", "提案尚不可应用");
+      check(turn.proposal.changes.length || Object.keys(turn.proposal.metadata).length, "NO_CHANGES", "提案仅提供说明或测试输入，无需应用");
+      check(input.expectedRevision === turn.baseRevision, "REVISION_CONFLICT", "提案基于不同修订", 409);
+      const prepared = prepareScriptProposal(turn.snapshot, turn.proposal), validation = await scriptDiagnostics(prepared.definition), tree = this.library.saveTree(prepared.definition);
+      return configCoordinator(this.store).withWrite(() => this.store.command(scope, input.requestId, input, () => this.store.command(`script-agent-apply:${scriptId}`, turn.id, { turnId: turn.id, expectedRevision: input.expectedRevision }, () => {
+        const script = this.store.script(scriptId);
+        check(script.currentDraftVersionId === turn.draftVersionId, "REVISION_CONFLICT", "提案所属草稿已改变，请重新生成", 409);
+        return this.store.updateScriptDraft(scriptId, turn.baseRevision, prepared.definition, tree.path, tree.hash, validation);
+      })));
+    });
   }
   cancel(scriptId: string, id: string) {
     const turn = this.get(scriptId, id);

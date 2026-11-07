@@ -160,6 +160,7 @@ test("conversation history commands are exposed over HTTP with stable error code
   const { store, providers, authoring } = setup(t);
   const { app } = createApp(store, providers);
   t.after(async () => { await app.close(); });
+  await app.ready();
   const draft = await authoring.create(undefined, randomUUID());
   const other = await authoring.create(undefined, randomUUID());
   const created = (await app.inject({ method: "POST", url: `/api/drafts/${draft.id}/conversations`, payload: { providerId: "test-provider", modelId: "test-model", expectedRevision: 0, requestId: randomUUID() } })).json();
@@ -194,6 +195,7 @@ test("needs_rebuild conversations surface SESSION_REBUILD_REQUIRED over HTTP and
   const { store, providers, authoring } = setup(t);
   const { app } = createApp(store, providers);
   t.after(async () => { await app.close(); });
+  await app.ready();
   const draft = await authoring.create(undefined, randomUUID());
   const conversations = authoring.conversations;
   const created = await conversations.create(draft.id, { providerId: "test-provider", modelId: "test-model", ...command() });

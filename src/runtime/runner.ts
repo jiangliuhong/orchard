@@ -1,3 +1,4 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, readFileSync, lstatSync } from "node:fs";
 import { join } from "node:path";
@@ -16,24 +17,37 @@ export class GraphRunner {
   private current?: { id: string; controller: AbortController; job: Promise<void> };
   private closing = false;
   private enabled = false;
+  private readonly activities = new Map<string, () => void>();
+  private track(id: string) {
+    if (!this.activities.has(id)) this.activities.set(id, configCoordinator(this.store).beginActivity(`run:${id}`));
+  }
+  private release(id: string) { this.activities.get(id)?.(); this.activities.delete(id); }
   constructor(readonly store: Store, readonly providers: ProviderRegistry, readonly webBridge?: WebBridgeGateway, autoStart = true) { if (autoStart) this.start(); }
-  start() { this.enabled = true; this.wake(); }
+  start() {
+    configCoordinator(this.store).assertAvailable();
+    for (const row of this.store.all<{ id: string }>("SELECT id FROM runs WHERE status IN ('queued','running','cancel_requested')")) this.track(row.id);
+    this.enabled = true; this.wake();
+  }
   create(versionId: string, input: unknown, requestId: string) {
-    const version = this.store.version(versionId);
-    assertSchema(input, version.definition.inputSchema, "工作流输入");
-    this.store.assertWorkflowScripts(version.definition, true);
-    for (const node of version.definition.nodes) {
-      if (node.type === "agent") this.providers.resolve(node.config);
-      if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
-    }
-    const result = this.store.command(`run:${versionId}`, requestId, input, () => {
-      const id = randomUUID(), now = Date.now();
-      this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
-      for (const node of version.definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
-      this.store.append("run", id, "run.queued", { versionId });
-      return this.store.run(id);
+    return configCoordinator(this.store).withActivity("run:accept", () => {
+      configCoordinator(this.store).assertAvailable();
+      const version = this.store.version(versionId);
+      assertSchema(input, version.definition.inputSchema, "工作流输入");
+      this.store.assertWorkflowScripts(version.definition, true);
+      for (const node of version.definition.nodes) {
+        if (node.type === "agent") this.providers.resolve(node.config);
+        if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
+      }
+      const result = this.store.command(`run:${versionId}`, requestId, input, () => {
+        const id = randomUUID(), now = Date.now();
+        this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
+        for (const node of version.definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+        this.store.append("run", id, "run.queued", { versionId });
+        return this.store.run(id);
+      });
+      if (["queued", "running", "cancel_requested"].includes(result.status)) this.track(result.id);
+      this.wake(); return result;
     });
-    this.wake(); return result;
   }
   private editableDraft(id: string, revision: number) {
     const draft = this.store.draft(id);
@@ -43,31 +57,34 @@ export class GraphRunner {
     return draft;
   }
   async createDraft(draftId: string, revision: number, input: unknown, requestId: string) {
-    const scope = `draft-run:${draftId}`, command = { revision, input };
-    if (this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
-      return this.store.command<Run>(scope, requestId, command, () => { throw new Error("unreachable"); });
-    }
-    const draft = this.editableDraft(draftId, revision);
-    const original = this.store.files.readTree(draft.artifactPath).files;
-    const definition = await this.providers.freeze(readDefinition(original));
-    assertSchema(input, definition.inputSchema, "工作流输入");
-    const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
-    readLayout(files);
-    const compiled = await compileScripts(files, definition), tree = this.store.files.saveTree(files, compiled);
-    const result = this.store.command(scope, requestId, command, () => {
-      this.editableDraft(draftId, revision);
-      this.store.assertWorkflowScripts(definition);
-      for (const node of definition.nodes) {
-        if (node.type === "agent") this.providers.resolve(node.config);
-        if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
+    return configCoordinator(this.store).withActivity("GraphRunner.createDraft", async () => {
+      const scope = `draft-run:${draftId}`, command = { revision, input };
+      if (this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
+        return this.store.command<Run>(scope, requestId, command, () => { throw new Error("unreachable"); });
       }
-      const id = randomUUID(), now = Date.now();
-      this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
-      for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
-      this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
-      return this.store.run(id);
+      const draft = this.editableDraft(draftId, revision);
+      const original = this.store.files.readTree(draft.artifactPath).files;
+      const definition = await this.providers.freeze(readDefinition(original));
+      assertSchema(input, definition.inputSchema, "工作流输入");
+      const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
+      readLayout(files);
+      const compiled = await compileScripts(files, definition), tree = this.store.files.saveTree(files, compiled);
+      const result = this.store.command(scope, requestId, command, () => {
+        this.editableDraft(draftId, revision);
+        this.store.assertWorkflowScripts(definition);
+        for (const node of definition.nodes) {
+          if (node.type === "agent") this.providers.resolve(node.config);
+          if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
+        }
+        const id = randomUUID(), now = Date.now();
+        this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
+        for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+        this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
+        return this.store.run(id);
+      });
+      if (["queued", "running", "cancel_requested"].includes(result.status)) this.track(result.id);
+      this.wake(); return result;
     });
-    this.wake(); return result;
   }
   private execution(run: Run): RunExecution {
     if (run.workflowVersionId) return this.store.version(run.workflowVersionId);
@@ -95,6 +112,7 @@ export class GraphRunner {
       return this.store.run(id).status;
     });
     if (status === "cancel_requested" && this.current?.id === id) this.current.controller.abort();
+    if (status === "cancelled" && this.current?.id !== id) this.release(id);
     return this.store.run(id);
   }
   wake() {
@@ -103,8 +121,9 @@ export class GraphRunner {
       if (this.current || this.closing) return;
       const next = this.store.one<{ id: string }>("SELECT id FROM runs WHERE status='queued' ORDER BY created_at,rowid LIMIT 1");
       if (!next) return;
+      this.track(next.id);
       const controller = new AbortController();
-      const job = this.execute(next.id, controller.signal).finally(() => { this.current = undefined; this.wake(); });
+      const job = this.execute(next.id, controller.signal).finally(() => { this.release(next.id); this.current = undefined; this.wake(); });
       this.current = { id: next.id, controller, job };
     });
   }

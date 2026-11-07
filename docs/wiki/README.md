@@ -17,12 +17,13 @@
 ## 运行与验收
 
 - [运行状态与数据生命周期](./operations/runtime.md)
+- [配置 Git 备份与恢复](./operations/config-git.md)
 - [开发验证与后续验收](./operations/verification.md)
 
 ## 决策记录
 
 - [草稿运行测试设计](./decisions/draft-testing-design.md)
 
-功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（已完成并验收）](../features/2026-11-06-data-migration/design.md)。
+功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（已完成并验收）](../features/2026-11-06-data-migration/design.md)；[配置定义信息 Git 存储（实现与验证记录）](../features/2026-11-06-config-git-storage/design.md)。
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

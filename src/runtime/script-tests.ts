@@ -1,3 +1,4 @@
+import { configCoordinator } from "../config-git/coordinator.js";
 import { Store } from "../persistence/store.js";
 import { failure, check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
@@ -8,13 +9,24 @@ export class ScriptTestRunner {
   private closed = false;
   private enabled = false;
   constructor(readonly store: Store, autoStart = true) {
-    for (const test of store.all<{ id: string }>("SELECT id FROM script_tests WHERE status='running'")) {
-      store.finishScriptTest(test.id, { status: "failed", error: { code: "INTERRUPTED", message: "服务重启，测试已中断，请重新测试" }, stdout: "", stderr: "" });
-    }
     if (autoStart) this.start();
   }
-  start() { this.enabled = true; this.wake(); }
-  enqueue(id: string) { this.wake(); return this.store.scriptTest(id); }
+  start() {
+    configCoordinator(this.store).assertAvailable();
+    if (!this.enabled) {
+      for (const test of this.store.all<{ id: string }>("SELECT id FROM script_tests WHERE status='running'")) {
+        this.store.finishScriptTest(test.id, { status: "failed", error: { code: "INTERRUPTED", message: "服务重启，测试已中断，请重新测试" }, stdout: "", stderr: "" });
+      }
+    }
+    for (const test of this.store.all<{ id: string }>("SELECT id FROM script_tests WHERE status IN ('queued','running')")) this.store.trackScriptTestActivity(test.id);
+    this.enabled = true; this.wake();
+  }
+  enqueue(id: string) {
+    configCoordinator(this.store).assertAvailable();
+    const test = this.store.scriptTest(id);
+    if (["queued", "running"].includes(test.status)) this.store.trackScriptTestActivity(id);
+    this.wake(); return test;
+  }
   cancel(id: string) {
     const test = this.store.scriptTest(id);
     if (this.active?.id === id) this.active.controller.abort();
@@ -30,6 +42,7 @@ export class ScriptTestRunner {
       if (this.active || this.closed) return;
       const next = this.store.one<{ id: string }>("SELECT id FROM script_tests WHERE status='queued' ORDER BY created_at,rowid LIMIT 1");
       if (!next) return;
+      this.store.trackScriptTestActivity(next.id);
       const controller = new AbortController();
       const job = this.run(next.id, controller.signal).finally(() => { this.active = undefined; this.wake(); });
       this.active = { id: next.id, controller, job };
