@@ -4,6 +4,7 @@ import { createElement, useState } from "react";
 import { JSDOM } from "jsdom";
 import { registerHooks } from "node:module";
 import type { AgentModelConfigView, Binding, ConversationView, ProviderView, NodeRun, StreamEvent, Workflow } from "../src/domain/types.js";
+import type { AgentChatConfig, ChatSubmission } from "../src/web/agent-chat/types.js";
 import { projectGraph, applyEventStatus, renderableWorkflow } from "../src/web/features/graph.js";
 import { mergeEvents } from "../src/web/lib/api.js";
 import { exampleFiles } from "./helpers.js";
@@ -55,11 +56,93 @@ const { BusinessApp: App } = await import("../src/web/App.js");
 const { ScriptPage, ScriptsPage } = await import("../src/web/features/ScriptPages.js");
 const { ScriptNodePicker } = await import("../src/web/features/ScriptNodePicker.js");
 const { ScriptAgentPanel, ScriptAgentPreview } = await import("../src/web/features/ScriptAgentPanel.js");
+const { AgentChat } = await import("../src/web/agent-chat/AgentChat.js");
 const { ArchiveConversationButton } = await import("../src/web/features/ArchiveConversationButton.js");
 const { ScriptCleanup, ScriptReferences } = await import("../src/web/features/ScriptVersionPanels.js");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { ThemePicker, ThemeProvider, themeStorageKey } = await import("../src/web/lib/theme.js");
 afterEach(() => cleanup());
+
+interface TestChatContext {
+  allowAttachments: boolean;
+  send: (submission: ChatSubmission) => Promise<void>;
+}
+
+const testChatConfig: AgentChatConfig<TestChatContext> = {
+  id: "custom", label: "测试对话", promptLabel: "测试需求", placeholder: "请输入",
+  welcome: { title: "开始对话", description: "自定义接入" },
+  useSession: context => {
+    const [conversationId, setConversationId] = useState("initial");
+    return {
+      conversationId, title: "新对话", conversations: [], messages: [],
+      newConversation: () => setConversationId(crypto.randomUUID()),
+      selectConversation: setConversationId,
+      send: context.send,
+    };
+  },
+  attachments: {
+    enabled: context => context.allowAttachments,
+    renderPicker: ({ onAdd, onClose }) => createElement("button", { onClick: () => {
+      onAdd({ id: "custom-resource", kind: "custom", label: "自定义资料", payload: { resource: "sample" } });
+      onClose();
+    } }, "添加自定义资料"),
+  },
+};
+
+test("shared Agent chat lets integrations hide attachments and provide their own picker and payload", async () => {
+  const originalFetch = globalThis.fetch, submissions: ChatSubmission[] = [];
+  globalThis.fetch = async () => Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  try {
+    const context: TestChatContext = { allowAttachments: false, send: async input => { submissions.push(input); } };
+    const view = render(createElement(AgentChat<TestChatContext>, { config: testChatConfig, context, resourceKey: "resource" }));
+    assert.equal(screen.queryByRole("button", { name: "添加引用" }), null);
+    view.rerender(createElement(AgentChat<TestChatContext>, { config: testChatConfig, context: { ...context, allowAttachments: true }, resourceKey: "resource" }));
+    fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加自定义资料" }));
+    assert.ok(screen.getByText("自定义资料"));
+    assert.equal(screen.queryByRole("button", { name: "添加自定义资料" }), null);
+    fireEvent.change(screen.getByLabelText("测试需求"), { target: { value: "带引用的问题" } });
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
+    fireEvent.keyDown(screen.getByLabelText("测试需求"), { ctrlKey: true, key: "Enter" });
+    await waitFor(() => assert.equal(submissions.length, 1));
+    assert.equal(submissions[0]!.prompt, "带引用的问题");
+    assert.deepEqual(submissions[0]!.attachments[0]!.payload, { resource: "sample" });
+    fireEvent.click(screen.getByRole("button", { name: "移除引用：自定义资料" }));
+    assert.equal(screen.queryByText("自定义资料"), null);
+    view.rerender(createElement(AgentChat<TestChatContext>, { config: { ...testChatConfig, attachments: undefined }, context, resourceKey: "resource" }));
+    assert.equal(screen.queryByRole("button", { name: "添加引用" }), null);
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+});
+
+test("shared Agent chat preserves failed prompts and request IDs, prevents duplicate sends, and resets resources", async () => {
+  const originalFetch = globalThis.fetch, submissions: ChatSubmission[] = [];
+  globalThis.fetch = async () => Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  let rejectSend: (error: Error) => void = () => {};
+  try {
+    const context: TestChatContext = { allowAttachments: true, send: input => {
+      submissions.push(input);
+      return new Promise<void>((_resolve, reject) => { rejectSend = reject; });
+    } };
+    const view = render(createElement(AgentChat<TestChatContext>, { config: testChatConfig, context, resourceKey: "first" }));
+    fireEvent.change(screen.getByLabelText("测试需求"), { target: { value: "请解释这个问题" } });
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    fireEvent.keyDown(screen.getByLabelText("测试需求"), { metaKey: true, key: "Enter" });
+    assert.equal(submissions.length, 1);
+    await act(async () => rejectSend(new Error("暂时不可用")));
+    assert.ok(await screen.findByText("暂时不可用"));
+    assert.equal((screen.getByLabelText("测试需求") as HTMLTextAreaElement).value, "请解释这个问题");
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    assert.equal(submissions.length, 2);
+    assert.equal(submissions[0]!.requestId, submissions[1]!.requestId);
+    view.rerender(createElement(AgentChat<TestChatContext>, { config: testChatConfig, context, resourceKey: "second" }));
+    assert.equal((screen.getByLabelText("测试需求") as HTMLTextAreaElement).value, "");
+    await act(async () => rejectSend(new Error("旧资源失败")));
+    assert.equal(screen.queryByText("旧资源失败"), null);
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+});
 test("Web Bridge displays the browser extension directory while no browser is connected", async () => {
   const originalFetch = globalThis.fetch;
   const directory = "/Applications/Orchard/dist/web-bridge/extension";
@@ -70,10 +153,11 @@ test("Web Bridge displays the browser extension directory while no browser is co
   };
   try {
     render(createElement(WebBridgeSettings));
+    fireEvent.click(screen.getByRole("button", { name: "浏览器连接" }));
     await waitFor(() => assert.equal((screen.getByLabelText("浏览器插件目录") as HTMLInputElement).value, directory));
     assert.ok((screen.getByLabelText("浏览器插件目录") as HTMLInputElement).readOnly);
     assert.ok(screen.getByText(/chrome:\/\/extensions/));
-    assert.ok(await screen.findByText("还没有应用定义，请先添加一个应用。"));
+    assert.ok(await screen.findByText("创建第一个网页应用"));
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -84,6 +168,7 @@ test("Web Bridge reports extension directory loading failures", async () => {
     : Response.json({ items: [] });
   try {
     render(createElement(WebBridgeSettings));
+    fireEvent.click(screen.getByRole("button", { name: "浏览器连接" }));
     assert.ok(await screen.findByText("无法读取插件目录"));
     assert.equal((screen.getByLabelText("浏览器插件目录") as HTMLInputElement).placeholder, "目录加载失败");
   } finally { globalThis.fetch = originalFetch; }
@@ -103,12 +188,14 @@ test("Web Bridge refreshes browser profiles and offers newly registered profiles
   };
   try {
     render(createElement(WebBridgeSettings));
-    fireEvent.click(await screen.findByRole("button", { name: "管理应用" }));
+    fireEvent.click(await screen.findByRole("button", { name: "环境" }));
     assert.ok(screen.getByText("暂无已连接的浏览器资料，请先启动 Chrome 扩展。"));
     connected = true;
+    fireEvent.click(screen.getByRole("button", { name: "浏览器连接" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新浏览器资料" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     assert.ok(await screen.findByRole("option", { name: "Chrome · klmnop · ijklmnop · 已连接" }));
-    assert.ok(screen.getByText("已注册的浏览器资料：1"));
+    assert.equal(screen.queryByText("浏览器资料：1 个在线"), null);
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -130,6 +217,7 @@ test("Web Bridge lists named browser profiles with details and refreshes names w
   };
   try {
     render(createElement(WebBridgeSettings));
+    fireEvent.click(screen.getByRole("button", { name: "浏览器连接" }));
     await screen.findByText("已注册的浏览器资料：2");
     const list = screen.getByRole("region", { name: "浏览器资料列表" });
     assert.ok(list.textContent?.includes("工作 Chrome"));
@@ -137,18 +225,143 @@ test("Web Bridge lists named browser profiles with details and refreshes names w
     assert.ok(list.textContent?.includes("profile-work"));
     assert.ok(list.textContent?.includes(extensionId));
     assert.equal(list.querySelector("time")!.dateTime, new Date(lastSeen).toISOString());
-    fireEvent.click(await screen.findByRole("button", { name: "管理应用" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    fireEvent.click(await screen.findByRole("button", { name: "环境" }));
     const select = screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement;
     const work = screen.getByRole("option", { name: "工作 Chrome · ile-work · 已连接" }) as HTMLOptionElement;
     assert.equal(work.value, "profile-work");
     assert.equal((screen.getByRole("option", { name: "测试 Chrome · ile-test · 已断开" }) as HTMLOptionElement).disabled, true);
     fireEvent.change(select, { target: { value: "profile-work" } });
     name = "财务工作浏览器";
-    fireEvent.click(screen.getByRole("button", { name: "刷新浏览器资料" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新网页桥接" }));
     await screen.findByRole("option", { name: "财务工作浏览器 · ile-work · 已连接" });
     assert.equal(select.value, "profile-work");
     assert.ok(screen.getByText("财务工作浏览器 · 已绑定"));
   } finally { globalThis.fetch = originalFetch; }
+});
+
+function clearBridgePreferences() {
+  for (const key of Object.keys(localStorage)) if (key.startsWith("orchard.bridge.")) localStorage.removeItem(key);
+}
+const bridgeTestTool = (application: string, toolId = "query") => ({
+  application, toolId, site: application, description: `${application} 查询`, parameters: { type: "object", properties: {} },
+  path: "/api/query", method: "GET", fields: ["items"], risk: "read", approval: "none", timeoutMs: 1000, catalogVersion: "1", enabled: true,
+});
+test("Bridge workspace protects unsaved tools, keeps tests isolated by application and tolerates unavailable profiles", async () => {
+  clearBridgePreferences();
+  localStorage.setItem("orchard.bridge.agentOpen", "false");
+  const originalFetch = globalThis.fetch;
+  let saved = 0, testCalls = 0;
+  const tools = [bridgeTestTool("crm"), bridgeTestTool("orders")];
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (path.endsWith("/profiles")) return Response.json({ message: "资料暂不可用" }, { status: 500 });
+    if (path.endsWith("/applications")) return Response.json({ items: ["crm", "orders"].map(id => ({ id, name: id, enabled: true, environments: [] })) });
+    if (path.endsWith("/definition")) { saved++; tools[0] = JSON.parse(String(options?.body)); return Response.json(tools[0]); }
+    if (path.endsWith("/tools")) return Response.json({ items: tools });
+    if (path.endsWith("/test")) { testCalls++; return Response.json({ items: ["CRM_RESULT"] }); }
+    return Response.json({ items: [], conversations: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.change(screen.getByLabelText("工具说明"), { target: { value: "手动修改" } });
+    fireEvent.click(screen.getByRole("button", { name: "选择应用 orders" }));
+    assert.ok(await screen.findByRole("dialog", { name: "有未保存的工具修改" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    assert.equal((screen.getByLabelText("工具说明") as HTMLInputElement).value, "手动修改");
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    assert.equal((screen.getByRole("button", { name: "执行测试" }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(screen.getByRole("button", { name: "工具定义" }));
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await waitFor(() => assert.equal(saved, 1));
+    await screen.findByText("工具定义已保存");
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+    await screen.findByText(/CRM_RESULT/);
+    fireEvent.click(screen.getByRole("button", { name: "选择应用 orders" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    assert.equal(screen.queryByText(/CRM_RESULT/), null);
+    assert.equal(testCalls, 1);
+    assert.equal(screen.queryByText("浏览器资料：状态不可用"), null);
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
+test("Bridge tool forms preserve invalid JSON until corrected and failed deletion remains retryable", async () => {
+  clearBridgePreferences(); localStorage.setItem("orchard.bridge.agentOpen", "false");
+  const originalFetch = globalThis.fetch;
+  let deletes = 0;
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (options?.method === "DELETE") { deletes++; return deletes === 1 ? Response.json({ message: "请先停止任务" }, { status: 409 }) : Response.json({ ok: true }); }
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    if (path.endsWith("/tools")) return Response.json({ items: [bridgeTestTool("crm")] });
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.change(screen.getByLabelText("参数 Schema（JSON）"), { target: { value: "{" } });
+    fireEvent.click(screen.getByRole("button", { name: "工具列表" }));
+    assert.ok(screen.getByRole("dialog", { name: "有未保存的工具修改" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    assert.equal((screen.getByLabelText("参数 Schema（JSON）") as HTMLTextAreaElement).value, "{");
+    assert.equal((screen.getByRole("button", { name: "测试" }) as HTMLButtonElement).disabled, true);
+    fireEvent.change(screen.getByLabelText("参数 Schema（JSON）"), { target: { value: '{"type":"object","properties":{}}' } });
+    fireEvent.click(screen.getByRole("button", { name: "工具列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除工具 query" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除工具" }));
+    await screen.findAllByText("请先停止任务");
+    assert.ok(screen.getByRole("dialog", { name: "删除工具" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除工具" }));
+    await waitFor(() => assert.equal(screen.queryAllByRole("dialog").length, 0));
+    assert.equal(deletes, 2);
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
+test("Bridge Agent sends scoped conversations, reviews changes without mutation and applies explicitly", async () => {
+  clearBridgePreferences();
+  localStorage.setItem("orchard.bridge.provider", JSON.stringify({ providerId: "third-provider", modelId: "model" }));
+  const originalFetch = globalThis.fetch;
+  let turn: Record<string, unknown> | undefined, applied = 0;
+  let received: Record<string, unknown> | undefined;
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    if (path.endsWith("/tools")) return Response.json({ items: [] });
+    if (path.endsWith("/providers")) return Response.json({ items: [provider({ defaultModel: "model", models: [{ id: "model", name: "Model", source: "configured", enabled: true }] })] });
+    if (path.endsWith("/apply")) { applied++; return Response.json({ hash: "applied-hash" }); }
+    if (path.includes("/agent/turns")) {
+      if (options?.method === "POST") {
+        received = JSON.parse(String(options.body));
+        turn = { id: "turn", application: "crm", conversationId: received!.conversationId, prompt: received!.prompt, status: "succeeded", baseHash: "base", base: [], proposal: { summary: "建议新增查询工具", changes: [{ operation: "create", toolId: "query", definition: bridgeTestTool("crm") }] } };
+        return Response.json(turn);
+      }
+      return Response.json({ items: turn ? [turn] : [], conversations: turn ? [{ id: turn.conversationId, title: turn.prompt, updatedAt: 1 }] : [] });
+    }
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    await screen.findByText("当前应用：CRM");
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true));
+    fireEvent.change(screen.getByLabelText("Agent 维护需求"), { target: { value: "请新增查询工具" } });
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    fireEvent.click(await screen.findByRole("button", { name: "审阅 1 项变更" }));
+    assert.ok(await screen.findByLabelText("变更差异：query.json"));
+    assert.equal(applied, 0);
+    assert.equal(received?.prompt, "请新增查询工具");
+    assert.equal(received?.providerId, "third-provider");
+    assert.equal(received?.testContext, undefined);
+    fireEvent.click(screen.getByRole("button", { name: "确认应用变更" }));
+    await waitFor(() => assert.equal(applied, 1));
+    await screen.findByRole("button", { name: "已应用" });
+    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
+    await waitFor(() => assert.equal(screen.getByRole("complementary", { name: "应用 Agent 维护" }).querySelector(".agent-chat-messages")!.textContent?.includes("请新增查询工具"), false));
+    assert.equal(applied, 1);
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
 });
 
 test("script list filters request server pagination and exposes script creation", async () => {
@@ -435,7 +648,7 @@ test("script Agent heading uses the first submitted prompt and resets for a new 
     render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => {}, onTestInput: () => {} }));
     await screen.findByRole("combobox", { name: "模型" });
     fireEvent.change(screen.getByLabelText("描述脚本需求或修复要求"), { target: { value: firstPrompt } });
-    const generate = screen.getByRole("button", { name: "生成变更预览" });
+    const generate = screen.getByRole("button", { name: "发送" });
     await waitFor(() => assert.equal((generate as HTMLButtonElement).disabled, false));
     fireEvent.click(generate);
     const heading = await screen.findByRole("heading", { name: firstPrompt });
@@ -443,6 +656,43 @@ test("script Agent heading uses the first submitted prompt and resets for a new 
     fireEvent.click(screen.getByRole("button", { name: "新对话" }));
     assert.ok(screen.getByRole("heading", { name: "新对话" }));
     assert.equal((screen.getByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "");
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+});
+
+test("script Agent sends selected references and renders ordinary answers without change controls", async () => {
+  const originalFetch = globalThis.fetch, requests: Record<string, unknown>[] = [];
+  let conversationId = "";
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+    if (path.includes("/tests?")) return Response.json({ items: [{ id: "failed-test", status: "failed", createdAt: 0 }] });
+    if (options?.method === "POST") {
+      const input = JSON.parse(String(options.body));
+      requests.push(input); conversationId = input.conversationId;
+      return Response.json({ id: "answer" });
+    }
+    if (path.includes("/turns?")) return Response.json({
+      items: conversationId ? [{ id: "answer", conversationId, prompt: "为什么失败", summary: "输入日期格式不符合预期。", status: "succeeded", hasChanges: false, hasTestInput: false, appliedRevision: null }] : [],
+      total: conversationId ? 1 : 0, activeCount: 0,
+    });
+    return Response.json({ items: [] });
+  };
+  try {
+    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
+    render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => assert.fail("conversation must not apply"), onTestInput: () => {} }));
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "添加引用" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
+    await screen.findByRole("option", { name: /failed/ });
+    fireEvent.change(screen.getByLabelText("引用测试结果"), { target: { value: "failed-test" } });
+    fireEvent.change(screen.getByLabelText("描述脚本需求或修复要求"), { target: { value: "为什么失败" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    assert.ok(await screen.findByText("输入日期格式不符合预期。"));
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]!.testId, "failed-test");
+    assert.equal(screen.queryByRole("button", { name: "查看变更" }), null);
+    assert.equal(screen.queryByText(/提案详情/), null);
+    assert.equal(screen.queryByRole("button", { name: "生成变更预览" }), null);
   } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
 });
 
@@ -457,11 +707,44 @@ test("newly completed script tests become available as Agent repair context with
     const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
     const props = { script, dirty: false, onApplied: () => {}, onTestInput: () => {} };
     const view = render(createElement(ScriptAgentPanel, { ...props, testRefresh: 0 }));
+    assert.equal(screen.queryByLabelText("引用测试结果"), null);
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "添加引用" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
     await waitFor(() => assert.ok(screen.getByLabelText("引用测试结果")));
     assert.equal(screen.queryByRole("option", { name: /failed/ }), null);
     available = true;
     view.rerender(createElement(ScriptAgentPanel, { ...props, testRefresh: 1 }));
     assert.ok(await screen.findByRole("option", { name: /failed/ }));
+    fireEvent.change(screen.getByLabelText("引用测试结果"), { target: { value: "failed-test" } });
+    await waitFor(() => assert.equal(screen.queryByLabelText("引用测试结果"), null));
+    assert.ok(screen.getByText(/^测试引用 ·/));
+    fireEvent.click(screen.getByRole("button", { name: /^移除引用：测试引用/ }));
+    assert.equal(screen.queryByText(/^测试引用 ·/), null);
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("script Agent loads older conversation messages without pagination controls", async () => {
+  const originalFetch = globalThis.fetch;
+  const offsets: string[] = [];
+  globalThis.fetch = async url => {
+    const path = String(url);
+    if (path.includes("/turns?")) {
+      const params = new URL(path, "http://localhost").searchParams;
+      const offset = params.get("offset")!;
+      offsets.push(offset);
+      return Response.json({ items: [{ id: `turn-${offset}`, conversationId: params.get("conversationId"), prompt: offset === "0" ? "最新需求" : "较早需求", status: "failed", baseRevision: 0, appliedRevision: null }], total: 2, activeCount: 0 });
+    }
+    if (path.endsWith("/turns/turn-0")) return Response.json({ id: "turn-0", status: "failed", baseRevision: 0, appliedRevision: null });
+    return Response.json({ items: [] });
+  };
+  try {
+    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
+    render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => {}, onTestInput: () => {} }));
+    await waitFor(() => assert.ok(offsets.includes("1")));
+    assert.ok(await screen.findByText("较早需求", { selector: "p" }));
+    assert.ok(screen.getByText("最新需求"));
+    assert.equal(screen.queryByRole("button", { name: "上一页" }), null);
+    assert.equal(screen.queryByRole("button", { name: "下一页" }), null);
+    assert.equal(screen.queryByText("2 条记录"), null);
   } finally { globalThis.fetch = originalFetch; }
 });
 function provider(overrides: Partial<ProviderView> = {}): ProviderView {
@@ -475,6 +758,63 @@ test("Provider picker distinguishes no enabled provider, empty model catalog and
   view.rerender(createElement(ProviderPicker, { providers: [provider({ enabled: false })], value: { providerId: "third-provider", modelId: "saved-model" }, onChange: () => {} }));
   assert.ok(screen.getByText(/已保存选择当前不可用/));
   assert.ok(screen.getByText(/saved-model/));
+});
+test("model picker preserves labels and page scroll styles while opening and selecting", async () => {
+  const longName = "GPT-6.1-Terra · routing group with a very long model name";
+  const providers = [provider({ models: [
+    { id: "long-model", name: longName, source: "configured" },
+    { id: "short-model", name: "Short model", source: "configured" },
+  ] })];
+  function Picker() {
+    const [choice, setChoice] = useState<{ providerId?: string; modelId?: string }>({ providerId: "third-provider", modelId: "long-model" });
+    return createElement(ProviderPicker, { providers, value: choice, onChange: setChoice });
+  }
+  render(createElement(Picker));
+  const trigger = screen.getByRole("combobox", { name: "模型" });
+  const bodyStyle = document.body.getAttribute("style"), rootStyle = document.documentElement.getAttribute("style");
+  assert.equal(trigger.getAttribute("title"), longName);
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  const menu = await screen.findByRole("listbox");
+  assert.ok(menu.closest("[data-radix-popper-content-wrapper]"));
+  assert.equal(menu.getAttribute("data-align"), "start");
+  assert.equal(document.body.hasAttribute("data-scroll-locked"), false);
+  assert.equal(document.body.getAttribute("style"), bodyStyle);
+  assert.equal(document.documentElement.getAttribute("style"), rootStyle);
+  assert.ok(trigger.textContent?.includes(longName));
+  assert.equal(screen.getByRole("option", { name: longName }).getAttribute("title"), longName);
+  fireEvent.click(screen.getByRole("option", { name: "Short model" }));
+  await waitFor(() => assert.equal(screen.queryByRole("listbox"), null));
+  assert.equal(trigger.getAttribute("title"), "Short model");
+  assert.ok(trigger.textContent?.includes("Short model"));
+  assert.equal(document.body.hasAttribute("data-scroll-locked"), false);
+  assert.equal(document.body.getAttribute("style"), bodyStyle);
+});
+test("model picker supports keyboard selection and Escape without locking page scrolling", async () => {
+  const providers = [provider({ models: [
+    { id: "first", name: "First model", source: "configured" },
+    { id: "disabled", name: "Disabled model", source: "configured", enabled: false },
+    { id: "last", name: "Last model", source: "configured" },
+  ] })];
+  function Picker() {
+    const [choice, setChoice] = useState<{ providerId?: string; modelId?: string }>({ providerId: "third-provider", modelId: "first" });
+    return createElement(ProviderPicker, { providers, value: choice, onChange: setChoice });
+  }
+  render(createElement(Picker));
+  const trigger = screen.getByRole("combobox", { name: "模型" });
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  await screen.findByRole("listbox");
+  await waitFor(() => assert.equal(document.activeElement, screen.getByRole("option", { name: "First model" })));
+  fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+  await waitFor(() => assert.equal(document.activeElement, screen.getByRole("option", { name: "Last model" })));
+  fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+  await waitFor(() => assert.equal(screen.queryByRole("listbox"), null));
+  assert.ok(trigger.textContent?.includes("Last model"));
+  fireEvent.keyDown(trigger, { key: "Enter" });
+  await screen.findByRole("listbox");
+  assert.equal(document.body.hasAttribute("data-scroll-locked"), false);
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  await waitFor(() => assert.equal(screen.queryByRole("listbox"), null));
+  await waitFor(() => assert.equal(document.activeElement, trigger));
 });
 test("conversation Provider picker hides disabled CLIs and allows replacing a saved disabled choice", async () => {
   const providers = [
@@ -780,6 +1120,38 @@ test("event replay ignores duplicates and preserves interrupted or skipped termi
   assert.equal(updated[0]!.status, "succeeded"); assert.equal(updated[1]!.status, "skipped");
   assert.equal(applyEventStatus(updated, { ...event, type: "run.interrupted" }), updated);
 });
+test("draft workspace switches views and preserves the shared Agent composer", async () => {
+  const originalFetch = globalThis.fetch;
+  const draft = {
+    id: "responsive-draft", revision: 0, status: "draft", workflowId: null, publishedVersionId: null,
+    files: exampleFiles("responsive-flow"), validation: { valid: true, diagnostics: [] },
+    messages: [], turns: [], conversations: [], currentConversation: null,
+  };
+  globalThis.fetch = async url => Response.json(String(url) === "/api/drafts/responsive-draft" ? draft : { items: [] });
+  try {
+    render(createElement(DraftPage, { id: draft.id }));
+    const composer = await screen.findByLabelText("描述工作流需求");
+    fireEvent.change(composer, { target: { value: "切换视图后保留需求" } });
+    const workspace = document.querySelector(".studio-grid")!;
+    const buttons = [
+      { label: "流程", view: "flow" },
+      { label: "节点", view: "details" },
+      { label: "对话", view: "chat" },
+    ];
+    assert.equal(workspace.getAttribute("data-mobile-tab"), "chat");
+    for (const selected of buttons) {
+      fireEvent.click(screen.getByRole("button", { name: selected.label }));
+      assert.equal(workspace.getAttribute("data-mobile-tab"), selected.view);
+      for (const button of buttons) assert.equal(screen.getByRole("button", { name: button.label }).getAttribute("aria-pressed"), String(button.view === selected.view));
+      assert.equal(screen.getByLabelText("描述工作流需求"), composer);
+      assert.equal((composer as HTMLTextAreaElement).value, "切换视图后保留需求");
+    }
+    fireEvent.change(screen.getByLabelText("选择节点"), { target: { value: "b" } });
+    assert.equal(workspace.getAttribute("data-mobile-tab"), "details");
+    assert.equal(screen.getByRole("button", { name: "节点" }).getAttribute("aria-pressed"), "true");
+    assert.ok(await screen.findByLabelText("节点提示词"));
+  } finally { globalThis.fetch = originalFetch; }
+});
 test("draft UI saves manual changes before conversation, supports cancel and restores persisted messages", async () => {
   const originalFetch = globalThis.fetch;
   const files = exampleFiles("ui-example");
@@ -810,7 +1182,7 @@ test("draft UI saves manual changes before conversation, supports cancel and res
     await waitFor(() => assert.ok(requests.includes("save")));
     await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    const cancel = await screen.findByRole("button", { name: "取消生成" }); fireEvent.click(cancel);
+    const cancel = await screen.findByRole("button", { name: "停止生成" }); fireEvent.click(cancel);
     await waitFor(() => assert.ok(requests.includes("cancel")));
     view.unmount();
     render(createElement(DraftPage, { id: state.id }));
@@ -900,19 +1272,97 @@ test("navigation supports keyboard access and settings defaults to general", asy
   try {
     dom.window.history.replaceState({}, "", "/");
     const view = render(createElement(App));
-    assert.ok(screen.getByRole("heading", { name: "工作流" }));
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "工作流定义");
+    assert.equal(screen.queryByText("创建和编排流程，管理草稿与已发布版本。"), null);
     assert.equal(screen.getByRole("link", { name: "运行记录" }).getAttribute("href"), "/runs");
     const user = userEvent.setup({ document: dom.window.document });
     await user.tab();
     assert.equal((document.activeElement as HTMLAnchorElement).getAttribute("href"), "/");
     await user.tab();
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "折叠侧栏");
+    await user.tab();
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "工作流");
+    await user.tab();
     assert.equal(document.activeElement?.getAttribute("aria-current"), "page");
     dom.window.history.replaceState({}, "", "/settings");
     view.rerender(createElement(App));
-    assert.ok(await screen.findByRole("heading", { name: "设置" }));
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置常规");
     assert.ok(screen.getByRole("button", { name: "常规" }).classList.contains("active"));
     assert.ok(screen.getByRole("region", { name: "外观设置" }));
     assert.equal(screen.getByRole("button", { name: "Provider" }).classList.contains("active"), false);
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Provider");
+  } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
+});
+test("sidebar collapse persists and workflow children remain accessible", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ items: [] });
+  localStorage.removeItem("orchard.sidebar.collapsed");
+  try {
+    dom.window.history.replaceState({}, "", "/runs");
+    const view = render(createElement(App));
+    assert.equal(screen.getByRole("link", { name: "运行记录" }).getAttribute("aria-current"), "page");
+    fireEvent.click(screen.getByRole("button", { name: "折叠侧栏" }));
+    assert.equal(localStorage.getItem("orchard.sidebar.collapsed"), "true");
+    assert.equal(screen.queryByRole("link", { name: "运行记录" }), null);
+    fireEvent.click(screen.getByRole("button", { name: "工作流" }));
+    assert.equal(screen.getByRole("link", { name: "工作流定义" }).getAttribute("href"), "/");
+    fireEvent.keyDown(document, { key: "Escape" });
+    assert.equal(screen.queryByRole("link", { name: "工作流定义" }), null);
+    view.unmount();
+    render(createElement(App));
+    assert.ok(screen.getByRole("button", { name: "展开侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
+    assert.equal(screen.getByRole("link", { name: "运行记录" }).getAttribute("aria-current"), "page");
+  } finally { globalThis.fetch = originalFetch; localStorage.removeItem("orchard.sidebar.collapsed"); dom.window.history.replaceState({}, "", "/"); }
+});
+test("mobile menu closes with Escape and restores focus", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ items: [] });
+  try {
+    dom.window.history.replaceState({}, "", "/");
+    render(createElement(App));
+    const trigger = screen.getByRole("button", { name: "打开菜单" });
+    fireEvent.click(trigger);
+    assert.ok(await screen.findByRole("dialog", { name: "orchard" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+    await waitFor(() => assert.equal(document.activeElement, trigger));
+  } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
+});
+test("web bridge has its own page and is removed from settings categories", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => String(url).endsWith("/extension") ? Response.json({ directory: "/tmp/extension" }) : Response.json({ items: [] });
+  try {
+    dom.window.history.replaceState({}, "", "/web-bridge");
+    const view = render(createElement(App));
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "网页桥接");
+    assert.equal(screen.getByRole("link", { name: "网页桥接" }).getAttribute("aria-current"), "page");
+    assert.ok(await screen.findByRole("heading", { name: "创建第一个网页应用" }));
+    dom.window.history.replaceState({}, "", "/settings");
+    view.rerender(createElement(App));
+    assert.equal(screen.queryByRole("button", { name: /Web Bridge|网页桥接/ }), null);
+    assert.equal(screen.queryByRole("region", { name: "网页桥接" }), null);
+  } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
+});
+test("run filters are reflected in requests, URLs and detail return links", async () => {
+  const originalFetch = globalThis.fetch, requests: string[] = [];
+  globalThis.fetch = async url => {
+    requests.push(String(url));
+    if (String(url).includes("/runs?")) return Response.json({ items: [{ id: "run-123", workflowId: "flow-1", workflowName: "订单处理", draftId: null, versionNumber: 3, status: "succeeded", createdAt: 1 }] });
+    return Response.json({ items: [{ id: "flow-1", name: "订单处理" }] });
+  };
+  try {
+    dom.window.history.replaceState({}, "", "/runs?workflowId=flow-1");
+    render(createElement(App));
+    const record = await screen.findByRole("link", { name: /订单处理.*正式运行/ });
+    assert.ok(record.getAttribute("href")?.includes("returnTo=%2Fruns%3FworkflowId%3Dflow-1"));
+    fireEvent.change(screen.getByLabelText("筛选运行类型"), { target: { value: "formal" } });
+    fireEvent.change(screen.getByLabelText("筛选运行状态"), { target: { value: "succeeded" } });
+    await waitFor(() => assert.ok(requests.some(url => url.includes("workflowId=flow-1&type=formal&status=succeeded"))));
+    assert.equal(dom.window.location.search, "?workflowId=flow-1&type=formal&status=succeeded");
+    fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+    assert.equal(dom.window.location.search, "");
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
 });
 test("Provider toggle rolls back when an immediate save fails", async () => {

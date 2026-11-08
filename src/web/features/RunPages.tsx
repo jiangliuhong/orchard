@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Clock3, GitBranch, RefreshCw, Square } from "lucide-react";
-import type { NodeRun, Run, RunAgentBinding, RunExecution, StreamEvent, Version } from "../../domain/types.js";
+import type { NodeRun, Run, RunSummary, RunAgentBinding, RunExecution, StreamEvent, Version } from "../../domain/types.js";
 import { mergeEvents, send, useResource, useStream } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { BackButton, EmptyState, ErrorNotice, Loading, NodePicker, PageHeading, Payload, Status } from "../components/common";
+import { EmptyState, ErrorNotice, Loading, NodePicker, PageHeading, Payload, Status, statuses } from "../components/common";
 import FlowCanvas from "./FlowCanvas";
 import { applyEventStatus } from "./graph";
 import { RunButton } from "./WorkflowPages";
@@ -12,15 +12,35 @@ import { FinalResult } from "./FinalResult";
 
 interface RunDetail extends Run { version: Version | null; execution: RunExecution; agentBindings?: RunAgentBinding[]; nodes: NodeRun[]; lastSequence: number; attempts: { id: string; nodeRunId: string; execution: unknown; status: string }[] }
 export function RunsPage() {
-  const { data, error, reload } = useResource<{ items: Run[] }>("/runs");
+  const [filters, setFilters] = useState(() => new URLSearchParams(window.location.search));
+  const { data, error, reload } = useResource<{ items: RunSummary[] }>(`/runs?${filters}`);
+  const workflows = useResource<{ items: { id: string; name: string }[] }>("/workflows");
+  const changeFilter = (key: string, value: string) => {
+    const next = new URLSearchParams(filters);
+    if (value) next.set(key, value); else next.delete(key);
+    window.history.replaceState({}, "", `/runs${next.size ? `?${next}` : ""}`);
+    setFilters(next);
+  };
+  const returnTo = `/runs${filters.size ? `?${filters}` : ""}`;
   useEffect(() => { const timer = setInterval(reload, 3000); return () => clearInterval(timer); }, []);
-  return <><PageHeading eyebrow="ACTIVITY" title="运行记录" description="正式运行和草稿测试独立保存，结果对应创建运行时的流程快照。"><Button variant="outline" onClick={reload}><RefreshCw size={15} />刷新</Button></PageHeading><ErrorNotice message={error} />{!data ? <Loading /> : data.items.length ? <div className="panel run-table"><div className="run-table-header"><span>运行</span><span>状态</span><span>开始时间</span></div>{data.items.map(run => <a href={`/runs/${run.id}`} className="run-table-row" key={run.id}><div><strong>{run.id.slice(0, 8)}</strong><small>{run.draftId ? `草稿测试 · 修订 ${run.draftRevision}` : run.workflowVersionId?.slice(0, 12)}</small></div><Status value={run.status} /><span>{new Date(run.createdAt).toLocaleString("zh-CN")}</span></a>)}</div> : <EmptyState title="还没有运行记录" description="可以在草稿中运行测试，或运行已发布的工作流。" />}</>;
+  return <><PageHeading title="运行记录"><Button variant="outline" onClick={reload}><RefreshCw size={15} />刷新</Button></PageHeading>
+    <div className="run-filters">
+      <label>工作流<select aria-label="筛选工作流" value={filters.get("workflowId") ?? ""} onChange={event => changeFilter("workflowId", event.target.value)}><option value="">全部工作流</option>{workflows.data?.items.map(workflow => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}</select></label>
+      <label>运行类型<select aria-label="筛选运行类型" value={filters.get("type") ?? ""} onChange={event => changeFilter("type", event.target.value)}><option value="">全部类型</option><option value="formal">正式运行</option><option value="test">草稿测试</option></select></label>
+      <label>状态<select aria-label="筛选运行状态" value={filters.get("status") ?? ""} onChange={event => changeFilter("status", event.target.value)}><option value="">全部状态</option>{["queued", "running", "cancel_requested", "succeeded", "failed", "cancelled", "interrupted"].map(status => <option key={status} value={status}>{statuses[status]}</option>)}</select></label>
+      {!!filters.size && <Button variant="ghost" onClick={() => { window.history.replaceState({}, "", "/runs"); setFilters(new URLSearchParams()); }}>清除筛选</Button>}
+    </div>
+    <ErrorNotice message={error || workflows.error} />{!data ? !error && <Loading /> : data.items.length ? <div className="panel run-table"><div className="run-table-header"><span>工作流 / 运行</span><span>状态</span><span>开始时间 / 创建时间</span></div>{data.items.map(run => <a href={`/runs/${run.id}?returnTo=${encodeURIComponent(returnTo)}`} className="run-table-row" key={run.id}><div><strong>{run.workflowName}</strong><small>{run.draftId ? `草稿测试 · 修订 ${run.draftRevision}` : `正式运行 · v${run.versionNumber}`} · {run.id.slice(0, 8)}</small></div><Status value={run.status} /><span>{new Date(run.startedAt ?? run.createdAt).toLocaleString("zh-CN")}</span></a>)}</div> : <EmptyState title={filters.size ? "没有符合条件的运行记录" : "还没有运行记录"} description={filters.size ? "调整筛选条件后重试。" : "可以在草稿中运行测试，或运行已发布的工作流。"} />}
+    {data && <p className="page-footnote">展示符合条件的最近 200 次运行。</p>}
+  </>;
 }
 export function RunPage({ id }: { id: string }) {
   const resource = useResource<RunDetail>(`/runs/${id}`), [selected, setSelected] = useState(""), [events, setEvents] = useState<StreamEvent[]>([]), [error, setError] = useState("");
   const [liveNodes, setLiveNodes] = useState<NodeRun[]>([]), refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [view, setView] = useState("details"), manualView = useRef(false);
   const run = resource.data, active = run && ["queued", "running", "cancel_requested"].includes(run.status);
+  const requestedReturn = new URLSearchParams(window.location.search).get("returnTo");
+  const returnTo = requestedReturn && /^\/runs(?:\?[^#]*)?$/.test(requestedReturn) ? requestedReturn : run?.version ? `/runs?workflowId=${encodeURIComponent(run.version.workflowId)}` : run?.draftId ? `/runs?draftId=${encodeURIComponent(run.draftId)}` : "/runs";
   useEffect(() => { if (run && !active && !manualView.current) setView("result"); }, [run?.id, run?.status]);
   useEffect(() => { if (run) { setLiveNodes(run.nodes); setSelected(value => value || run.activeNodeId || run.execution.definition.entryNodeId); } }, [run]);
   useEffect(() => () => clearTimeout(refreshTimer.current), []);
@@ -40,7 +60,7 @@ export function RunPage({ id }: { id: string }) {
     else setSelected(nodeId);
   };
   const logs = events.filter(e => e.nodeId === selected && ["node.log", "node.process", "provider.diagnostic", "provider.text"].includes(e.type));
-  return <><BackButton href={run?.draftId ? `/drafts/${run.draftId}` : "/runs"} /><PageHeading eyebrow="RUN DETAIL" title={run?.execution.definition.name ?? "运行详情"} description={id}>{run && <Status value={run.status} />}{run?.draftId && <Button variant="outline" asChild><a href={`/drafts/${run.draftId}`}>返回草稿继续编辑 / 测试</a></Button>}{active ? <Button variant="outline" disabled={run?.status === "cancel_requested"} onClick={() => void send(`/runs/${id}/cancel`).then(resource.reload).catch(e => setError(e.message))}><Square size={14} />取消运行</Button> : run?.version && <RunButton workflowId={run.version.workflowId} versionId={run.version.id} />}</PageHeading><ErrorNotice message={error || resource.error || run?.error?.message} />
+  return <><PageHeading parents={[{ label: "运行记录", href: returnTo }]} title={run?.execution.definition.name ?? "运行详情"}>{run && <Status value={run.status} />}{run?.version && <Button variant="outline" asChild><a href={`/workflows/${run.version.workflowId}?versionId=${encodeURIComponent(run.version.id)}`}>查看工作流</a></Button>}{run?.draftId && <Button variant="outline" asChild><a href={`/drafts/${run.draftId}`}>返回草稿继续编辑 / 测试</a></Button>}{active ? <Button variant="outline" disabled={run?.status === "cancel_requested"} onClick={() => void send(`/runs/${id}/cancel`).then(resource.reload).catch(e => setError(e.message))}><Square size={14} />取消运行</Button> : run?.version && <RunButton workflowId={run.version.workflowId} versionId={run.version.id} />}</PageHeading><ErrorNotice message={error || resource.error || run?.error?.message} />
     {run ? <><div className="run-summary"><span><GitBranch size={14} />{run.draftId ? `草稿测试 · 修订 ${run.draftRevision}` : `v${run.version?.number}`}</span><span><Clock3 size={14} />{new Date(run.createdAt).toLocaleString("zh-CN")}</span><span>{liveNodes.filter(n => n.status === "succeeded").length} / {liveNodes.length} 节点成功</span></div><Tabs value={view} onValueChange={value => { manualView.current = true; setView(value); }}><TabsList className="run-view-tabs"><TabsTrigger value="result">最终结果</TabsTrigger><TabsTrigger value="details">执行详情</TabsTrigger></TabsList><TabsContent value="result"><FinalResult runId={id} status={run.status} value={run.output} /></TabsContent><TabsContent value="details"><div className="run-workspace">
       <section className="canvas-panel"><div className="panel-bar"><span>执行路径</span><span>点击节点查看结果，点击结束查看最终输出</span></div><FlowCanvas workflow={run.execution.definition} layout={run.execution.layout} records={liveNodes} onSelect={selectNode} /></section>
       <aside className="node-panel run-node-panel"><div className="panel-bar"><NodePicker nodes={run.execution.definition.nodes} value={selected} onChange={selectNode} includeOutput />{node && <Status value={node.status} />}</div><Tabs defaultValue="output"><TabsList><TabsTrigger value="output">结果</TabsTrigger><TabsTrigger value="input">输入</TabsTrigger><TabsTrigger value="logs">日志</TabsTrigger><TabsTrigger value="attempts">执行信息</TabsTrigger></TabsList>

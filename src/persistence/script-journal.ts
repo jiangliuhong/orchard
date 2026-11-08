@@ -29,7 +29,11 @@ export class ScriptJournal {
     if (!existsSync(directory)) return [];
     return readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).map(name => {
       const { snapshot, proposal, requestHash, ...record } = this.read(scriptId, name.slice(0, -5))!;
-      return { ...record, summary: proposal?.summary };
+      return {
+        ...record, summary: proposal?.summary,
+        hasChanges: !!proposal && (!!proposal.changes.length || !!Object.keys(proposal.metadata).length),
+        hasTestInput: !!proposal && Object.hasOwn(proposal, "testInput"),
+      };
     })
       .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
   }

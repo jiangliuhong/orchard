@@ -56,6 +56,7 @@ export class WebBridgeGateway {
     return this.coordinator.withActivity("WebBridgeGateway.call", async () => {
       const tool = this.tools(application).find(item => item.toolId === toolId);
       check(tool, "UNKNOWN_TOOL", `未知浏览器工具: ${application}/${toolId}`);
+      check(this.config?.application(application)?.enabled ?? true, "PERMISSION_DENIED", "应用已停用");
       check(this.config?.toolEnabled(application, toolId) ?? tool.enabled, "PERMISSION_DENIED", "工具已停用");
       check(tool.risk === "read" && tool.approval === "none", "APPROVAL_REQUIRED", "该工具需要用户确认");
       validateToolArgs(tool, args);

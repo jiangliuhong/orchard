@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import type { JsonSchema, ScriptVersion, ScriptView, SourceFiles } from "../../domain/types.js";
 import { api, pretty, requestId, send, useCommandKey, useResource } from "../lib/api";
-import { BackButton, EmptyState, ErrorNotice, Loading, PageHeading, Payload, Status } from "../components/common";
+import { EmptyState, ErrorNotice, Loading, PageHeading, Payload, Status } from "../components/common";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
@@ -51,7 +51,7 @@ export function ScriptsPage() {
   const [query, setQuery] = useState(""), [runtime, setRuntime] = useState(""), [status, setStatus] = useState(""), [offset, setOffset] = useState(0);
   const params = new URLSearchParams({ q: query, runtime, status, offset: String(offset), limit: "20" });
   const resource = useResource<{ items: (ScriptView & { publishedVersion: number | null; latestTest?: { status: string; draftRevision: number | null; scriptVersionId: string | null } | null })[]; total: number }>(`/scripts?${params}`);
-  return <><PageHeading eyebrow="SCRIPT LIBRARY" title="脚本库" description="独立编辑、测试和发布脚本，在工作流中复用固定版本。"><CreateScript /></PageHeading>
+  return <><PageHeading title="脚本库"><CreateScript /></PageHeading>
     <div className="script-filters"><Input aria-label="搜索脚本" placeholder="搜索名称、ID 或说明" value={query} onChange={event => { setQuery(event.target.value); setOffset(0); }} />
       <select aria-label="筛选运行时" value={runtime} onChange={event => { setRuntime(event.target.value); setOffset(0); }}><option value="">全部运行时</option><option value="nodejs">Node.js</option><option value="shell">Shell</option></select>
       <select aria-label="筛选脚本状态" value={status} onChange={event => { setStatus(event.target.value); setOffset(0); }}><option value="">全部状态</option><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option></select>
@@ -69,7 +69,7 @@ export function ScriptPage({ id }: { id: string }) {
   const [agentTestRefresh, setAgentTestRefresh] = useState(0);
   const [archiveOpen, setArchiveOpen] = useState(false), [busy, setBusy] = useState(false);
   const script = resource.data;
-  if (!script) return <><BackButton href="/scripts" /><ErrorNotice message={resource.error} /><Loading /></>;
+  if (!script) return <><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title="脚本详情" /><ErrorNotice message={resource.error} /><Loading /></>;
   const versionId = selected || script.currentDraftVersionId || script.currentPublishedVersionId || "";
   const reload = () => { setDirty(false); setSelected(""); setGeneration(value => value + 1); resource.reload(); };
   const archive = async () => {
@@ -78,7 +78,7 @@ export function ScriptPage({ id }: { id: string }) {
     catch (error) { setError((error as Error).message); }
     finally { setBusy(false); }
   };
-  return <div className="script-desktop"><div className="script-page-header"><BackButton href="/scripts" /><PageHeading eyebrow="SCRIPT" title={script.name} description={`${script.id} · ${script.runtime}`}><Status value={script.status} />{versionId && <CreateScript copy={{ id, versionId, name: script.name }} />}<Button variant="outline" disabled={dirty || script.status === "archived"} onClick={() => setArchiveOpen(true)}>归档脚本</Button></PageHeading></div>
+  return <div className="script-desktop"><div className="script-page-header"><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title={script.name}><Status value={script.status} />{versionId && <CreateScript copy={{ id, versionId, name: script.name }} />}<Button variant="outline" disabled={dirty || script.status === "archived"} onClick={() => setArchiveOpen(true)}>归档脚本</Button></PageHeading></div>
     <ErrorNotice message={error || resource.error} />
     {script.status === "archived" && <div className="notice">此脚本已归档，只读保留。已发布工作流仍使用绑定版本运行。</div>}
     <div className="script-page-toolbar"><div className="script-version-picker"><label htmlFor="script-version">查看版本</label><select id="script-version" value={versionId} disabled={dirty} onChange={event => setSelected(event.target.value)}>{script.versions.map(version => <option key={version.id} value={version.id}>v{version.number} · {version.status === "draft" ? `草稿修订 ${version.revision}` : "已发布"}{version.id === script.currentPublishedVersionId ? " · 当前发布" : ""}</option>)}</select>{dirty && <span className="field-hint">未保存</span>}</div></div>

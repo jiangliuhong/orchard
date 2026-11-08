@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ArchiveRestore, Palette, RefreshCw } from "lucide-react";
 import { api, pretty, requestId, send } from "../lib/api";
 import { useTheme, type Theme } from "../lib/theme";
 import { Button } from "../components/ui/button";
@@ -247,12 +248,12 @@ export function ConfigGitSettings() {
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
   const cannotConfirm = !preview || !confirmed || !!preview.nextCursor || preview.noChanges || preview.blockers.length > 0 || preview.diffs.some(d => d.blockingReason) || preview.requiredMappings.some(m => !mappings[m.key]?.trim()) || preview.expiresAt <= Date.now();
   const snapshotBlocked = binding?.snapshotState === "invalid" || binding?.snapshotState === "unsupported";
-  return <section className="panel" aria-label="Git 配置存储" aria-busy={locked}>
-    <div className="preference-row"><div><h2>Git 配置存储</h2><p>手动备份设置、工作流和脚本定义；普通保存不会提交或推送。</p></div><Button variant="outline" disabled={busy} onClick={() => void run(reload)}>刷新状态</Button></div>
-    <div className="management-section"><ErrorNotice message={error} />{notice && <p role="status" className="success-note">{notice}</p>}
+  return <section className="config-git-settings" aria-label="Git 配置存储" aria-busy={locked}>
+    <div className="settings-section-heading"><Button variant="outline" size="sm" disabled={busy} onClick={() => void run(reload)}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />刷新状态</Button></div>
+    <div className="config-git-body"><ErrorNotice message={error} />{notice && <p role="status" className="success-note">{notice}</p>}
       {operation && <div role="status"><p>操作 {operation.operationId} · {operation.phase}</p>{operation.phase === "interrupted" && <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await reload(); if (binding) await loadHistory("local"); })}>核对状态与本地历史</Button>}{operation.phase === "recovery_required" && <Button disabled={busy} onClick={() => void run(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}))}>重试恢复未完成阶段</Button>}</div>}
       {binding === undefined && !error && <Loading />}
-      {binding === null && <fieldset disabled={locked} className="space-y-3"><legend>绑定远端仓库</legend>
+      {binding === null && <fieldset disabled={locked} className="config-git-binding"><legend>绑定远端仓库</legend>
         <label className="field">仓库地址<Input value={remoteUrl} placeholder="git@github.com:team/config.git 或 https://…" onChange={e => { setRemoteUrl(e.target.value); setChecked(undefined); }} /></label>
         <p className="field-hint">复用服务端系统用户的 SSH key/agent 或 Git credential helper。请勿在地址中填写密码或 Token；未知 SSH 主机需先在服务端验证密钥。</p>
         <Button variant="outline" disabled={!remoteUrl.trim()} onClick={() => void run(() => mutate("/remote/check", { remoteUrl: remoteUrl.trim() }, value => { const check = value as RemoteCheck; check.branches = check.branches.map(b => typeof b === "string" ? b : (b as { name: string }).name); setChecked(check); setBranch(check.defaultBranch ?? check.branches[0] ?? "main"); setName(check.identity?.name ?? ""); setEmail(check.identity?.email ?? ""); }))}>检测连接</Button>
@@ -265,7 +266,7 @@ export function ConfigGitSettings() {
         </>}
       </fieldset>}
       {binding && <>
-        <dl className="space-y-2 break-all"><dt>仓库</dt><dd>{binding.remoteUrl}</dd><dt>分支 / remote / 配置目录</dt><dd>{binding.branch} / {binding.remote ?? "origin"} / {binding.configDir}</dd><dt>本地 / 远程 SHA</dt><dd>{status?.localSha ?? "无"} / {status?.remoteSha ?? "未知"}</dd><dt>同步状态</dt><dd>{status ? `领先 ${status.ahead} · 落后 ${status.behind}${status.diverged ? " · 已分叉" : ""}` : "正在读取"}</dd></dl>
+        <dl className="config-git-repository"><dt>仓库</dt><dd>{binding.remoteUrl}</dd><dt>分支 / remote / 配置目录</dt><dd>{binding.branch} / {binding.remote ?? "origin"} / {binding.configDir}</dd><dt>本地 / 远程 SHA</dt><dd>{status?.localSha ?? "无"} / {status?.remoteSha ?? "未知"}</dd><dt>同步状态</dt><dd>{status ? `领先 ${status.ahead} · 落后 ${status.behind}${status.diverged ? " · 已分叉" : ""}` : "正在读取"}</dd></dl>
         <p className="field-hint">远端最近观测：{status?.remoteObservedAt ?? "尚未获取"}。本地历史可离线使用；远端状态可能过期。</p>
         {status?.message && <p>{status.message}</p>}
         {!!status?.dirtyPaths.length && <ErrorNotice message={`工作区不干净，请先处理：${status.dirtyPaths.join("、")}`} />}
@@ -300,8 +301,8 @@ export function ConfigGitSettings() {
         {preview.nextCursor && <Button disabled={locked} variant="outline" onClick={() => void run(async () => { const page = await api<{ diffs: Diff[]; cumulativeDiffs?: Diff[]; nextCursor?: string }>(`${root}/previews/${encodeURIComponent(preview.token)}/diffs?cursor=${encodeURIComponent(preview.nextCursor!)}`); setPreview(old => old?.token === preview.token ? { ...old, diffs: [...old.diffs, ...page.diffs], cumulativeDiffs: [...(old.cumulativeDiffs ?? []), ...(page.cumulativeDiffs ?? [])], nextCursor: page.nextCursor } : old); })}>加载剩余差异（全部加载后可确认）</Button>}
         {preview.noChanges ? <p>没有变化，不创建空提交或重复恢复。</p> : <><label className="flex gap-2 my-4"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整差异并确认最终类别、本机映射及依赖范围。</label><div className="actions"><Button variant="outline" disabled={locked} onClick={invalidate}>取消预览</Button><Button disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate(mode === "commit" ? "/commit" : "/restore", { token: preview.token, ...(mode === "commit" ? general() : {}) }))}>确认{mode === "commit" ? push ? "提交并推送" : "本地提交" : "应用恢复"}</Button></div></>}
       </section>}
-      <section className="management-section"><h3>服务端外观快照</h3><p className="field-hint">可领取 CLI 保存的外观或在清除浏览器存储后重新领取；应用前会请求确认。</p><Button variant="outline" onClick={() => window.dispatchEvent(new Event("orchard:claim-general"))}>领取服务端外观快照</Button></section>
-      <section className="management-section"><h3>本地恢复点</h3>{!points.length && <p className="field-hint">暂无恢复点。</p>}{points.map(point => <div key={point.id} className="py-3 border-b"><p className="break-all">{new Date(point.createdAt).toLocaleString()} · {point.id} {point.sourceSha}</p><div className="actions"><Button variant="outline" disabled={locked} onClick={() => chooseSource({ kind: "recovery-point", id: point.id })}>预览恢复点</Button><Button variant="ghost" disabled={locked || point.protected} onClick={() => setConfirmation({ title: "删除恢复点", description: `删除 ${point.id} 的独立恢复资料，此操作不可撤销。`, action: () => mutate(`/recovery-points/${encodeURIComponent(point.id)}`, {}, report, "DELETE") })}>{point.protected ? "未完成操作正在引用" : "删除恢复点"}</Button></div></div>)}</section>
+      <section className="management-section"><h3><Palette size={16} />服务端外观快照</h3><p className="field-hint">可领取 CLI 保存的外观或在清除浏览器存储后重新领取；应用前会请求确认。</p><Button variant="outline" size="sm" onClick={() => window.dispatchEvent(new Event("orchard:claim-general"))}>领取服务端外观快照</Button></section>
+      <section className="management-section"><h3><ArchiveRestore size={16} />本地恢复点</h3>{!points.length && <div className="config-git-empty"><ArchiveRestore size={22} /><p>暂无恢复点</p><span>恢复配置前会自动保存本地恢复点，方便之后回退。</span></div>}{points.map(point => <div key={point.id} className="py-3 border-b"><p className="break-all">{new Date(point.createdAt).toLocaleString()} · {point.id} {point.sourceSha}</p><div className="actions"><Button variant="outline" disabled={locked} onClick={() => chooseSource({ kind: "recovery-point", id: point.id })}>预览恢复点</Button><Button variant="ghost" disabled={locked || point.protected} onClick={() => setConfirmation({ title: "删除恢复点", description: `删除 ${point.id} 的独立恢复资料，此操作不可撤销。`, action: () => mutate(`/recovery-points/${encodeURIComponent(point.id)}`, {}, report, "DELETE") })}>{point.protected ? "未完成操作正在引用" : "删除恢复点"}</Button></div></div>)}</section>
     </div>
     <Dialog open={!!confirmation} onOpenChange={open => { if (!open && !locked) setConfirmation(undefined); }}><DialogContent><DialogHeader><DialogTitle>{confirmation?.title}</DialogTitle><DialogDescription>{confirmation?.description}</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={locked} onClick={() => setConfirmation(undefined)}>取消</Button><Button variant="destructive" disabled={locked} onClick={() => void run(async () => { await confirmation?.action(); setConfirmation(undefined); })}>确认</Button></DialogFooter></DialogContent></Dialog>
   </section>;

@@ -116,6 +116,8 @@ test("script Agent previews without mutations, checks ownership, and confirms on
   assert.equal(store.script("library-script").currentPublishedVersionId, null);
   assert.equal(scripts.detail("library-script").draft!.name, "Agent name");
   assert.equal(Object.hasOwn(scriptAgent.list("library-script").items[0]!, "proposal"), false);
+  assert.equal(scriptAgent.list("library-script").items[0]!.hasChanges, true);
+  assert.equal(scriptAgent.list("library-script").items[0]!.hasTestInput, true);
   const historicalConversation = scriptAgent.get("library-script", turnId).conversationId;
   store.publishScript("library-script", 1);
   await scripts.update("library-script", { ...definition(), expectedRevision: 0 });
@@ -169,6 +171,10 @@ test("Agent stale proposals cannot overwrite edits; cancelled and recovered turn
   provider.handler = async request => ({ output: { summary: "仅提供说明", changes: [], metadata: {}, testInput: {} }, providerId: provider.id, modelId: request.modelId });
   const clarification = service.start("library-script", { ...input, expectedRevision: 1, requestId: randomUUID() });
   await until(() => service.get("library-script", clarification.id).status === "succeeded");
+  const clarificationSummary = service.list("library-script").items.find(item => item.id === clarification.id)!;
+  assert.equal(clarificationSummary.summary, "仅提供说明");
+  assert.equal(clarificationSummary.hasChanges, false);
+  assert.equal(clarificationSummary.hasTestInput, true);
   await assert.rejects(service.apply("library-script", { turnId: clarification.id, expectedRevision: 1, requestId: randomUUID() }), { code: "NO_CHANGES" });
   const journal = new ScriptJournal(store.files), record = journal.read("library-script", turn.id)!;
   journal.save({ ...record, status: "running" });

@@ -10,7 +10,7 @@ import { DirectoryLease } from "../migrations/lock.js";
 import { safe, present } from "../migrations/journal.js";
 import { FileStore, json, digest, canonicalJson } from "./files.js";
 import { AppError, check } from "../domain/errors.js";
-import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, ScriptVersion, ScriptView, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
+import type { AuthoringTurnStatus, BackendRef, ConversationMode, ConversationView, ContextMode, ConversationStatus, Draft, Message, NodeRun, ProviderSetting, Run, RunSummary, ScriptVersion, ScriptView, StreamEvent, SubmissionState, Turn, Version, Workflow } from "../domain/types.js";
 import { validateScript, type ScriptDefinition } from "../domain/scripts.js";
 import { schemaSubset, bindingSchema } from "../domain/schema-compatibility.js";
 import { ACTIVE_TURN_STATUSES, assertSubmissionState, assertTurnStatus, assertTurnTransition, isActiveTurn } from "../domain/turns.js";
@@ -558,6 +558,43 @@ export class Store {
     return { id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
   }
   runs() { return this.all<{ id: string }>("SELECT id FROM runs ORDER BY created_at DESC LIMIT 200").map(r => this.run(r.id)); }
+  runSummaries(filters: { workflowId?: string; draftId?: string; type?: string; status?: string } = {}) {
+    const snapshotNames = new Map<string, string>();
+    return this.all<RunSummary & { snapshotPath: string | null }>(`
+      SELECT r.id,COALESCE(v.workflow_id,d.workflow_id,pv.workflow_id) AS workflowId,
+        COALESCE(json_extract(v.definition_json,'$.name'),w.name,'未命名草稿') AS workflowName,
+        r.workflow_version_id AS workflowVersionId,v.version_no AS versionNumber,
+        r.draft_id AS draftId,r.draft_revision AS draftRevision,r.snapshot_path AS snapshotPath,r.status,
+        r.created_at AS createdAt,r.started_at AS startedAt,r.ended_at AS endedAt
+      FROM runs r
+      LEFT JOIN workflow_versions v ON v.id=r.workflow_version_id
+      LEFT JOIN drafts d ON d.id=r.draft_id
+      LEFT JOIN workflow_versions pv ON pv.id=d.published_version_id
+      LEFT JOIN workflows w ON w.id=COALESCE(v.workflow_id,d.workflow_id,pv.workflow_id)
+      WHERE (? IS NULL OR COALESCE(v.workflow_id,d.workflow_id,pv.workflow_id)=?)
+        AND (? IS NULL OR r.draft_id=?)
+        AND (? IS NULL OR r.status=?)
+        AND (? IS NULL OR (?='test' AND r.draft_id IS NOT NULL) OR (?='formal' AND r.workflow_version_id IS NOT NULL))
+      ORDER BY r.created_at DESC,r.rowid DESC LIMIT 200`,
+      filters.workflowId ?? null, filters.workflowId ?? null, filters.draftId ?? null, filters.draftId ?? null,
+      filters.status ?? null, filters.status ?? null, filters.type ?? null, filters.type ?? null, filters.type ?? null
+    ).map(run => {
+      let workflowName = run.workflowName;
+      if (run.snapshotPath) {
+        try {
+          if (!snapshotNames.has(run.snapshotPath)) snapshotNames.set(run.snapshotPath, JSON.parse(this.files.readTree(run.snapshotPath).files["workflow.json"]!).name);
+          workflowName = snapshotNames.get(run.snapshotPath) ?? workflowName;
+        } catch {}
+      }
+      return { ...this.run(run.id), ...run, workflowName };
+    });
+  }
+  latestWorkflowRun(workflowId: string) {
+    return this.one<{ id: string; status: Run["status"]; createdAt: number }>(`
+      SELECT r.id,r.status,r.created_at AS createdAt FROM runs r
+      JOIN workflow_versions v ON v.id=r.workflow_version_id
+      WHERE v.workflow_id=? ORDER BY r.created_at DESC,r.rowid DESC LIMIT 1`, workflowId) ?? null;
+  }
   nodes(runId: string): NodeRun[] {
     return this.all("SELECT * FROM node_runs WHERE run_id=? ORDER BY rowid", runId).map(r => ({
       id: String(r.id), runId, nodeId: String(r.node_id), type: r.type as NodeRun["type"], status: r.status as NodeRun["status"],

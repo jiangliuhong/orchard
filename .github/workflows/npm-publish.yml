@@ -1,0 +1,108 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Validate release tag
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (name !== '@jarome/orchard') throw new Error(`Unexpected package name: ${name}`);
+          if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+            throw new Error('Only stable release versions are supported');
+          }
+          if (process.env.GITHUB_REF_NAME !== `v${version}`) {
+            throw new Error(`Tag must match package.json version: v${version}`);
+          }
+          NODE
+      - name: Install pnpm
+        run: npm install --global pnpm@11.20.0
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify release integrity
+        run: npm run migration:check
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Pack and verify release
+        run: |
+          mkdir -p release
+          npm pack --pack-destination release --json > release/pack.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const [pack] = JSON.parse(readFileSync('release/pack.json', 'utf8'));
+          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (pack.name !== name || pack.version !== version) throw new Error('Package identity mismatch');
+          for (const path of [
+            'dist/cli/index.js',
+            'dist/server/main.js',
+            'dist/web/index.html',
+            'dist/web-bridge/extension/manifest.json',
+            'dist/migration-integrity.json',
+          ]) {
+            if (!pack.files.some(file => file.path === path)) throw new Error(`Missing package file: ${path}`);
+          }
+          NODE
+          node dist/cli/index.js --help
+          cd release
+          sha256sum ./*.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: release/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-package
+          path: release
+      - name: Publish verified package
+        working-directory: release
+        run: |
+          sha256sum --check SHA256SUMS
+          npm publish ./*.tgz --access public --registry=https://registry.npmjs.org/

@@ -152,6 +152,11 @@ export interface Run {
   activeNodeId: string | null; error?: Failure; createdAt: number; startedAt: number | null; endedAt: number | null;
 }
 export interface RunExecution { definition: Workflow; layout: Layout; artifactPath: string }
+export interface RunSummary {
+  id: string; workflowId: string | null; workflowName: string; workflowVersionId: string | null;
+  versionNumber: number | null; draftId: string | null; draftRevision: number | null;
+  status: RunStatus; createdAt: number; startedAt: number | null; endedAt: number | null;
+}
 export interface NodeRun {
   id: string; runId: string; nodeId: string; type: WorkflowNode["type"]; status: NodeStatus;
   input?: unknown; output?: unknown; route?: { edgeId: string; value: unknown; reason: string };

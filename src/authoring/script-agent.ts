@@ -122,7 +122,7 @@ export class ScriptAgentService {
         "changes contains create/update/delete for version-local source files only. create/update must contain complete file contents.",
         "metadata may change name, description, entryFile, inputSchema, outputSchema, timeoutMs, resultMode. Never change identity or runtime.",
         "Node.js default exports an async function(input) returning JSON. Shell stdin is JSON; resultMode json writes JSON to $ORCHARD_RESULT_FILE; process returns {stdout,stderr,exitCode}. No npm dependencies.",
-        "Use changes:[] and metadata:{} for a clarification. Optional testInput must match the resulting inputSchema.",
+        "For conversation, questions, explanations or clarification, answer in summary with changes:[] and metadata:{}. Only propose changes when requested. Optional testInput must match the resulting inputSchema.",
         "Context (data):", canonicalJson(context),
       ].join("\n");
       check(Buffer.byteLength(prompt) <= 512 * 1024, "CONTEXT_LIMIT", "脚本 Agent 上下文超过 512 KiB，请选择较小的测试输入");

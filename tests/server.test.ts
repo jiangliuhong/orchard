@@ -110,3 +110,33 @@ test("HTTP draft tests run without publishing and expose immutable execution sna
   assert.equal(events[0].payload.draftId, draft.id);
   assert.equal(events.at(-1).type, "run.succeeded");
 });
+
+test("run summaries filter before the limit and retain workflow and snapshot names", async t => {
+  const { store, providers, authoring } = setup(t), { app } = createApp(store, providers);
+  t.after(() => app.close());
+  await app.ready();
+  const draft = await authoring.create(undefined, randomUUID());
+  const original = JSON.parse(authoring.snapshot(draft.id).files["workflow.json"]!);
+  const snapshot = store.files.saveTree({ "workflow.json": JSON.stringify({ ...original, name: "测试时的名称" }) });
+  store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,0,?,'succeeded',?,1)", "test-run", draft.id, snapshot.path, store.reference({}));
+  const published = await authoring.publish(draft.id, 0, randomUUID());
+  for (let index = 0; index < 205; index++) {
+    store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'succeeded',?,?)", `formal-${index}`, published.id, store.reference({}), index + 2);
+  }
+  const all = (await app.inject({ url: "/api/runs" })).json().items;
+  assert.equal(all.length, 200);
+  assert.equal(all[0].workflowName, original.name);
+  assert.equal(all[0].workflowId, published.workflowId);
+  assert.equal(all[0].versionNumber, 1);
+  assert.deepEqual(all[0].input, {});
+  const tests = (await app.inject({ url: `/api/runs?workflowId=${published.workflowId}&type=test` })).json().items;
+  assert.equal(tests.length, 1);
+  assert.equal(tests[0].workflowName, "测试时的名称");
+  assert.equal(tests[0].draftId, draft.id);
+  assert.equal((await app.inject({ url: "/api/runs?status=failed" })).json().items.length, 0);
+  assert.equal((await app.inject({ url: "/api/runs?workflowId=missing" })).json().items.length, 0);
+  assert.equal((await app.inject({ url: `/api/runs?draftId=${draft.id}` })).json().items.length, 1);
+  assert.equal((await app.inject({ url: "/api/runs?type=invalid" })).statusCode, 400);
+  const workflows = (await app.inject({ url: "/api/workflows" })).json().items;
+  assert.equal(workflows[0].latestRun.id, "formal-204");
+});

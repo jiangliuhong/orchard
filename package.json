@@ -1,7 +1,13 @@
 {
-  "name": "@jiangliuhong/orchard",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@jarome/orchard",
+  "version": "0.0.1",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "type": "module",
   "engines": {
     "node": ">=24"

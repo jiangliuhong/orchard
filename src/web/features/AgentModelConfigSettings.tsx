@@ -16,7 +16,7 @@ export function AgentModelConfigSettings({ providers }: { providers: ProviderVie
   const [editor, setEditor] = useState<{ config?: AgentModelConfigView } | null>(null);
   const [references, setReferences] = useState<AgentModelConfigView | null>(null);
   return <>
-    <div className="settings-section-heading"><div><h2>Agent 模型配置</h2><p>为 Provider 与模型创建可复用的名称，统一调整工作流使用的模型。</p></div><Button onClick={() => setEditor({})}><Plus size={14} />新增配置</Button></div>
+    <div className="settings-section-heading"><Button onClick={() => setEditor({})}><Plus size={14} />新增配置</Button></div>
     <ErrorNotice message={resource.error} />
     {!resource.data ? !resource.error && <Loading /> : resource.data.items.length ? <div className="agent-model-config-list">
       {resource.data.items.map(config => <section className="panel agent-model-config-card" key={config.id}>

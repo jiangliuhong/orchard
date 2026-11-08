@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, Globe, PlugZap, RefreshCw, Save, Settings2, Terminal, Boxes } from "lucide-react";
+import { ChevronDown, GitBranch, PlugZap, RefreshCw, Save, Settings2, Terminal, Boxes } from "lucide-react";
 import type { ProviderView } from "../../domain/types.js";
 import { isModelEnabled } from "../../domain/models.js";
 import { api, send, useResource } from "../lib/api";
@@ -8,9 +8,8 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { ErrorNotice, Loading } from "../components/common";
+import { Breadcrumbs, ErrorNotice, Loading } from "../components/common";
 import { ModelManager } from "./ModelManager";
-import { WebBridgeSettings } from "./WebBridgeSettings";
 import { AgentModelConfigSettings } from "./AgentModelConfigSettings";
 import { ConfigGitSettings } from "./ConfigGitSettings";
 
@@ -114,31 +113,28 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  const [section, setSection] = useState<"general" | "providers" | "web-bridge" | "agent-models" | "config-git">("general");
+  const [section, setSection] = useState<"general" | "providers" | "agent-models" | "config-git">("general");
   return <>
+    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "config-git": "Git 配置存储" }[section] }]} /></div>
     <div className="settings-layout">
       <aside className="settings-sidebar" aria-label="设置分类">
-        <h1>设置</h1>
         <nav className="settings-sidebar-nav">
           <button className={section === "general" ? "active" : ""} aria-current={section === "general" ? "page" : undefined} onClick={() => setSection("general")}><Settings2 size={16} />常规</button>
           <button className={section === "providers" ? "active" : ""} aria-current={section === "providers" ? "page" : undefined} onClick={() => setSection("providers")}><PlugZap size={16} />Provider</button>
           <button className={section === "agent-models" ? "active" : ""} aria-current={section === "agent-models" ? "page" : undefined} onClick={() => setSection("agent-models")}><Boxes size={16} />Agent 模型配置</button>
-          <button className={section === "web-bridge" ? "active" : ""} aria-current={section === "web-bridge" ? "page" : undefined} onClick={() => setSection("web-bridge")}><Globe size={16} />Web Bridge</button>
-          <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}>Git 配置存储</button>
+          <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}><GitBranch size={16} />Git 配置存储</button>
         </nav>
       </aside>
       <section className="settings-content">
       {section === "config-git" && <ConfigGitSettings />}
       {section === "providers" && <>
-        <div className="settings-section-heading"><div><h2>Provider</h2><p>管理模型连接、默认模型与本机 CLI。</p></div><span className="field-hint">{data?.items.length ?? 0} 个连接</span></div>
+        <div className="settings-section-heading"><span className="field-hint">{data?.items.length ?? 0} 个连接</span></div>
         <ErrorNotice message={error} />
         {data ? <div className="panel providers-list">{data.items.map(provider => <ProviderRow key={provider.id} provider={provider} reload={reload} />)}</div> : !error && <Loading />}
         <p className="page-footnote">启用开关和默认模型即时保存。工作流通过 Agent 模型配置引用明确的模型。</p>
       </>}
-      {section === "web-bridge" && <WebBridgeSettings />}
       {section === "agent-models" && <><ErrorNotice message={error} /><AgentModelConfigSettings providers={data?.items ?? []} /></>}
       {section === "general" && <>
-        <div className="settings-section-heading"><div><h2>常规</h2><p>管理 Orchard 的外观与使用偏好。</p></div></div>
         <section className="panel preferences-list" aria-label="外观设置">
           <div className="preference-row"><div><h2>外观</h2><p>选择浅色、深色，或跟随系统。</p></div><ThemePicker label="设置外观" /></div>
         </section>

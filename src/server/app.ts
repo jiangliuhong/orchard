@@ -32,6 +32,7 @@ import { ConfigRestoreService } from "../config-git/restore.js";
 import { GitRepositoryService, type GitRepositoryOptions } from "../config-git/repository.js";
 import { ConfigGitService } from "../config-git/service.js";
 import { registerConfigGitRoutes } from "../config-git/routes.js";
+import { BridgeAgentService, type BridgeAgentRequest } from "../web-bridge/agent.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -54,6 +55,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   } });
   const store = proxy<Store>("store"), providers = proxy<ProviderRegistry>("providers"), bridge = proxy<WebBridgeGateway>("bridge"), apiAuth = proxy<LocalApiAuth>("apiAuth");
   const authoring = proxy<AuthoringService>("authoring"), runner = proxy<GraphRunner>("runner"), scriptTests = proxy<ScriptTestRunner>("scriptTests"), scripts = proxy<ScriptLibrary>("scripts"), scriptAgent = proxy<ScriptAgentService>("scriptAgent"), scriptMaintenance = proxy<ScriptMaintenance>("scriptMaintenance");
+  const bridgeAgent = proxy<BridgeAgentService>("bridgeAgent");
   const closeServices = async () => {
     let failure: unknown;
     for (const close of cleanup.splice(0).reverse()) try { await close(); } catch (error) { failure ??= error; }
@@ -87,6 +89,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       const tests = new ScriptTestRunner(opened, false); add("scriptTests", tests, () => tests.close());
       add("scripts", new ScriptLibrary(opened));
       const agent = new ScriptAgentService(opened, registry); add("scriptAgent", agent, () => agent.close());
+      const browserAgent = new BridgeAgentService(opened.files, gateway.config!, registry); add("bridgeAgent", browserAgent, () => browserAgent.close());
       add("scriptMaintenance", new ScriptMaintenance(opened));
       const configGit = new ConfigGitService(opened, gateway.config!, restore, configGitOptions);
       add("configGit", configGit, () => configGit.close());
@@ -160,6 +163,21 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.get("/api/web-bridge/extension", async () => ({ directory: extensionDirectory() }));
   app.get("/api/web-bridge/status", async () => bridge.status());
   app.get("/api/web-bridge/profiles", async () => ({ items: bridge.profilesList() }));
+  app.get<{ Params: { applicationId: string }; Querystring: { conversationId?: string } }>("/api/web-bridge/applications/:applicationId/agent/turns", async request =>
+    bridgeAgent.list(request.params.applicationId, request.query.conversationId));
+  app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns", async request => {
+    const input = body<BridgeAgentRequest>(request.body, {
+      requestId, conversationId: { type: "string", pattern: "^[a-zA-Z0-9-]{1,100}$" },
+      prompt: { type: "string", minLength: 1, maxLength: 20000 },
+      providerId: { type: "string" }, modelId: { type: "string" },
+      toolId: { type: "string", maxLength: 100 }, testContext: { type: "string", maxLength: 16000 },
+    }, ["requestId", "conversationId", "prompt"]);
+    return bridgeAgent.start(request.params.applicationId, input);
+  });
+  app.post<{ Params: { applicationId: string; turnId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns/:turnId/apply", async request =>
+    bridgeAgent.apply(request.params.applicationId, request.params.turnId));
+  app.post<{ Params: { applicationId: string; turnId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns/:turnId/cancel", async request =>
+    bridgeAgent.cancel(request.params.applicationId, request.params.turnId));
   app.post("/api/web-bridge/profiles/register", async request => {
     const profile = body<{ id: string; name: string; extensionId: string }>(request.body,
       { id: { type: "string", minLength: 1, maxLength: 100 }, name: { type: "string", minLength: 1, maxLength: 100 }, extensionId: { type: "string", pattern: "^[a-p]{32}$" } },
@@ -169,14 +187,20 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     return bridge.registerProfile(profile);
   });
   app.get("/api/web-bridge/applications", async () => ({ items: bridge.applications() }));
-  app.post("/api/web-bridge/applications", async request => bridge.saveApplication(request.body as any));
+  app.post("/api/web-bridge/applications", async request => {
+    const input = body<{ id: string; name: string; enabled?: boolean }>(request.body, {
+      id: { type: "string", pattern: "^[a-z][a-z0-9-]{0,49}$" }, name: { type: "string", minLength: 1, maxLength: 100 }, enabled: { type: "boolean" },
+    }, ["id", "name"]);
+    check(!bridge.applications().some(application => application.id === input.id), "APPLICATION_EXISTS", "应用 ID 已存在", 409);
+    return bridge.saveApplication(input);
+  });
   app.get<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => {
     const application = bridge.applications().find(item => item.id === request.params.applicationId);
     check(application, "NOT_FOUND", "浏览器应用不存在");
     return application;
   });
   app.patch<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => bridge.saveApplication({ ...(request.body as any), id: request.params.applicationId }));
-  app.delete<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => bridge.deleteApplication(request.params.applicationId));
+  app.delete<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId", async request => bridgeAgent.deleteApplication(request.params.applicationId));
   app.get<{ Querystring: { application?: string } }>("/api/web-bridge/tools", async request => ({ items: bridge.tools(request.query.application) }));
   app.get<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => ({ items: bridge.tools(request.params.applicationId) }));
   app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/environments", async request => bridge.saveEnvironment(request.params.applicationId, request.body as any));
@@ -184,7 +208,12 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.delete<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => { bridge.deleteEnvironment(request.params.applicationId, request.params.environmentId); return { ok: true }; });
   app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { const body = request.body as { enabled?: boolean }; check(typeof body?.enabled === "boolean", "INVALID_REQUEST", "enabled 必须为布尔值"); bridge.setToolEnabled(request.params.applicationId, request.params.toolId, body.enabled); return { ok: true }; });
   app.post<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body));
-  app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => bridge.saveTool({ ...(request.body as any), application: request.params.applicationId }));
+  app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => {
+    const input = request.body as { toolId?: string };
+    check(input && typeof input.toolId === "string", "INVALID_TOOL", "工具 ID 无效");
+    check(!bridge.tools(request.params.applicationId).some(tool => tool.toolId === input.toolId), "TOOL_EXISTS", "工具 ID 已存在", 409);
+    return bridge.saveTool({ ...(request.body as any), application: request.params.applicationId });
+  });
   app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/definition", async request => bridge.saveTool({ ...(request.body as any), application: request.params.applicationId, toolId: request.params.toolId }));
   app.delete<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { bridge.deleteTool(request.params.applicationId, request.params.toolId); return { ok: true }; });
   app.post("/api/web-bridge/calls", async request => {
@@ -360,7 +389,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     const result = await runner.createDraft(request.params.id, input.expectedRevision, input.input, input.requestId);
     reply.code(202); return result;
   });
-  app.get("/api/workflows", async () => ({ items: store.workflows() }));
+  app.get("/api/workflows", async () => ({ items: store.workflows().map(workflow => ({ ...workflow, latestRun: store.latestWorkflowRun(workflow.id) })) }));
   app.delete<{ Params: { id: string } }>("/api/workflows/:id", async request => authoring.deleteWorkflow(request.params.id));
   app.post<{ Params: { id: string } }>("/api/workflows/:id/draft", async request => {
     const input = body<{ versionId?: string; mode: "edit" | "copy" | "restore"; requestId: string }>(request.body, { versionId: { type: "string" }, mode: { enum: ["edit", "copy", "restore"] }, requestId }, ["mode", "requestId"]);
@@ -380,7 +409,12 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     const version = store.version(input.versionId ?? workflow.currentVersionId); check(version.workflowId === workflow.id, "NOT_FOUND", "版本不属于该工作流");
     const result = runner.create(version.id, input.input, input.requestId); reply.code(202); return result;
   });
-  app.get("/api/runs", async () => ({ items: store.runs() }));
+  app.get<{ Querystring: { workflowId?: string; draftId?: string; type?: string; status?: string } }>("/api/runs", async request => {
+    const filters = request.query;
+    check(!filters.type || ["formal", "test"].includes(filters.type), "INVALID_INPUT", "运行类型无效");
+    check(!filters.status || ["queued", "running", "cancel_requested", "succeeded", "failed", "cancelled", "interrupted"].includes(filters.status), "INVALID_INPUT", "运行状态无效");
+    return { items: store.runSummaries(filters) };
+  });
   app.get<{ Params: { id: string } }>("/api/runs/:id", async request => {
     const snapshot = runner.snapshot(request.params.id);
     return { ...snapshot, input: publicValue(snapshot.input), output: publicValue(snapshot.output),

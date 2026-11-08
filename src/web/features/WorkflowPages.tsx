@@ -7,13 +7,13 @@ import { Textarea } from "../components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
-import { BackButton, EmptyState, ErrorNotice, Loading, PageHeading, Payload } from "../components/common";
+import { EmptyState, ErrorNotice, Loading, PageHeading, Payload, Status } from "../components/common";
 import FlowCanvas from "./FlowCanvas";
 import { DeleteWorkflowButton } from "./DeleteWorkflowButton";
 import { SourceTabs } from "./SourceTabs";
 import { WorkflowOutputEditor } from "./WorkflowOutputEditor";
 export { SourceTabs } from "./SourceTabs";
-interface WorkflowSummary { id: string; name: string; currentVersionId: string; createdAt: number; updatedAt: number }
+interface WorkflowSummary { id: string; name: string; currentVersionId: string; createdAt: number; updatedAt: number; latestRun?: { id: string; status: string; createdAt: number } | null }
 export async function newDraft(workflowId?: string, versionId?: string, mode: "edit" | "copy" | "restore" = "edit") {
   const draft = await send<{ id: string }>(workflowId ? `/workflows/${workflowId}/draft` : "/drafts", { ...(workflowId ? { versionId, mode } : {}), requestId: requestId() });
   window.location.assign(`/drafts/${draft.id}`);
@@ -36,7 +36,7 @@ export function WorkflowsPage() {
   const { data, error, reload } = useResource<{ items: WorkflowSummary[] }>("/workflows"), drafts = useResource<{ items: { id: string; name: string; status: string; updatedAt: number }[] }>("/drafts");
   const [creating, setCreating] = useState(false), [actionError, setActionError] = useState("");
   const create = async () => { setCreating(true); try { await newDraft(); } catch (e) { setActionError((e as Error).message); setCreating(false); } };
-  return <><PageHeading eyebrow="YOUR WORKSPACE" title="工作流" description="创建和编排流程，查看每次运行的结果。"><Button onClick={() => void create()} disabled={creating}><Plus size={15} />新建工作流</Button></PageHeading><ErrorNotice message={error || actionError} />
+  return <><PageHeading title="工作流定义"><Button onClick={() => void create()} disabled={creating}><Plus size={15} />新建工作流</Button></PageHeading><ErrorNotice message={error || drafts.error || actionError} />
     <div className="section-label"><span>已发布工作流</span><span>{data?.items.length ?? 0} 个</span></div>
     {!data ? !error && <Loading /> : data.items.length ? <div className="panel workflow-list">{data.items.map(workflow =>
       <div className="workflow-row" key={workflow.id}><a className="workflow-row-link" href={`/workflows/${workflow.id}`}>
@@ -45,7 +45,7 @@ export function WorkflowsPage() {
         <span className="workflow-published"><span className="status-dot" />已发布</span>
         <time dateTime={new Date(workflow.updatedAt).toISOString()}>{new Date(workflow.updatedAt).toLocaleDateString("zh-CN")}</time>
         <ArrowUpRight size={15} className="row-arrow" />
-      </a><DeleteWorkflowButton id={workflow.id} name={workflow.name} compact onDeleted={() => { reload(); drafts.reload(); }} /></div>)}</div> : <div className="panel"><EmptyState title="还没有已发布的工作流" description="与 Agent 对话创建一个流程，确认后发布。" action={<Button variant="outline" onClick={() => void create()} disabled={creating}><Sparkles size={14} />与 Agent 创建</Button>} /></div>}
+      </a><a className="workflow-run-link" href={`/runs?workflowId=${encodeURIComponent(workflow.id)}`} aria-label={`查看 ${workflow.name} 的运行记录`}>{workflow.latestRun ? <><span>最近运行 <Status value={workflow.latestRun.status} /></span><time>{new Date(workflow.latestRun.createdAt).toLocaleString("zh-CN")}</time></> : <span>尚未运行</span>}<span>查看运行记录 →</span></a><DeleteWorkflowButton id={workflow.id} name={workflow.name} compact onDeleted={() => { reload(); drafts.reload(); }} /></div>)}</div> : <div className="panel"><EmptyState title="还没有已发布的工作流" description="与 Agent 对话创建一个流程，确认后发布。" action={<Button variant="outline" onClick={() => void create()} disabled={creating}><Sparkles size={14} />与 Agent 创建</Button>} /></div>}
     {!!drafts.data?.items.filter(draft => draft.status === "draft").length && <>
       <div className="section-label"><span>继续创作</span><span>{drafts.data.items.filter(draft => draft.status === "draft").length} 个草稿</span></div>
       <div className="panel draft-list">{drafts.data.items.filter(draft => draft.status === "draft").map(draft =>
@@ -73,5 +73,5 @@ export function WorkflowPage({ id }: { id: string }) {
   };
   useEffect(() => { if (data && !versionId) setVersionId(data.currentVersionId); }, [data, versionId]);
   const version = useResource<Version & { files: SourceFiles }>(`/workflows/${id}/versions/${encodeURIComponent(versionId || "pending")}`);
-  return <><BackButton /><PageHeading eyebrow="WORKFLOW" title={data?.name ?? "工作流详情"} description={data?.id}><Select value={versionId} onValueChange={setVersionId}><SelectTrigger aria-label="选择工作流版本"><SelectValue placeholder="历史版本" /></SelectTrigger><SelectContent>{data?.versions.map(v => <SelectItem value={v.id} key={v.id}>v{v.number}{v.id === data.currentVersionId ? " · 当前发布" : ""} · {new Date(v.createdAt).toLocaleString("zh-CN")}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={busy || !data} onClick={() => void openDraft("edit")}><Sparkles size={15} />编辑 / 发布新版本</Button><Button variant="outline" disabled={busy || !versionId} onClick={() => void openDraft("copy")}>复制为新工作流</Button><Button variant="outline" disabled={busy || !versionId || versionId === data?.currentVersionId} onClick={() => void openDraft("restore")}>还原到草稿</Button>{versionId && <RunButton workflowId={id} versionId={versionId} />}{data && <DeleteWorkflowButton id={id} name={data.name} disabled={busy} />}</PageHeading><ErrorNotice message={error || actionError || (versionId ? version.error : "")} />{versionId && versionId !== data?.currentVersionId && <div className="notice">正在查看历史版本。还原会创建同一工作流的草稿，发布后生成新版本并保留全部历史。</div>}{version.data && version.data.id === versionId ? <VersionBody key={versionId} version={version.data} /> : <Loading />}</>;
+  return <><PageHeading parents={[{ label: "工作流定义", href: "/" }]} title={data?.name ?? "工作流详情"}><Button variant="outline" asChild><a href={`/runs?workflowId=${encodeURIComponent(id)}`}>查看运行记录</a></Button><Select value={versionId} onValueChange={setVersionId}><SelectTrigger aria-label="选择工作流版本"><SelectValue placeholder="历史版本" /></SelectTrigger><SelectContent>{data?.versions.map(v => <SelectItem value={v.id} key={v.id}>v{v.number}{v.id === data.currentVersionId ? " · 当前发布" : ""} · {new Date(v.createdAt).toLocaleString("zh-CN")}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={busy || !data} onClick={() => void openDraft("edit")}><Sparkles size={15} />编辑 / 发布新版本</Button><Button variant="outline" disabled={busy || !versionId} onClick={() => void openDraft("copy")}>复制为新工作流</Button><Button variant="outline" disabled={busy || !versionId || versionId === data?.currentVersionId} onClick={() => void openDraft("restore")}>还原到草稿</Button>{versionId && <RunButton workflowId={id} versionId={versionId} />}{data && <DeleteWorkflowButton id={id} name={data.name} disabled={busy} />}</PageHeading><ErrorNotice message={error || actionError || (versionId ? version.error : "")} />{versionId && versionId !== data?.currentVersionId && <div className="notice">正在查看历史版本。还原会创建同一工作流的草稿，发布后生成新版本并保留全部历史。</div>}{version.data && version.data.id === versionId ? <VersionBody key={versionId} version={version.data} /> : <Loading />}</>;
 }

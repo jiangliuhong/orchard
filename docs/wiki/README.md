@@ -14,9 +14,11 @@
 - [流程格式和脚本协议](./architecture/workflow-format.md)
 - [Provider 扩展与配置](./architecture/providers.md)
 - [API 与事件](./architecture/api.md)
+- [公共 Agent 对话与场景接入](./architecture/agent-chat.md)
 
 ## 运行与验收
 
+- [npm 自动发布](./operations/npm-release.md)
 - [运行状态与数据生命周期](./operations/runtime.md)
 - [配置 Git 备份与恢复](./operations/config-git.md)
 - [开发验证与后续验收](./operations/verification.md)

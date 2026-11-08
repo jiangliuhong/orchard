@@ -1,85 +1,25 @@
 # Orchard
 
-本地 AI 工作流工作台。通过本机 Codex CLI / Pi CLI 对话创建流程，发布不可变版本，再用不同输入多次运行并检查各节点结果。
+English | [简体中文](README.zh-CN.md)
 
-已验证的工作台现已提升为仓库根项目。默认端口 `7441`，正式运行默认数据目录 `~/.orchard`，本地开发使用仓库目录下的 `.orchard`。第一版面向 macOS / Linux，Node.js 24+。
+## Install and start
 
-## 安装与启动
-
-在仓库根目录执行：
+Requires Node.js 24 or later on macOS or Linux.
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm build
-pnpm start
+npm install -g @jarome/orchard
+orchard server
 ```
 
-打开终端输出的本地地址。可以指定端口与独立数据目录：
+Open http://127.0.0.1:7441 in your browser.
 
-```bash
-pnpm start --port 7441 --data-dir /tmp/orchard-workbench-demo
-```
+## About Orchard
 
-一个数据目录只允许一个活动服务。`--data-dir` 会覆盖默认目录。
+Orchard is a local AI workflow workbench. Turn ideas into reusable workflows with your local Codex CLI or Pi CLI, run them with different inputs, and inspect the results in your browser.
 
-## 开发
-
-```bash
-pnpm dev
-# 另一终端，在同一目录：
-pnpm dev:web
-```
-
-前端开发地址为 `127.0.0.1:7442`，代理到本地 API `7441`。生产构建由同一个后端提供静态页面。
-
-```bash
-pnpm typecheck
-pnpm test
-pnpm build
-```
-
-UI：React / TypeScript / Vite、shadcn/ui / Tailwind CSS、React Flow；Monaco 按需加载。基础组件源码位于 `src/web/components/ui/`。后端按 domain、providers、authoring、runtime、persistence、server 分层，避免在 Web 中引用仓储实现。
-
-## 使用
-
-1. 进入“设置”，检查本地 CLI 路径，启用需要的 Provider，保存后检测连接。
-2. 刷新模型目录，在模型管理中启停、添加、删除或验证模型，设置默认模型。验证会发送真实请求，可能产生用量。Codex 沿用本机配置，兼容 Magpie 网关及自定义模型目录；使用准确模型 ID。CLI 版本可用不代表账号和模型权限必然可用。
-3. 在「设置 → Agent 模型配置」创建具名配置，例如「xxx 分析」，绑定明确的 Provider 和模型。
-4. 新建工作流，在创作对话中选择 Provider 和模型，描述流程。工作流默认配置和 Agent 节点选择具名模型配置；手动修改后先保存。
-5. 查看流程、节点配置与校验诊断，确认后点击“发布工作流”。生成和发布都不执行业务脚本。
-6. 在版本详情点击“运行”，填写符合输入 Schema 的 JSON。
-7. 在运行页检查路径、节点输入输出、日志、耗时、错误和跳过原因。运行中可以取消；再次运行创建新记录。
-8. 修改工作流会从当前版本创建新草稿。发布新版本不会改变历史运行。
-
-修改具名 Agent 模型配置后，引用它的工作流无需重新发布，下一次新建运行即使用新配置。排队和执行中的运行保留创建时的模型绑定；历史可追踪配置名称、修订和实际模型。详见[Agent 模型配置](docs/wiki/product/agent-model-configs.md)。
-
-草稿保存并通过校验后可以“运行测试”。测试会实际执行脚本和 Agent 调用，使用当前修订的不可变快照，不发布工作流、不递增发布版本号、不改变当前版本；详情页可返回草稿继续编辑并再次测试。
-
-主导航“脚本库”支持独立创建 Node.js / Shell 脚本、编辑多文件源码和输入输出 Schema、运行测试、查看日志、发布固定版本、复制与归档。未保存的修改需要保存或放弃后才能切换版本；非法源码可以保存为带诊断的草稿，发布时会再次校验，不会执行脚本。脚本测试可取消，服务重启后执行中的测试会显示中断失败。
-
-在工作流草稿中选择已有 Node.js、Shell 或脚本节点，通过“引用脚本库”选择脚本和发布版本，应用后保存工作流。节点保留输入绑定并采用脚本的输出 Schema；发布脚本新版本不会自动更新已有引用。Shell 脚本库默认返回 `{ stdout, stderr, exitCode }`，可为新版本显式选择 JSON 结果文件协议；Node.js 使用默认导出函数的 JSON 返回值。
-
-脚本详情中的 Agent 面板支持根据需求及选定测试结果生成变更、查看源码和元数据差异，并在确认后保存为一次草稿修订。测试绑定不可变快照，历史记录分页加载；旧版本可还原为草稿，也可查询工作流引用。数据清理默认不自动执行，必须预览范围后确认。操作步骤见[脚本库使用说明](docs/wiki/product/script-library.md)，实现与验证见[脚本库设计](docs/features/2026-11-06-script-library/design.md)。
-
-在编辑页“最终输出”中选择返回的节点、字段路径或组合多个字段，配置最终输出 Schema；“应用输出配置”后保存草稿即可测试。点击画布的“结束”可打开该配置。运行完成后默认展示独立的最终结果，支持正文 / JSON、复制、下载和全屏阅读；节点输入输出及日志位于“执行详情”。
-
-已发布工作流详情支持查看历史版本。“编辑 / 发布新版本”会继续同一工作流已有的未发布草稿，发布后版本号递增；“复制为新工作流”会复制当前选中版本的定义和脚本并分配新的工作流 ID，首次发布从 v1 开始。“还原到草稿”会将选中的历史版本复制到同一工作流的新草稿，确认发布后成为新版本，保留历史版本和运行记录；已有未发布草稿时需先完成该草稿。
-
-工作流和草稿支持删除，确认弹窗会说明删除范围。删除工作流将清理其全部版本、关联草稿及运行记录，独立副本不受影响；有活动任务时需先完成或取消。预览画布使用紧凑节点与居中分支，自动适配不再放大小流程。
-
-首版支持 Node.js、Agent、Shell、Switch，无环流程中一条活动路径串行执行。没有定时调度、并行、循环、自动重试或中断后自动续跑。运行使用入队时固定的 Agent 模型配置修订，修改具名配置只影响新运行；底层 Provider 或模型禁用阻止新调用，已有调用沿用启动配置。
-
-脚本按当前用户权限执行，独立进程用于超时和取消管理，不构成操作系统沙箱。中断或失败不能撤销外部副作用，重新运行前应检查业务状态。
-
-## 文档
-
-- [流程格式和脚本协议](docs/wiki/architecture/workflow-format.md)
-- [Provider 扩展与配置](docs/wiki/architecture/providers.md)
-- [Agent 模型配置](docs/wiki/product/agent-model-configs.md)
-- [对话创作与发布](docs/wiki/product/authoring.md)
-- [运行状态与数据生命周期](docs/wiki/operations/runtime.md)
-- [API 与事件](docs/wiki/architecture/api.md)
-- [页面使用说明](docs/wiki/product/interface.md)
-- [开发验证与后续验收](docs/wiki/operations/verification.md)
-
-本项目初始数据库结构已于 2026-11-04 由用户批准，依据 `openspec/changes/rebuild-ai-workflow-workbench/design.md` D10；后续结构变更仍需审核。
+- Create and edit workflows through AI conversations and a visual editor.
+- Combine AI agents, Node.js scripts, shell commands, and conditional branches.
+- Build a reusable script library with AI assistance, test scripts, and use published script versions in workflows.
+- Test workflow drafts, publish fixed versions, and run them repeatedly with different inputs.
+- Inspect final outputs, node inputs and outputs, logs, and execution history.
+- Manage AI providers and model configurations, and keep workflow and script data locally.

@@ -6,6 +6,8 @@ import { check } from "../domain/errors.js";
 import type { WebBridgeApplication } from "./catalog.js";
 import type { WebBridgeTool } from "./catalog.js";
 import { validateBridgeConfigV1 } from "../migrations/config.js";
+import { canonicalJson, digest } from "../persistence/files.js";
+import { prepareBridgeProposal } from "./authoring.js";
 
 export interface WebBridgeEnvironment {
   id: string;
@@ -84,15 +86,37 @@ export class WebBridgeConfig {
     });
   }
   tools(application?: string) { return Object.values(this.value.tools).filter(tool => !application || tool.application === application).map(tool => ({ ...tool, enabled: this.toolEnabled(tool.application, tool.toolId) })); }
+  authoringSnapshot(application: string) {
+    check(this.application(application), "NOT_FOUND", "应用不存在", 404);
+    const snapshot = structuredClone({ application: this.application(application)!, environments: this.environments(application), tools: this.tools(application) });
+    return { ...snapshot, hash: digest(canonicalJson(snapshot)) };
+  }
+  applyProposal(application: string, expectedHash: string, proposal: unknown) {
+    return this.coordinator.withWrite(() => {
+      const snapshot = this.authoringSnapshot(application);
+      check(snapshot.hash === expectedHash, "REVISION_CONFLICT", "应用配置已变化，请重新生成变更", 409);
+      const prepared = prepareBridgeProposal(application, snapshot.tools, proposal);
+      check(prepared.proposal.changes.length, "NO_CHANGES", "此回复没有需要应用的变更");
+      const next = structuredClone(this.value);
+      for (const change of prepared.proposal.changes) {
+        const key = `${application}/${change.toolId}`;
+        if (change.operation === "delete") { delete next.tools[key]; delete next.enabledTools[key]; }
+        else { next.tools[key] = change.definition!; next.enabledTools[key] = change.definition!.enabled; }
+      }
+      validateBridgeConfigV1(JSON.stringify(next));
+      const previous = this.value;
+      this.value = next;
+      try { this.flush(); } catch (error) { this.value = previous; throw error; }
+      return this.authoringSnapshot(application);
+    });
+  }
   saveTool(tool: Omit<WebBridgeTool, "enabled"> & { enabled?: boolean }) {
     return this.coordinator.withWrite(() => {
-      check(this.value.applications[tool.application], "UNKNOWN_APPLICATION", "应用不存在");
-      check(/^[a-z][a-z0-9_-]{0,99}$/.test(tool.toolId), "INVALID_TOOL", "工具 ID 无效");
-      check(/^\/[^/]/.test(tool.path), "INVALID_TOOL", "工具路径必须是同源绝对路径");
-      check(tool.method === "GET" || tool.method === "POST", "INVALID_TOOL", "只支持 GET 或 POST");
-      check(tool.timeoutMs >= 100 && tool.timeoutMs <= 120000, "INVALID_TOOL", "超时必须在 100–120000 毫秒之间");
+      const snapshot = this.authoringSnapshot(tool.application);
       const key = `${tool.application}/${tool.toolId}`;
-      this.value.tools[key] = { ...this.value.tools[key], ...tool, enabled: true }; this.flush(); return this.value.tools[key];
+      const definition = { ...this.value.tools[key], ...tool, enabled: tool.enabled ?? this.toolEnabled(tool.application, tool.toolId) };
+      this.applyProposal(tool.application, snapshot.hash, { summary: "保存工具定义", changes: [{ operation: this.value.tools[key] ? "update" : "create", toolId: tool.toolId, definition }] });
+      return definition;
     });
   }
   deleteTool(application: string, toolId: string) {
