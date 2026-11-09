@@ -27,9 +27,9 @@ export function entryChecksum(entry){
 }
 const walk=path=>readdirSync(resolve(root,path),{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?walk(`${path}/${entry.name}`):[`${path}/${entry.name}`]);
 export const migrationFiles=()=>walk('src/migrations').filter(path=>path!=='src/migrations/frozen.ts');
-export function releaseFiles(entries){
+export function releaseFiles(entries,approvalPath='docs/features/2026-11-06-data-migration/schema-approval-v8.json'){
  return [...new Set([...walk('src').filter(path=>path!=='src/migrations/frozen.ts'),...walk('scripts'),...walk('tests/fixtures/migrations'),...entries.flatMap(entry=>entry.files),
-  'docs/features/2026-11-06-data-migration/schema-review.md','docs/features/2026-11-06-data-migration/schema-approval.json','docs/features/2026-11-06-data-migration/schema-approval-v8.json',historicalReleasePath,'package.json','pnpm-lock.yaml','tsconfig.json','tsconfig.server.json','vite.config.ts','index.html'])].sort();
+  approvalPath,'docs/features/2026-11-06-data-migration/schema-review.md','docs/features/2026-11-06-data-migration/schema-approval.json','docs/features/2026-11-06-data-migration/schema-approval-v8.json',historicalReleasePath,'package.json','pnpm-lock.yaml','tsconfig.json','tsconfig.server.json','vite.config.ts','index.html'])].sort();
 }
 export function contentDigest(manifest){
  const entries=manifest.entries.map(({id,checksum})=>({id,checksum}));
@@ -58,7 +58,7 @@ export function checkManifest({requireReview=false}={}){
  }
  if(ids.size!==approved.entries.length)throw new Error('Release drops an approved migration ID');
  for(const entry of manifest.entries)for(const required of entry.requires)if(!ids.has(required))throw new Error(`Missing migration dependency: ${required}`);
- if(canonical(releaseFiles(approved.entries))!==canonical(Object.keys(manifest.fileChecksums).sort())||[...allFiles].some(path=>!manifest.fileChecksums[path]))throw new Error('Incomplete local dependency lock');
+ if(canonical(releaseFiles(approved.entries,manifest.schemaApproval))!==canonical(Object.keys(manifest.fileChecksums).sort())||[...allFiles].some(path=>!manifest.fileChecksums[path]))throw new Error('Incomplete local dependency lock');
  for(const path of Object.keys(manifest.fileChecksums))if(sha256(resourceBytes(path))!==manifest.fileChecksums[path])throw new Error(`Local dependency changed: ${path}`);
  if(contentDigest(manifest)!==manifest.contentDigest)throw new Error('Manifest content digest mismatch');
  if(sha256(resourceBytes('src/migrations/frozen.ts'))!==manifest.bundleChecksum)throw new Error('Generated migration bundle changed');

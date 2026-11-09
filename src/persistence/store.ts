@@ -2,8 +2,8 @@ import { configCoordinator } from "../config-git/coordinator.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve, join } from "node:path";
-import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve, join, sep } from "node:path";
+import { constants, copyFileSync, chmodSync, existsSync, fsyncSync, mkdirSync, realpathSync, openSync, writeFileSync, readFileSync, closeSync, unlinkSync, rmSync, renameSync, lstatSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { SCHEMA_VERSION } from "./schema.js";
 import { DirectoryLease } from "../migrations/lock.js";
@@ -42,6 +42,10 @@ export interface ConversationRecord {
 
 type Row = Record<string, unknown>;
 const parsed = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(value) as T : undefined as T;
+/** 事务外准备、事务内登记的引用描述（§5.2）；不含可变外部路径。 */
+export type PreparedReference =
+  | { kind: "inline"; value: unknown }
+  | { kind: "blob"; artifactId: string; relativePath: string; sha256: string; byteSize: number };
 export class Store {
   readonly db!: DatabaseSync;
   readonly files: FileStore;
@@ -97,6 +101,61 @@ export class Store {
     this.exec("INSERT OR IGNORE INTO artifacts VALUES(?,?,?,?,?,?)", blob.id, blob.relativePath, blob.hash, blob.size, "application/json", Date.now());
     return json({ artifactId: blob.id });
   }
+  /**
+   * 事务外文件准备（设计 §5.2）：小值生成 inline 描述，大值在受控 staging 写入、
+   * fsync 后安装到不可变内容寻址路径并 fsync 父目录，返回不含可变外部路径的描述。
+   * 复用已有文件时校验字节数与摘要。输入必须先经过敏感策略。
+   */
+  prepareReference(value: unknown): PreparedReference {
+    const text = json(value);
+    const byteSize = Buffer.byteLength(text);
+    check(byteSize <= 16 * 1024 * 1024, "OUTPUT_LIMIT", "结果超过 16 MiB");
+    if (byteSize <= 32768) return { kind: "inline", value: value ?? null };
+    const hash = digest(text);
+    const relativePath = `artifacts/blobs/${hash}.json`;
+    const target = this.files.path(relativePath);
+    const existing = lstatSync(target, { throwIfNoEntry: false });
+    if (existing) {
+      check(existing.isFile() && !existing.isSymbolicLink() && existing.size === byteSize, "ARTIFACT_MISMATCH", "已安装产物文件大小不一致");
+      check(digest(readFileSync(target)) === hash, "ARTIFACT_MISMATCH", "已安装产物摘要不一致");
+    } else {
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+      mkdirSync(this.files.path("staging"), { recursive: true, mode: 0o700 });
+      const stagingPath = this.files.path(`staging/${randomUUID()}.json`);
+      const fd = openSync(stagingPath, "wx", 0o600);
+      try {
+        writeFileSync(fd, text, { mode: 0o600 });
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
+      try {
+        renameSync(stagingPath, target);
+      } catch (error) {
+        // 并发准备同一内容时目标已安装；逐字节校验后复用。
+        const installed = lstatSync(target, { throwIfNoEntry: false });
+        check(installed?.isFile() && installed.size === byteSize && digest(readFileSync(target)) === hash, "ARTIFACT_MISMATCH", "产物安装失败");
+      }
+      const dirFd = openSync(dirname(target), "r");
+      try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+    }
+    return { kind: "blob", artifactId: hash, relativePath, sha256: hash, byteSize };
+  }
+  /** 只在事务内校验描述并登记 artifacts 行、返回引用编码；不创建目录、写文件或编译。 */
+  attachPreparedReference(prepared: unknown): string {
+    check(prepared !== null && typeof prepared === "object" && !Array.isArray(prepared), "ARTIFACT_MISMATCH", "预准备描述无效");
+    const record = prepared as Record<string, unknown>;
+    if (record.kind === "inline") {
+      check(Object.keys(record).length === 2, "ARTIFACT_MISMATCH", "inline 预准备描述字段无效");
+      return json({ inline: record.value ?? null });
+    }
+    check(record.kind === "blob" && Object.keys(record).length === 5, "ARTIFACT_MISMATCH", "blob 预准备描述字段无效");
+    check(typeof record.artifactId === "string" && /^[0-9a-f]{64}$/.test(record.artifactId) && record.artifactId === record.sha256, "ARTIFACT_MISMATCH", "blob 预准备描述摘要无效");
+    check(typeof record.relativePath === "string" && record.relativePath === `artifacts/blobs/${record.artifactId}.json`, "ARTIFACT_MISMATCH", "blob 预准备描述路径无效");
+    check(typeof record.byteSize === "number" && Number.isInteger(record.byteSize) && record.byteSize > 32768 && record.byteSize <= 16 * 1024 * 1024, "ARTIFACT_MISMATCH", "blob 预准备描述大小无效");
+    const target = lstatSync(this.files.path(record.relativePath), { throwIfNoEntry: false });
+    check(target?.isFile() && !target.isSymbolicLink() && target.size === record.byteSize, "ARTIFACT_MISSING", "预准备产物文件不存在或大小不一致");
+    this.exec("INSERT OR IGNORE INTO artifacts VALUES(?,?,?,?,?,?)", record.artifactId, record.relativePath, record.sha256, record.byteSize, "application/json", Date.now());
+    return json({ artifactId: record.artifactId });
+  }
   dereference(ref: unknown): unknown {
     if (!ref) return undefined;
     const value = parsed<{ inline?: unknown; artifactId?: string }>(ref);
@@ -108,6 +167,20 @@ export class Store {
   command<T>(scope: string, requestId: string, input: unknown, operation: () => T): T {
     check(typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200, "INVALID_REQUEST_ID", "缺少有效 requestId");
     const hash = digest(canonicalJson(input));
+    return this.receiptedCommand(scope, requestId, hash, operation);
+  }
+  /**
+   * 敏感命令入口（§7.4）：请求摘要由调用方以本机 HMAC 预先计算，
+   * 不把明文交给旧 SHA-256 协议；scope 限定敏感命名空间，
+   * 调用者不能指定任意摘要或 scope。回执仅保存 HMAC 与安全 DTO。
+   */
+  sensitiveCommand<T>(scope: string, requestId: string, requestHash: string, operation: () => T): T {
+    check(/^(dictionary-secret|secrets):[a-z][a-z-]*$/.test(scope), "INVALID_SCOPE", "敏感命令 scope 无效");
+    check(typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200, "INVALID_REQUEST_ID", "缺少有效 requestId");
+    check(typeof requestHash === "string" && /^[0-9a-f]{64}$/.test(requestHash), "INVALID_REQUEST_ID", "敏感请求摘要无效");
+    return this.receiptedCommand(scope, requestId, requestHash, operation);
+  }
+  private receiptedCommand<T>(scope: string, requestId: string, hash: string, operation: () => T): T {
     return this.transaction(() => {
       const prior = this.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId);
       if (prior) {

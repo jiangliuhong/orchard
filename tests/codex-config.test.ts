@@ -7,7 +7,7 @@ import { readCodexConfig, readCodexModels } from "../src/providers/codex-config.
 import { CliProvider } from "../src/providers/registry.js";
 import { codexNativeAdapter } from "../src/providers/codex-app-server.js";
 import { SessionManager } from "../src/providers/session-manager.js";
-import { installFixture, readLog } from "./agent-transport.test.js";
+import { installFixture, readLog } from "./agent-fixtures.js";
 
 test("Codex custom catalog takes precedence over the official cache and preserves exact model IDs", context => {
   const home = temporary(context), catalog = join(home, "magpie-models.json");

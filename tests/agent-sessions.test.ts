@@ -153,7 +153,7 @@ test("close rejects queued waiters, closes entries and tolerates close failures"
 
 test("native single turns release the only scheduler slot for the next call", async t => {
   const { setup } = await import("./helpers.js");
-  const { installFixture } = await import("./agent-transport.test.js");
+  const { installFixture } = await import("./agent-fixtures.js");
   const { CliProvider, ProviderRegistry } = await import("../src/providers/registry.js");
   const { codexNativeAdapter } = await import("../src/providers/codex-app-server.js");
   const { store } = setup(t);

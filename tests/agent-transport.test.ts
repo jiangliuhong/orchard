@@ -1,40 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { temporary, until } from "./helpers.js";
+import { until } from "./helpers.js";
+import { installFixture } from "./agent-fixtures.js";
 import { agentLimits } from "../src/providers/agent-limits.js";
 import { JsonlConnection } from "../src/providers/transport/jsonl.js";
 import { PendingRequests } from "../src/providers/transport/pending.js";
 
 type ProtocolRecord = { id?: number; method?: string; result?: { userAgent?: string }; params?: unknown };
-
-export function installFixture(t: import("node:test").TestContext, name: "codex-server.mjs" | "pi-server.mjs", scenario: string, env: Record<string, string> = {}) {
-  const root = temporary(t);
-  const executable = join(root, name.replace(".mjs", ""));
-  copyFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), executable);
-  chmodSync(executable, 0o755);
-  const logPath = join(root, "fixture.log");
-  process.env[name.startsWith("codex") ? "CODEX_FIXTURE_SCENARIO" : "PI_FIXTURE_SCENARIO"] = scenario;
-  process.env[name.startsWith("codex") ? "CODEX_FIXTURE_LOG" : "PI_FIXTURE_LOG"] = logPath;
-  for (const [key, value] of Object.entries(env)) process.env[key] = value;
-  t.after(() => { rmSync(logPath, { force: true }); });
-  return { executable, logPath, root };
-}
-
-export function readLog(path: string) {
-  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
-  const pids: number[] = [];
-  let argv: string[] = [];
-  const records: string[] = [];
-  for (const line of lines) {
-    if (line.startsWith("pid ")) { pids.push(Number(line.split(" ")[1])); continue; }
-    if (line.startsWith("{\"argv\"")) { if (!argv.length) argv = JSON.parse(line).argv as string[]; continue; }
-    records.push(line);
-  }
-  return { pid: pids[0] ?? 0, pids, argv, lines: records };
-}
 
 async function collectRecords(executable: string, scenarioEnv: Record<string, string>, limits = agentLimits()) {
   const records: ProtocolRecord[] = [];

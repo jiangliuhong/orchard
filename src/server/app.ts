@@ -33,6 +33,11 @@ import { GitRepositoryService, type GitRepositoryOptions } from "../config-git/r
 import { ConfigGitService } from "../config-git/service.js";
 import { registerConfigGitRoutes } from "../config-git/routes.js";
 import { BridgeAgentService, type BridgeAgentRequest } from "../web-bridge/agent.js";
+import { CommandHmac } from "../secrets/command-hmac.js";
+import { KeyringStore, resolveKeyringPath } from "../secrets/keyring.js";
+import { SecretsService } from "../secrets/service.js";
+import { DictionaryService } from "../dictionaries/service.js";
+import { registerDictionaryRoutes } from "../dictionaries/routes.js";
 
 const requestId = { type: "string", minLength: 1, maxLength: 200 };
 const expectedRevision = { type: "integer", minimum: 0 };
@@ -55,6 +60,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   } });
   const store = proxy<Store>("store"), providers = proxy<ProviderRegistry>("providers"), bridge = proxy<WebBridgeGateway>("bridge"), apiAuth = proxy<LocalApiAuth>("apiAuth");
   const authoring = proxy<AuthoringService>("authoring"), runner = proxy<GraphRunner>("runner"), scriptTests = proxy<ScriptTestRunner>("scriptTests"), scripts = proxy<ScriptLibrary>("scripts"), scriptAgent = proxy<ScriptAgentService>("scriptAgent"), scriptMaintenance = proxy<ScriptMaintenance>("scriptMaintenance");
+  const secretsService = proxy<SecretsService>("secrets"), dictionaries = proxy<DictionaryService>("dictionaries");
   const bridgeAgent = proxy<BridgeAgentService>("bridgeAgent");
   const closeServices = async () => {
     let failure: unknown;
@@ -93,6 +99,10 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       add("scriptMaintenance", new ScriptMaintenance(opened));
       const configGit = new ConfigGitService(opened, gateway.config!, restore, configGitOptions);
       add("configGit", configGit, () => configGit.close());
+      const keyring = new KeyringStore(resolveKeyringPath(opened.root));
+      const secretsService = new SecretsService(opened, keyring, new CommandHmac(opened, opened.root, keyring));
+      add("secrets", secretsService);
+      add("dictionaries", new DictionaryService(opened, secretsService));
       clean = true;
     } catch (error) { await closeServices(); throw error; }
   };
@@ -131,7 +141,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     if (origin) {
       try {
         const originUrl = new URL(origin);
-        const localOrigin = ["127.0.0.1", "localhost", "::1"].includes(originUrl.hostname);
+        const localOrigin = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(originUrl.hostname);
         const extensionRegistration = request.method === "POST" && request.url === "/api/web-bridge/profiles/register" && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
         if (!(localOrigin && originUrl.protocol === "http:") && !extensionRegistration) return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" });
       } catch { return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" }); }
@@ -231,6 +241,9 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.get<{ Params: { id: string } }>("/api/agent-model-configs/:id", async request => providers.modelConfigs.view(request.params.id));
   app.patch<{ Params: { id: string } }>("/api/agent-model-configs/:id", async request => providers.modelConfigs.update(request.params.id, request.body));
   app.get<{ Params: { id: string } }>("/api/agent-model-configs/:id/references", async request => providers.modelConfigs.references(request.params.id));
+  app.register(async scoped => {
+    registerDictionaryRoutes(scoped, dictionaries, secretsService, apiAuth);
+  });
   app.patch<{ Params: { id: string } }>("/api/providers/:id", async request => providers.update(request.params.id, request.body));
   app.post<{ Params: { id: string } }>("/api/providers/:id/detect", async request => providers.detect(request.params.id));
   app.post<{ Params: { id: string } }>("/api/providers/:id/models/refresh", async request => providers.models(request.params.id));
@@ -470,5 +483,10 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
   // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
   app.addHook("onClose", async () => { await closeServices(); bootstrap?.release(); });
-  return { app, store, providers, authoring, runner, bridge, scripts, scriptAgent, initialize, activate, ready: initialization };
+  return {
+    app, store, providers, authoring, runner, bridge, scripts, scriptAgent, initialize, activate, ready: initialization,
+    // initialize 完成后可用的真实服务实例（测试与宿主接线使用）。
+    get secrets() { return services.secrets as SecretsService; },
+    get dictionaries() { return services.dictionaries as DictionaryService; },
+  };
 }

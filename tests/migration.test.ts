@@ -90,16 +90,16 @@ test('M02 all historical database versions and config versions reach the same ta
   }else{const instance=await boot(root,async()=>{});assert.equal(instance.bootstrap.ready,true);}
  }
 });
-test('v6 release ledgers keep their original migration identities when extending the chain to v8',t=>{
+test('v6 release ledgers keep their original migration identities when extending the chain to v9',t=>{
  const root=fixture(t,6,1);
  const migrations=declarations.filter(value=>value.kind==='database'&&value.from>=2&&value.to<=6);
  const ledger:Ledger={formatVersion:1,baseline:{database:2,webBridge:1,applicationId:1331110449,source:'previous release'},completed:[{jobId:randomUUID(),migrations,source:{database:2,webBridge:1},target:{database:6,webBridge:1}}]};
  writeJson(safe(root,'migrations/ledger.json'),ledger);
- assert.deepEqual(plan(root).steps.map(step=>step.id),['db.v6-v7','db.v7-v8']);
+ assert.deepEqual(plan(root).steps.map(step=>step.id),['db.v6-v7','db.v7-v8','db.v8-v9']);
  const job=execute(root,accept(root));assert.equal(job.phase,'committed',JSON.stringify(job.error));
  const updated=readJson<Ledger>(safe(root,'migrations/ledger.json'));
  assert.deepEqual(updated.completed[0],ledger.completed[0]);assert.equal(updated.completed.length,2);
- assert.equal(plan(root).steps.length,0);assert.equal(source(root).database,8);
+ assert.equal(plan(root).steps.length,0);assert.equal(source(root).database,9);
 });
 test('M03 old, mixed, unknown and nonempty incomplete directories are blocked without replacing source files',async t=>{
  for(const kind of ['old','mixed','unknown','incomplete']){

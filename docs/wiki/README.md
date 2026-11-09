@@ -32,5 +32,6 @@
 功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（已完成并验收）](../features/2026-11-06-data-migration/design.md)；[配置定义信息 Git 存储（实现与验证记录）](../features/2026-11-06-config-git-storage/design.md)。
 
 - [Agent 模型配置与工作流动态引用](../features/2026-11-07-agent-model-configs/design.md)
+- [字典、加密字典与 Git 同步方案（实施中，管理入口已实现）](../features/2026-11-09-dictionaries/design.md)
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

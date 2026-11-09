@@ -13,10 +13,10 @@ test('release locks independent historical baselines and executable dependencies
  assert.equal(manifest.status,'release_locked');assert.equal(manifest.review.contentDigest,approval.contentDigest);assert.notEqual(manifest.contentDigest,approval.contentDigest);
  for(const entry of manifest.entries)for(const path of ['src/migrations/mapping.ts','src/migrations/runner.ts','src/migrations/validators.ts','src/migrations/questions.ts'])assert.ok(entry.files.includes(path),path);
  for(const path of ['src/server/bootstrap.ts','tests/fixtures/migrations/database/provenance.json','src/web/Bootstrap.tsx','vite.config.ts','src/domain/validation.ts'])assert.ok(manifest.fileChecksums[path],path);
- assert.equal(manifest.entries.length,10);
+ assert.equal(manifest.entries.length,12);
 });
 test('locked release passes approval verification and deterministic bundle generation',()=>{
- const result=execFileSync(process.execPath,['scripts/check-migration-manifest.mjs','--require-review'],{cwd:root,encoding:'utf8'});assert.match(result,/Verified 10 locked migration declarations/);
+ const result=execFileSync(process.execPath,['scripts/check-migration-manifest.mjs','--require-review'],{cwd:root,encoding:'utf8'});assert.match(result,/Verified 12 locked migration declarations/);
  execFileSync(process.execPath,['scripts/generate-migration-bundle.mjs','--check'],{cwd:root,encoding:'utf8'});
 });
 test('compiled integrity envelopes must retain every required migration artifact',t=>{

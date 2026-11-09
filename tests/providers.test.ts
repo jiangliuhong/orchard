@@ -5,7 +5,7 @@ import { CliProvider, type ProviderEvent } from "../src/providers/registry.js";
 import { codexNativeAdapter } from "../src/providers/codex-app-server.js";
 import { piNativeAdapter } from "../src/providers/pi-rpc.js";
 import { SessionManager } from "../src/providers/session-manager.js";
-import { installFixture } from "./agent-transport.test.js";
+import { installFixture } from "./agent-fixtures.js";
 
 test("both CLI adapters default to native and validate final JSON without fallback", async t => {
   const { root, store, providers } = setup(t); t.after(() => store.close());

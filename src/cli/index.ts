@@ -9,6 +9,7 @@ import { decodeNativeMessages, encodeNativeMessage } from "../web-bridge/protoco
 import { WebBridgeClient } from "../web-bridge/client.js";
 import { existsSync, readFileSync } from "node:fs";
 import { configGitHelp, runConfigGitCli } from "../config-git/cli.js";
+import { secretsHelp, runSecretsCli } from "../secrets/cli.js";
 
 const args = process.argv.slice(2);
 const port = Number(value("--port", "7441")), serverUrl = value("--server-url", `http://127.0.0.1:${port}`);
@@ -16,7 +17,8 @@ const dataDir = resolve(value("--data-dir", join(homedir(), ".orchard")));
 function value(name: string, fallback: string) { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1] ?? fallback; }
 function help() { console.log(`orchard server [--port <port>] [--data-dir <dir>]
 orchard web-bridge install|uninstall|chrome-ext|status|applications|tools [application]|tool <application> <tool>|doctor
-${configGitHelp}`); }
+${configGitHelp}
+${secretsHelp}`); }
 async function request(path: string, init?: RequestInit) {
   try {
     const headers = new Headers(init?.headers);
@@ -34,6 +36,16 @@ async function main() {
     const child = execFileSync(process.execPath, [new URL("../server/main.js", import.meta.url).pathname, ...args.slice(1)], { stdio: "inherit" }); return child;
   }
   if (args[0] === "config-git") return runConfigGitCli(args.slice(1), { dataDir, request, output: body => console.log(JSON.stringify(body, null, args.includes("--pretty") ? 2 : undefined)) });
+  if (args[0] === "secrets") return runSecretsCli(args.slice(1), { dataDir, request: async (path, init) => {
+    // 复用本地 API 请求路径；非 2xx 时抛出带 code 的错误以走统一 CLI 错误出口。
+    const headers = new Headers(init?.headers);
+    const tokenPath = join(dataDir, "runtime", "api-token");
+    if (existsSync(tokenPath)) headers.set("x-orchard-token", readFileSync(tokenPath, "utf8").trim());
+    const response = await fetch(`${serverUrl}${path}`, { ...init, headers });
+    const body = await response.json() as any;
+    if (!response.ok) throw Object.assign(new Error(body.message ?? "请求失败"), { code: body.code ?? "REQUEST_FAILED" });
+    return body;
+  }, output: body => console.log(JSON.stringify(body, null, args.includes("--pretty") ? 2 : undefined)) });
   if (args[0] !== "web-bridge") return help();
   const command = args[1];
   if (command === "install") return console.log(JSON.stringify(installNativeHost(dataDir)));

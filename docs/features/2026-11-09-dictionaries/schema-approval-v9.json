@@ -1,0 +1,289 @@
+{
+  "formatVersion": 1,
+  "status": "review_candidate",
+  "applicationId": 1331110449,
+  "targetDatabaseVersion": 9,
+  "checksumContract": "SHA-256 of canonical declaration excluding checksum/reviewReference plus ordered resource path/content SHA-256 list; UTF-8 byte-order keys. Candidate SQL/protocol/config bytes only. Final executable manifest must additionally cover runner local dependencies, target validators and independent baseline fixtures before release review.",
+  "contentDigest": "a9a29eb3bd97386758c0be28012e5cf13b49c7bb44eae3786ed75882af916f58",
+  "review": {
+    "status": "approved",
+    "reviewer": "用户",
+    "date": "2026-11-09",
+    "contentDigest": "a9a29eb3bd97386758c0be28012e5cf13b49c7bb44eae3786ed75882af916f58"
+  },
+  "entries": [
+    {
+      "id": "db.v1-v2",
+      "kind": "database",
+      "from": 1,
+      "to": 2,
+      "requires": [],
+      "summary": "重建 runs，支持草稿运行",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v1-v2.sql",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "runs 行数及旧列逐值相同；新列均为 NULL；node_runs 等既有引用仍有效；queued_runs 存在；版本 2。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "2a55b9affd2d3eff5094d9fc26a310a73468232c48aefd9d02ce5d10244c061f"
+    },
+    {
+      "id": "db.v2-v3",
+      "kind": "database",
+      "from": 2,
+      "to": 3,
+      "requires": [
+        "db.v1-v2"
+      ],
+      "summary": "新增对话及轮次、消息关联",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v2-v3.sql",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "所有既有表行数及既有列相同；旧关联保持 NULL；submission_state 为 not_sent；新增对话表为空；唯一索引和关联索引准确；版本 3。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "6fb2249b4f40d5ac8eb4695158ecb93006edbdc17242d469ebe550704e26f2bc"
+    },
+    {
+      "id": "db.v3-v4",
+      "kind": "database",
+      "from": 3,
+      "to": 4,
+      "requires": [
+        "db.v2-v3"
+      ],
+      "summary": "历史对话状态与归档信息",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v3-v4.sql",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "对话行数和主键相同；验证全部状态映射、时间映射、title 和其他列不变；自引用和轮次/消息外键有效；索引条件准确；版本 4。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "16f8b6353a628480addfe90c0bcdd8fbfddd6919f9d5062d609437288388f6e1"
+    },
+    {
+      "id": "db.v4-v5",
+      "kind": "database",
+      "from": 4,
+      "to": 5,
+      "requires": [
+        "db.v3-v4"
+      ],
+      "summary": "新增脚本库、脚本版本及测试结构",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v4-v5.sql",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "既有表逐值、逐行不变；三个新表为空；唯一草稿索引、归属插入触发器和发布版本不可变触发器存在且定义匹配；版本 5。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "ae2542c9fcec7c6b52a5fc9108558d98dd162235d1bf1e4393a4576b09dd4711"
+    },
+    {
+      "id": "db.v5-v6",
+      "kind": "database",
+      "from": 5,
+      "to": 6,
+      "requires": [
+        "db.v4-v5"
+      ],
+      "summary": "版本化脚本执行时限",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v5-v6.sql",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "所有旧表行数和既有列相同；每个旧 script_versions.timeout_ms 为 300000；目标约束准确；发布内容保持不变；版本 6。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "74ab4c12daf027cac9be5940cd9e64b717d04535d389f1511903a1d78b470421"
+    },
+    {
+      "id": "db.initialize-v6",
+      "kind": "initialization",
+      "from": null,
+      "to": 6,
+      "requires": [],
+      "summary": "已确认空目录的新库初始化",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v6.sql",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "application_id 1331110449、user_version 6、全部表/索引/触发器精确匹配冻结结构；integrity_check 为 ok，foreign_key_check 无结果；中断按 initialization.json 幂等收敛。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "39ae7a98a754e2c341e32ec616aa357711a08105daca0d92443c0944218660fc"
+    },
+    {
+      "id": "config.web-bridge.v0-v1",
+      "kind": "configuration",
+      "from": 0,
+      "to": 1,
+      "requires": [],
+      "summary": "桥接配置增加格式版本并补齐缺失顶层映射",
+      "affectedResources": [
+        "config/web-bridge.json"
+      ],
+      "questions": [],
+      "requiresSchemaReview": false,
+      "files": [
+        "src/migrations/config.ts",
+        "docs/features/2026-11-06-data-migration/execution-protocol.md"
+      ],
+      "verification": "共享目标校验器通过；已存在已知值和各层未知 JSON 值逐值相同；仅新增 schemaVersion 和缺失的四个顶层映射。",
+      "reviewReference": null,
+      "checksum": "1b70fb75ea55d7ffc29f73b84573a0e51baaebb49eb1790b0aeb4af22c028538"
+    },
+    {
+      "id": "db.v6-v7",
+      "kind": "database",
+      "from": 6,
+      "to": 7,
+      "requires": [
+        "db.v5-v6"
+      ],
+      "summary": "仅保留原生 Agent 会话协议",
+      "reviewReference": "docs/features/2026-11-06-native-only/design.md#审核结论",
+      "verification": "保留历史及外键；旧会话清空后端引用并失效；旧多轮必须重建；内置 Provider 修订递增。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v6-v7.sql",
+        "docs/features/2026-11-06-native-only/design.md"
+      ],
+      "checksum": "2ded41b80871802ade3b8eada08aae972fcecaefaa72380590b09802da0cc331"
+    },
+    {
+      "id": "db.v7-v8",
+      "kind": "database",
+      "from": 7,
+      "to": 8,
+      "requires": [
+        "db.v6-v7"
+      ],
+      "summary": "新增具名 Agent 模型配置、历史修订和运行绑定",
+      "reviewReference": "docs/features/2026-11-07-agent-model-configs/design.md#数据库审核提案",
+      "verification": "三张新表为空；既有工作流和历史运行不改写；索引、约束及外键准确。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v7-v8.sql",
+        "docs/features/2026-11-07-agent-model-configs/design.md"
+      ],
+      "checksum": "ac951fb70cb0355e13ea20976024a4b35537ebcaa7213de3615a657284e458bd"
+    },
+    {
+      "id": "db.initialize-v8",
+      "kind": "initialization",
+      "from": null,
+      "to": 8,
+      "requires": [],
+      "summary": "已审核 v8 结构的新库初始化",
+      "reviewReference": "docs/features/2026-11-07-agent-model-configs/design.md#数据库审核提案",
+      "verification": "application_id 1331110449、user_version 8、十九张表及全部索引触发器匹配冻结基线。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v8.sql",
+        "docs/features/2026-11-07-agent-model-configs/design.md"
+      ],
+      "checksum": "8f9be5d0bddd4690fdab5109a2be7f8aee46f5019620c820c7301f7dd789f1d8"
+    },
+    {
+      "id": "db.v8-v9",
+      "kind": "database",
+      "from": 8,
+      "to": 9,
+      "requires": [
+        "db.v7-v8"
+      ],
+      "summary": "字典、加密字典与运行/测试字典绑定四张表；延迟当前指针外键、版本不可变触发器与对象身份不可变触发器",
+      "reviewReference": "docs/features/2026-11-09-dictionaries/schema-review-v9.md#审核记录",
+      "verification": "v8 增量升级与 v9 新建库对象一致；迁移前后旧表行与列内容比对一致，foreign_key_check 与 integrity_check 通过；延迟指针外键、版本不可改写、对象身份不可变、NOCASE 重命名冲突与绑定外键用例通过。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v8-v9.sql",
+        "docs/features/2026-11-09-dictionaries/schema-review-v9.md"
+      ],
+      "checksum": "6a46e681b0671dcd9cf6d62c5bc48d3d36262480f942e0b2f51cbdd41051c797"
+    },
+    {
+      "id": "db.initialize-v9",
+      "kind": "initialization",
+      "from": null,
+      "to": 9,
+      "requires": [],
+      "summary": "已审核 v9 结构的新库初始化（含字典表）",
+      "reviewReference": "docs/features/2026-11-09-dictionaries/schema-review-v9.md#审核记录",
+      "verification": "application_id 1331110449、user_version 9、v8 全部对象加四张字典表及索引触发器匹配冻结基线。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v9.sql",
+        "docs/features/2026-11-09-dictionaries/schema-review-v9.md"
+      ],
+      "checksum": "c877c25af02b9975bf98b1102a083a752585c0d9c6bafefbb1e10e4a0c236ca7"
+    }
+  ],
+  "priorApproval": "docs/features/2026-11-06-data-migration/schema-approval-v8.json",
+  "approvalSources": [
+    {
+      "path": "docs/features/2026-11-06-native-only/design.md#审核结论",
+      "sha256": "60e670ce9d75d0f1e3e34820566901b224086c6597bf6b313712cefb61c3ca50"
+    },
+    {
+      "path": "docs/features/2026-11-07-agent-model-configs/design.md#数据库审核提案",
+      "sha256": "2235775c1108416f87750cead9b713d3d9ecfc7cddab60c80eeb8f5948c803c0"
+    },
+    {
+      "path": "docs/features/2026-11-07-agent-model-configs/design.md#数据库审核提案",
+      "sha256": "2235775c1108416f87750cead9b713d3d9ecfc7cddab60c80eeb8f5948c803c0"
+    },
+    {
+      "path": "docs/features/2026-11-09-dictionaries/schema-review-v9.md#审核记录",
+      "sha256": "6b874c8b082ec71645ed2bc50a6ede9387f446a7b11c84df0169873b6cd569a9"
+    }
+  ]
+}

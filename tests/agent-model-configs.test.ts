@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { setup, temporary, until } from "./helpers.js";
@@ -142,14 +143,14 @@ test("draft test binding overrides defaults, preserves revisions and fails atomi
 
 test("v7 to v8 creates empty configuration tables without converting or deleting prior data", t => {
   const root = temporary(t), database = new DatabaseSync(join(root, "workbench.db"));
-  database.exec(SCHEMA.replace(AGENT_MODEL_SCHEMA, "").replace("PRAGMA user_version = 8", "PRAGMA user_version = 7"));
+  database.exec(readFileSync(new URL("./fixtures/migrations/database/v7.sql", import.meta.url), "utf8"));
   database.exec("INSERT INTO provider_settings VALUES('existing',1,'{}','[]','model',1,1);");
   database.close();
   const store = new Store(root); t.after(() => store.close());
-  assert.equal(store.one("PRAGMA user_version")!.user_version, 8);
+  assert.equal(store.one("PRAGMA user_version")!.user_version, 9);
   assert.ok(store.migrationBackupPath);
   assert.equal(store.provider("existing")!.defaultModel, "model");
-  for (const table of ["agent_model_configs", "agent_model_config_revisions", "run_agent_bindings"]) assert.equal(store.all(`SELECT * FROM ${table}`).length, 0);
+  for (const table of ["agent_model_configs", "agent_model_config_revisions", "run_agent_bindings", "dictionaries", "dictionary_versions", "run_dictionary_bindings", "script_test_dictionary_bindings"]) assert.equal(store.all(`SELECT * FROM ${table}`).length, 0);
   assert.deepEqual(store.all("PRAGMA foreign_key_check"), []);
 });
 

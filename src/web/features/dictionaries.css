@@ -1,0 +1,16 @@
+.dictionary-panel { padding-bottom: 1rem; }
+.dictionary-panel > p, .dictionary-panel > label, .dictionary-panel > .entry-actions, .dictionary-panel > .notice { margin: 1rem; }
+.dictionary-form { display: grid; gap: .65rem; padding: 1rem; }
+.dictionary-entries { width: 100%; border-collapse: collapse; text-align: left; }
+.dictionary-entries th, .dictionary-entries td { padding: .8rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.dictionary-entries code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.dictionary-entries .is-removed { opacity: .55; text-decoration: line-through; }
+.entry-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.entry-add { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; padding: 1rem; }
+.entry-add > input { flex: 1 1 12rem; min-width: 0; }
+.dictionary-entries input:not([type="checkbox"]) { min-width: 9rem; flex: 1; }
+@media (max-width: 720px) {
+  .dictionary-entries { display: block; overflow-x: auto; }
+  .dictionary-entries td { min-width: 8rem; }
+  .dictionary-entries .entry-actions { min-width: 16rem; }
+}

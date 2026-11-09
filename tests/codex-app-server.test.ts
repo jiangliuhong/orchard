@@ -8,7 +8,7 @@ import { CliProvider, type ProviderEvent } from "../src/providers/registry.js";
 import type { SessionTurnRequest } from "../src/providers/session.js";
 import type { ProviderSetting } from "../src/domain/types.js";
 import { setup } from "./helpers.js";
-import { installFixture, readLog } from "./agent-transport.test.js";
+import { installFixture, readLog } from "./agent-fixtures.js";
 
 function nativeSetup(t: TestContext, scenario: string, overrides: Partial<AgentLimits> = {}) {
   const { executable, logPath, root } = installFixture(t, "codex-server.mjs", scenario);

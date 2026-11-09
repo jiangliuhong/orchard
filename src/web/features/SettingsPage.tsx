@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, GitBranch, PlugZap, RefreshCw, Save, Settings2, Terminal, Boxes } from "lucide-react";
+import { ChevronDown, GitBranch, PlugZap, RefreshCw, Save, Settings2, Terminal, Boxes, KeyRound } from "lucide-react";
 import type { ProviderView } from "../../domain/types.js";
 import { isModelEnabled } from "../../domain/models.js";
 import { api, send, useResource } from "../lib/api";
@@ -12,6 +12,7 @@ import { Breadcrumbs, ErrorNotice, Loading } from "../components/common";
 import { ModelManager } from "./ModelManager";
 import { AgentModelConfigSettings } from "./AgentModelConfigSettings";
 import { ConfigGitSettings } from "./ConfigGitSettings";
+import { SecretKeySettings } from "./SecretKeySettings";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
   const localCli = typeof provider.config.executable === "string";
@@ -113,9 +114,9 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  const [section, setSection] = useState<"general" | "providers" | "agent-models" | "config-git">("general");
+  const [section, setSection] = useState<"general" | "providers" | "agent-models" | "config-git" | "dictionary-keys">(() => new URLSearchParams(window.location.search).get("section") === "dictionary-keys" ? "dictionary-keys" : "general");
   return <>
-    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "config-git": "Git 配置存储" }[section] }]} /></div>
+    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "config-git": "Git 配置存储", "dictionary-keys": "加密字典密钥" }[section] }]} /></div>
     <div className="settings-layout">
       <aside className="settings-sidebar" aria-label="设置分类">
         <nav className="settings-sidebar-nav">
@@ -123,10 +124,12 @@ export function SettingsPage() {
           <button className={section === "providers" ? "active" : ""} aria-current={section === "providers" ? "page" : undefined} onClick={() => setSection("providers")}><PlugZap size={16} />Provider</button>
           <button className={section === "agent-models" ? "active" : ""} aria-current={section === "agent-models" ? "page" : undefined} onClick={() => setSection("agent-models")}><Boxes size={16} />Agent 模型配置</button>
           <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}><GitBranch size={16} />Git 配置存储</button>
+          <button className={section === "dictionary-keys" ? "active" : ""} aria-current={section === "dictionary-keys" ? "page" : undefined} onClick={() => setSection("dictionary-keys")}><KeyRound size={16} />加密字典密钥</button>
         </nav>
       </aside>
       <section className="settings-content">
       {section === "config-git" && <ConfigGitSettings />}
+      {section === "dictionary-keys" && <SecretKeySettings />}
       {section === "providers" && <>
         <div className="settings-section-heading"><span className="field-hint">{data?.items.length ?? 0} 个连接</span></div>
         <ErrorNotice message={error} />
