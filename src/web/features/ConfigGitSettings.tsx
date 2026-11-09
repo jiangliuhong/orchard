@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArchiveRestore, Palette, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { api, pretty, requestId, send } from "../lib/api";
 import { useTheme, type Theme } from "../lib/theme";
 import { Button } from "../components/ui/button";
@@ -54,9 +54,6 @@ export function adaptPreview(value: unknown): Preview {
 }
 function adaptStatus(raw: RepositoryStatus & { head?: string; dirty?: boolean; dirtyReason?: string }): RepositoryStatus {
   return { ...raw, localSha: raw.localSha ?? raw.head, dirtyPaths: raw.dirtyPaths ?? (raw.dirty ? [raw.dirtyReason ?? "工作区不干净"] : []) };
-}
-function adaptHistory(raw: History & { commits?: History["items"]; nextOffset?: number | null }): History {
-  return { items: raw.items ?? raw.commits ?? [], startSha: raw.startSha, nextCursor: raw.nextCursor ?? (raw.nextOffset == null ? undefined : String(raw.nextOffset)) };
 }
 const operationError = (error: Operation["error"]) => typeof error === "string" ? error : error ? `${error.code}: ${error.message}` : "操作未完成";
 
@@ -127,28 +124,22 @@ export function ConfigGitGeneralDelivery() {
   </>;
 }
 
-export function ConfigGitSettings() {
+export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
   const themeState = useTheme();
   const preferenceRef = useRef(themeState); preferenceRef.current = themeState;
   const [binding, setBinding] = useState<Binding | null>();
   const [status, setStatus] = useState<RepositoryStatus>();
-  const [points, setPoints] = useState<RecoveryPoint[]>([]);
   const [remoteUrl, setRemoteUrl] = useState("");
   const [checked, setChecked] = useState<RemoteCheck>();
   const [branch, setBranch] = useState("main"), [configDir, setConfigDir] = useState("orchard-config");
   const [name, setName] = useState(""), [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [operation, setOperation] = useState<Operation>();
-  const [history, setHistory] = useState<History>(), [scope, setScope] = useState<"local" | "remote">("local");
-  const [source, setSource] = useState<Source>();
-  const [selected, setSelected] = useState<Category[]>(Object.keys(categories) as Category[]);
-  const [mappings, setMappings] = useState<Record<string, string>>({});
-  const [mappingFields, setMappingFields] = useState<Preview["requiredMappings"]>([]);
-  const [mappingKey, setMappingKey] = useState("");
   const [preview, setPreview] = useState<Preview>();
-  const [mode, setMode] = useState<"commit" | "restore">("commit");
-  const [message, setMessage] = useState("");
-  const [push, setPush] = useState(true), [regenerate, setRegenerate] = useState(false);
+  const [message, setMessage] = useState("备份配置");
+  const [providerId, setProviderId] = useState("");
+  const [providers, setProviders] = useState<{ id: string; name: string; enabled: boolean }[]>([]);
+  useEffect(() => { if (sync) void api<{ items: { id: string; name: string; enabled: boolean }[] }>("/providers").then(value => setProviders(value.items.filter(p => p.enabled))).catch(e => setError(errorText(e))); }, [sync]);
   const [confirmed, setConfirmed] = useState(false);
   const [confirmation, setConfirmation] = useState<{ title: string; description: string; action: () => Promise<void> }>();
   const mounted = useRef(true);
@@ -158,13 +149,12 @@ export function ConfigGitSettings() {
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const reload = useCallback(async () => {
     const results = await Promise.allSettled([
-      api<{ binding: Binding | null }>(`${root}/repository`), api<RepositoryStatus>(`${root}/status`), api<{ items: RecoveryPoint[] }>(`${root}/recovery-points`),
+      api<{ binding: Binding | null }>(`${root}/repository`), api<RepositoryStatus>(`${root}/status`),
     ]);
     if (!mounted.current) return;
-    const [repository, state, recovery] = results;
+    const [repository, state] = results;
     if (repository.status === "fulfilled") setBinding(repository.value.binding);
     if (state.status === "fulfilled") { setStatus(adaptStatus(state.value)); if (state.value.operationId) setOperation(old => old?.operationId === state.value.operationId ? old : { operationId: state.value.operationId!, phase: "accepted" }); }
-    if (recovery.status === "fulfilled") setPoints(Array.isArray(recovery.value) ? recovery.value : recovery.value.items);
     const failed = results.find(r => r.status === "rejected");
     if (failed?.status === "rejected") setError(errorText(failed.reason));
   }, []);
@@ -177,7 +167,8 @@ export function ConfigGitSettings() {
   };
   const report = (value: unknown) => {
     const result = value as Result | undefined;
-    setNotice([result?.message ?? "操作完成", result?.committed ? `本地已提交 ${result.sha ?? ""}` : result?.sha, result?.pushed ? "远程已推送" : "", result?.remoteUnknown || result?.remoteState === "unknown" ? "远端状态待确认，请获取后重试推送" : "", result?.pushError, result?.reconnect?.length ? `需要重新连接：${result.reconnect.join("、")}` : ""].filter(Boolean).join(" · "));
+    setNotice([result?.message ?? "操作完成", result?.committed ? `本地已提交 ${result.sha ?? ""}` : result?.sha, result?.pushed ? "远程已推送" : "", result?.remoteUnknown || result?.remoteState === "unknown" ? "远端状态待确认，请重新生成预览后重试备份" : "", result?.pushError, result?.reconnect?.length ? `需要重新连接：${result.reconnect.join("、")}` : ""].filter(Boolean).join(" · "));
+    if (result?.pushError || result?.remoteUnknown || result?.remoteState === "unknown") setError(`备份尚未完成：${result.pushError ?? "远端状态待确认"}。本地提交已保留，请重新生成预览后重试备份。`);
     setPreview(undefined); void reload();
   };
   const mutate = async (path: string, payload: Record<string, unknown>, done: (value: unknown) => void = report, method = "POST") => {
@@ -215,7 +206,7 @@ export function ConfigGitSettings() {
         if (next.phase === "interrupted") {
           operationHandler.current = undefined;
           setPreview(undefined);
-          setError("服务已重启，操作结果尚未确认。请核对当前状态和本地历史，再重新操作。");
+          setError("服务已重启，操作结果尚未确认。请核对仓库状态，再重新生成预览。");
           void reload();
           return;
         }
@@ -232,28 +223,28 @@ export function ConfigGitSettings() {
     if (!clientId || !Number.isSafeInteger(preferenceRevision)) throw new Error("全局浏览器偏好尚未就绪，请刷新后重试");
     return { theme, clientId, preferenceRevision };
   };
-  const showPreview = (value: unknown) => { const next = adaptPreview(value); setPreview(next); setMappingFields(old => [...old.filter(field => !next.requiredMappings.some(nextField => nextField.key === field.key)), ...next.requiredMappings]); setConfirmed(false); };
+  const showPreview = (value: unknown) => { setPreview(adaptPreview(value)); setConfirmed(false); };
+  const previewInitialized = useRef(false);
   const createPreview = () => run(async () => {
     setPreview(undefined);
-    if (mode === "commit") await mutate("/commit-preview", { message: message.trim(), push, regenerate, ...general() }, showPreview);
-    else { const { clientId, preferenceRevision } = general(); await mutate("/restore-preview", { source, categories: selected, mappings, clientId, preferenceRevision }, showPreview); }
+    await mutate("/commit-preview", { message: message.trim(), push: true, ...general() }, showPreview);
   });
-  const loadHistory = async (nextScope: "local" | "remote", more = false) => {
-    const query = new URLSearchParams({ source: nextScope });
-    if (more && history) { query.set("startSha", history.startSha); if (history.nextCursor) query.set("offset", history.nextCursor); }
-    const page = adaptHistory(await api<History>(`${root}/commits?${query}`));
-    setScope(nextScope); setHistory(old => more && old ? { ...page, items: [...old.items, ...page.items] } : page);
-  };
-  const chooseSource = (value: Source) => { setSource(value); setMode("restore"); setPreview(undefined); setMappingFields([]); setMappings({}); };
+  useEffect(() => {
+    if (sync && binding && !previewInitialized.current && !operation && !inFlight.current) {
+      previewInitialized.current = true;
+      if (binding.snapshotState !== "invalid" && binding.snapshotState !== "unsupported") void createPreview();
+    }
+  }, [sync, binding?.id]);
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
-  const cannotConfirm = !preview || !confirmed || !!preview.nextCursor || preview.noChanges || preview.blockers.length > 0 || preview.diffs.some(d => d.blockingReason) || preview.requiredMappings.some(m => !mappings[m.key]?.trim()) || preview.expiresAt <= Date.now();
+  const cannotConfirm = !preview || !confirmed || !!preview.nextCursor || preview.noChanges || preview.blockers.length > 0 || preview.diffs.some(d => d.blockingReason) || preview.expiresAt <= Date.now();
   const snapshotBlocked = binding?.snapshotState === "invalid" || binding?.snapshotState === "unsupported";
   return <section className="config-git-settings" aria-label="Git 配置存储" aria-busy={locked}>
     <div className="settings-section-heading"><Button variant="outline" size="sm" disabled={busy} onClick={() => void run(reload)}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />刷新状态</Button></div>
     <div className="config-git-body"><ErrorNotice message={error} />{notice && <p role="status" className="success-note">{notice}</p>}
-      {operation && <div role="status"><p>操作 {operation.operationId} · {operation.phase}</p>{operation.phase === "interrupted" && <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await reload(); if (binding) await loadHistory("local"); })}>核对状态与本地历史</Button>}{operation.phase === "recovery_required" && <Button disabled={busy} onClick={() => void run(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}))}>重试恢复未完成阶段</Button>}</div>}
+      {operation && <div role="status"><p>操作 {operation.operationId} · {operation.phase}</p>{operation.phase === "interrupted" && <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await reload(); })}>核对仓库状态</Button>}{operation.phase === "recovery_required" && <Button disabled={busy} onClick={() => void run(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}))}>重试恢复未完成阶段</Button>}</div>}
       {binding === undefined && !error && <Loading />}
-      {binding === null && <fieldset disabled={locked} className="config-git-binding"><legend>绑定远端仓库</legend>
+      {sync && binding === null && <p>请先在<a href="/settings">设置</a>中配置 Git 仓库。</p>}
+      {!sync && binding === null && <fieldset disabled={locked} className="config-git-binding"><legend>绑定远端仓库</legend>
         <label className="field">仓库地址<Input value={remoteUrl} placeholder="git@github.com:team/config.git 或 https://…" onChange={e => { setRemoteUrl(e.target.value); setChecked(undefined); }} /></label>
         <p className="field-hint">复用服务端系统用户的 SSH key/agent 或 Git credential helper。请勿在地址中填写密码或 Token；未知 SSH 主机需先在服务端验证密钥。</p>
         <Button variant="outline" disabled={!remoteUrl.trim()} onClick={() => void run(() => mutate("/remote/check", { remoteUrl: remoteUrl.trim() }, value => { const check = value as RemoteCheck; check.branches = check.branches.map(b => typeof b === "string" ? b : (b as { name: string }).name); setChecked(check); setBranch(check.defaultBranch ?? check.branches[0] ?? "main"); setName(check.identity?.name ?? ""); setEmail(check.identity?.email ?? ""); }))}>检测连接</Button>
@@ -271,38 +262,20 @@ export function ConfigGitSettings() {
         {status?.message && <p>{status.message}</p>}
         {!!status?.dirtyPaths.length && <ErrorNotice message={`工作区不干净，请先处理：${status.dirtyPaths.join("、")}`} />}
         {!!status?.pendingCommits?.length && <details><summary>待推送提交（{status.pendingCommits.length}）</summary><pre className="overflow-auto">{status.pendingCommits.join("\n")}</pre></details>}
-        {binding.snapshotState === "empty" || binding.snapshotState === "missing" ? <p>仓库尚无配置快照，请预览并提交当前配置。</p> : binding.snapshotState === "valid" ? <p>仓库已有配置，可选择预览恢复或提交当前配置。</p> : snapshotBlocked ? <ErrorNotice message="配置目录格式无效或版本不兼容，不能覆盖。请修复目录或升级 Orchard。" /> : null}
-        <div className="actions flex-wrap my-4">
-          <Button disabled={locked || snapshotBlocked} onClick={() => { setMode("commit"); setPush(true); setRegenerate(false); invalidate(); }}>提交并推送</Button>
-          <Button variant="outline" disabled={locked || snapshotBlocked} onClick={() => { setMode("commit"); setPush(false); setRegenerate(false); invalidate(); }}>仅本地提交</Button>
-          <Button variant="outline" disabled={locked} onClick={() => void run(() => mutate("/push", {}))}>推送</Button>
-          <Button variant="outline" disabled={locked} onClick={() => void run(() => mutate("/fetch", {}))}>获取远程版本</Button>
-          <Button variant="outline" disabled={locked} onClick={() => void run(() => mutate("/fetch", {}, () => { void loadHistory("remote").catch(e => setError(errorText(e))); }))}>从远端恢复</Button>
-          <Button variant="outline" disabled={locked} onClick={() => void run(() => loadHistory("local"))}>本地历史</Button>
-          <Button variant="ghost" disabled={locked} onClick={() => setConfirmation({ title: "解除仓库绑定", description: "应用配置、本地副本、未推送提交和恢复资料都会保留。重新绑定将创建新的副本。", action: () => mutate("/unbind", {}, value => { setHistory(undefined); setSource(undefined); report(value); }) })}>解除绑定</Button>
-        </div>
-        {status?.diverged && <Button variant="outline" disabled={locked} onClick={() => { setMode("commit"); setPush(true); setRegenerate(true); invalidate(); }}>基于最新远端重新生成提交</Button>}
-        {history && <section className="management-section"><h3>{scope === "local" ? "已获取的本地历史（远端未刷新）" : "远端配置历史"}</h3>{history.items.map(item => <div className="py-3 border-b" key={item.sha}><strong>{item.message}</strong><p className="field-hint break-all">{item.author} · {item.date} · {item.sha} · {item.categories?.map(c => categories[c]).join("、") ?? "类别与兼容性将在预览中校验"}</p><Button variant="outline" disabled={locked || item.compatible === false} onClick={() => chooseSource({ kind: "git", sha: item.sha })}>{item.compatible === false ? "格式不兼容" : "选择此提交恢复"}</Button></div>)}{!history.items.length && <p>没有可恢复的配置提交。</p>}{history.nextCursor && <Button variant="outline" disabled={locked} onClick={() => void run(() => loadHistory(scope, true))}>加载更多历史</Button>}</section>}
+        {binding.snapshotState === "empty" || binding.snapshotState === "missing" ? <p>仓库尚无配置快照，请通过左下角“配置同步”进行首次备份。</p> : binding.snapshotState === "valid" ? <p>仓库已有配置快照。通过左下角“配置同步”备份当前变更。</p> : snapshotBlocked ? <ErrorNotice message="配置目录格式无效或版本不兼容，不能覆盖。请修复目录或升级 Orchard。" /> : null}
+        {!sync && <Button variant="ghost" disabled={locked} onClick={() => setConfirmation({ title: "解除仓库绑定", description: "应用配置、本地副本和未推送提交都会保留。", action: () => mutate("/unbind", {}) })}>解除绑定</Button>}
       </>}
-      {(binding || source?.kind === "recovery-point") && <section className="management-section"><fieldset disabled={locked} className="space-y-3"><legend>{mode === "commit" ? push ? "提交并推送预览" : "仅本地提交预览" : "恢复预览"}</legend>
-        {mode === "commit" ? <><label className="field">提交说明<Input value={message} onChange={e => { setMessage(e.target.value); invalidate(); }} /></label><p className="field-hint">{regenerate ? "先保留旧提交备份引用，再基于最新远端生成当前配置；确认差异后普通推送。" : push ? "先获取远端并检查差异，确认后创建提交并推送。" : "离线提交以本地 HEAD 为基准，远端状态可能过期。"}</p></> : <>
-          <p className="break-all">来源：{source ? source.kind === "git" ? source.sha : `恢复点 ${source.id}` : "请从历史或恢复点选择"}</p>
-          <div className="flex flex-wrap gap-4">{(Object.keys(categories) as Category[]).map(c => <label key={c}><input type="checkbox" checked={selected.includes(c)} onChange={e => { setSelected(old => e.target.checked ? [...old, c] : old.filter(v => v !== c)); invalidate(); }} /> {categories[c]}</label>)}</div>
-          <div className="space-y-2"><label className="field">本机映射引用键<Input value={mappingKey} placeholder="填写预览错误中需要补充的 localRef" onChange={e => setMappingKey(e.target.value)} /></label><Button variant="outline" disabled={!mappingKey.trim()} onClick={() => { const key = mappingKey.trim(); setMappingFields(old => old.some(field => field.key === key) ? old : [...old, { key, label: key }]); setMappingKey(""); invalidate(); }}>添加本机映射</Button></div>
-          {mappingFields.map(field => <label className="field" key={field.key}>{field.label}<Input value={mappings[field.key] ?? ""} onChange={e => { setMappings(old => ({ ...old, [field.key]: e.target.value })); invalidate(); }} /><code>{field.key}</code></label>)}
-          <p className="field-hint">恢复前保存恢复点；保留目标独有对象和历史版本。缺失依赖可能扩展所选类别，需确认最终范围。恢复后需重新连接相关服务。</p>
-        </>}
-        <Button disabled={mode === "commit" ? !message.trim() || snapshotBlocked : !source || !selected.length} onClick={() => void createPreview()}>生成{mode === "commit" ? "提交" : "恢复"}预览</Button>
+      {sync && binding && <section className="management-section"><fieldset disabled={locked} className="space-y-3"><legend>本次配置变更</legend>
+        <><label className="field">变更描述<Input value={message} maxLength={4000} onChange={e => { setMessage(e.target.value); invalidate(); }} /></label><div className="actions"><label className="field">生成描述的 Agent<select aria-label="生成描述的 Agent" value={providerId} disabled={locked} onChange={e => setProviderId(e.target.value)}><option value="">选择 Provider（使用默认模型）</option>{providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label><Button variant="outline" disabled={locked || !providerId || !preview || !!preview.nextCursor || preview.noChanges} onClick={() => void run(async () => { const result = await send<{ message: string }>(`${root}/generate-message`, { token: preview!.token, providerId }); setMessage(result.message); setPreview(undefined); await mutate("/commit-preview", { message: result.message, push: true, ...general() }, showPreview); })}>用 Agent 生成描述</Button></div>        <p className="field-hint">备份将创建提交并推送，不会强制覆盖远端。修改描述后请重新生成预览。</p></>
+        <Button disabled={locked || !message.trim() || snapshotBlocked} onClick={() => void createPreview()}>生成提交预览</Button>
       </fieldset></section>}
-      {preview && <section className="management-section" aria-label="配置差异预览"><h3>确认差异</h3><p>最终范围：{preview.categories.map(c => categories[c]).join("、")} · 有效至 {new Date(preview.expiresAt).toLocaleString()}</p>{preview.sourceSha && <p className="break-all">来源 SHA：{preview.sourceSha}</p>}
+      {sync && preview && <section className="management-section" aria-label="配置差异预览"><h3>确认差异</h3><p>最终范围：{preview.categories.map(c => categories[c]).join("、")} · 有效至 {new Date(preview.expiresAt).toLocaleString()}</p>{preview.sourceSha && <p className="break-all">来源 SHA：{preview.sourceSha}</p>}
         {preview.warnings?.map((warning, i) => <p key={i}>{warning}</p>)}{preview.blockers.map((blocker, i) => <ErrorNotice key={i} message={blocker} />)}
         {(Object.keys(categories) as Category[]).map(category => { const diffs = preview.diffs.filter(d => d.category === category); return diffs.length ? <div key={category}><h4>{categories[category]}</h4>{diffs.map((diff, i) => <details key={`${diff.path}:${i}`} className="my-2"><summary className="break-all">{diff.changeType} · {diff.path} {diff.objectId} {diff.versionId}</summary>{diff.detail && <p>{diff.detail}</p>}{diff.blockingReason && <ErrorNotice message={diff.blockingReason} />}{diff.sensitive ? <p>敏感字段已隐藏，仅显示变化状态。</p> : <div className="grid gap-3 md:grid-cols-2"><div><h5>之前</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{typeof diff.before === "string" ? diff.before : pretty(diff.before)}</pre></div><div><h5>之后</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{typeof diff.after === "string" ? diff.after : pretty(diff.after)}</pre></div></div>}</details>)}</div> : null; })}
         {!!preview.cumulativeDiffs?.length && <details><summary>累计待推送差异（相对已获取远端）</summary>{preview.cumulativeDiffs.map((diff, i) => <details key={i}><summary>{diff.path}</summary><h5>之前</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{diff.sensitive ? "敏感字段已隐藏" : diff.before == null ? "—" : String(diff.before)}</pre><h5>之后</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{diff.sensitive ? "敏感字段已隐藏" : diff.after == null ? "—" : String(diff.after)}</pre></details>)}</details>}
         {preview.nextCursor && <Button disabled={locked} variant="outline" onClick={() => void run(async () => { const page = await api<{ diffs: Diff[]; cumulativeDiffs?: Diff[]; nextCursor?: string }>(`${root}/previews/${encodeURIComponent(preview.token)}/diffs?cursor=${encodeURIComponent(preview.nextCursor!)}`); setPreview(old => old?.token === preview.token ? { ...old, diffs: [...old.diffs, ...page.diffs], cumulativeDiffs: [...(old.cumulativeDiffs ?? []), ...(page.cumulativeDiffs ?? [])], nextCursor: page.nextCursor } : old); })}>加载剩余差异（全部加载后可确认）</Button>}
-        {preview.noChanges ? <p>没有变化，不创建空提交或重复恢复。</p> : <><label className="flex gap-2 my-4"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整差异并确认最终类别、本机映射及依赖范围。</label><div className="actions"><Button variant="outline" disabled={locked} onClick={invalidate}>取消预览</Button><Button disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate(mode === "commit" ? "/commit" : "/restore", { token: preview.token, ...(mode === "commit" ? general() : {}) }))}>确认{mode === "commit" ? push ? "提交并推送" : "本地提交" : "应用恢复"}</Button></div></>}
+        {preview.noChanges ? <p>没有配置变更，无需备份。</p> : <><label className="flex gap-2 my-4"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整变更，确认备份到远端仓库。</label><div className="actions"><Button variant="outline" disabled={locked} onClick={invalidate}>取消预览</Button><Button disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate("/commit", { token: preview.token, ...general() }))}>进行备份（commit + push）</Button></div></>}
       </section>}
-      <section className="management-section"><h3><Palette size={16} />服务端外观快照</h3><p className="field-hint">可领取 CLI 保存的外观或在清除浏览器存储后重新领取；应用前会请求确认。</p><Button variant="outline" size="sm" onClick={() => window.dispatchEvent(new Event("orchard:claim-general"))}>领取服务端外观快照</Button></section>
-      <section className="management-section"><h3><ArchiveRestore size={16} />本地恢复点</h3>{!points.length && <div className="config-git-empty"><ArchiveRestore size={22} /><p>暂无恢复点</p><span>恢复配置前会自动保存本地恢复点，方便之后回退。</span></div>}{points.map(point => <div key={point.id} className="py-3 border-b"><p className="break-all">{new Date(point.createdAt).toLocaleString()} · {point.id} {point.sourceSha}</p><div className="actions"><Button variant="outline" disabled={locked} onClick={() => chooseSource({ kind: "recovery-point", id: point.id })}>预览恢复点</Button><Button variant="ghost" disabled={locked || point.protected} onClick={() => setConfirmation({ title: "删除恢复点", description: `删除 ${point.id} 的独立恢复资料，此操作不可撤销。`, action: () => mutate(`/recovery-points/${encodeURIComponent(point.id)}`, {}, report, "DELETE") })}>{point.protected ? "未完成操作正在引用" : "删除恢复点"}</Button></div></div>)}</section>
     </div>
     <Dialog open={!!confirmation} onOpenChange={open => { if (!open && !locked) setConfirmation(undefined); }}><DialogContent><DialogHeader><DialogTitle>{confirmation?.title}</DialogTitle><DialogDescription>{confirmation?.description}</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={locked} onClick={() => setConfirmation(undefined)}>取消</Button><Button variant="destructive" disabled={locked} onClick={() => void run(async () => { await confirmation?.action(); setConfirmation(undefined); })}>确认</Button></DialogFooter></DialogContent></Dialog>
   </section>;

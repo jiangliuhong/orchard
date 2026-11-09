@@ -3,12 +3,15 @@ import { BookOpen, ChevronDown, Code2, GitBranch, Globe, KeyRound, Leaf, ListChe
 import { Button } from "./ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "./ui/dialog";
 import { ThemePicker } from "../lib/theme";
+import { ConfigGitSettings } from "../features/ConfigGitSettings";
+import { RefreshCw } from "lucide-react";
 
 export function AppSidebar({ section }: { section: string }) {
   const workflowActive = !["scripts", "web-bridge", "settings", "dictionaries"].includes(section);
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem("orchard.sidebar.collapsed") === "true"; } catch { return false; }
   });
+  const [syncOpen, setSyncOpen] = useState(false);
   const [expanded, setExpanded] = useState(!collapsed), [mobileOpen, setMobileOpen] = useState(false);
   const flyout = useRef<HTMLDivElement>(null);
   const toggleCollapsed = () => {
@@ -39,9 +42,11 @@ export function AppSidebar({ section }: { section: string }) {
   </nav>;
   const footer = <div className="sidebar-footer">
     <a href="/settings" className={`sidebar-link ${section === "settings" ? "active" : ""}`} title="设置" aria-label="设置" aria-current={section === "settings" ? "page" : undefined} onClick={() => setMobileOpen(false)}><Settings2 size={18} /><span className="sidebar-label">设置</span></a>
+    <button type="button" className="sidebar-link" title="配置同步" aria-label="配置同步" onClick={() => { setMobileOpen(false); setSyncOpen(true); }}><RefreshCw size={18} /><span className="sidebar-label">配置同步</span></button>
     <div className="sidebar-preferences"><span className="local-indicator"><i />本地</span><ThemePicker label="侧栏外观" /></div>
   </div>;
   return <>
+    <Dialog open={syncOpen} onOpenChange={setSyncOpen}><DialogContent className="config-sync-dialog"><DialogTitle>配置同步</DialogTitle><DialogDescription>查看本次配置变更，填写或用 Agent 生成变更描述，然后备份到 Git 仓库。</DialogDescription><ConfigGitSettings sync /></DialogContent></Dialog>
     <aside className={`app-sidebar ${collapsed ? "is-collapsed" : ""}`} aria-label="侧栏">
       <div className="sidebar-brand"><a href="/" className="brand" aria-label="orchard"><Leaf size={21} /><span>orchard</span></a><Button variant="ghost" size="icon" aria-label={collapsed ? "展开侧栏" : "折叠侧栏"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</Button></div>
       {navigation(collapsed)}{footer}

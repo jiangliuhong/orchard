@@ -33,6 +33,10 @@ test("HTTP Git workflow binds, commits, restores and delivers browser preference
   assert.equal(bundle.snapshot.general.theme, "dark");
   const preview = await request("/commit-preview", { theme: "dark", message: "First configuration", push: true, clientId: "browser", preferenceRevision: 0 });
   assert.ok(preview.token); assert.ok(preview.diffs.length);
+  const invalidMessageRequest = await app.inject({ method: "POST", url: "/api/config-git/generate-message", payload: { token: preview.token } });
+  assert.equal(invalidMessageRequest.statusCode, 400);
+  const missingPreview = await app.inject({ method: "POST", url: "/api/config-git/generate-message", payload: { token: "expired-token", providerId: "pi" } });
+  assert.equal(missingPreview.statusCode, 409);
   const committed = await request("/commit", { token: preview.token, theme: "dark", clientId: "browser", preferenceRevision: 0 });
   assert.equal(committed.pushed, true);
   const history = (await app.inject("/api/config-git/commits?source=remote")).json();

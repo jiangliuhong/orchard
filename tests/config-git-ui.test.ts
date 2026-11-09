@@ -19,7 +19,7 @@ function mock(extra: (path: string, body: Record<string, unknown>) => unknown) {
     const body = options?.body ? JSON.parse(String(options.body)) as Record<string, unknown> : {};
     if (path.endsWith("/repository")) return Response.json({ binding: { id: "b", remoteUrl: "git@example.test:config.git", branch: "main", configDir: "orchard-config", snapshotState: "valid" } });
     if (path.endsWith("/status")) return Response.json({ ahead: 0, behind: 0, diverged: false, dirtyPaths: [] });
-    if (path.endsWith("/recovery-points")) return Response.json({ items: [] });
+    if (path.endsWith("/recovery-points") || path.endsWith("/providers")) return Response.json({ items: [] });
     return Response.json(extra(path, body));
   };
 }
@@ -32,10 +32,11 @@ test("commit requires all diff pages and confirmation, carries browser preferenc
     if (path.includes("/diffs?")) return { diffs: [] };
     return { committed: true, pushed: true, sha: "abc" };
   });
-  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings)));
-  fireEvent.change(await screen.findByLabelText("提交说明"), { target: { value: "backup" } });
+  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings, { sync: true })));
+  await screen.findByRole("button", { name: "进行备份（commit + push）" });
+  fireEvent.change(await screen.findByLabelText("变更描述"), { target: { value: "backup" } });
   fireEvent.click(screen.getByRole("button", { name: "生成提交预览" }));
-  const confirm = await screen.findByRole("button", { name: "确认提交并推送" });
+  const confirm = await screen.findByRole("button", { name: "进行备份（commit + push）" });
   fireEvent.click(screen.getByRole("checkbox"));
   assert.equal((confirm as HTMLButtonElement).disabled, true);
   assert.equal(screen.queryByText("secret"), null);
@@ -43,7 +44,7 @@ test("commit requires all diff pages and confirmation, carries browser preferenc
   await waitFor(() => assert.equal((confirm as HTMLButtonElement).disabled, false));
   fireEvent.click(confirm);
   await screen.findByText(/本地已提交 abc/);
-  const preview = requests.find(r => r.path.endsWith("/commit-preview"))!.body;
+  const preview = requests.findLast(r => r.path.endsWith("/commit-preview"))!.body;
   const commit = requests.find(r => r.path.endsWith("/commit"))!.body;
   assert.equal(preview.message, "backup");
   assert.equal(preview.push, true);
@@ -53,18 +54,14 @@ test("commit requires all diff pages and confirmation, carries browser preferenc
   assert.equal(commit.theme, "system");
 });
 
-test("remote restore finishes fetch before listing remote history", async () => {
-  const paths: string[] = [];
-  mock(path => {
-    paths.push(path);
-    if (path.endsWith("/fetch")) return { message: "fetched" };
-    if (path.includes("/commits?")) return { items: [], startSha: "abc" };
-    return {};
-  });
+test("settings contains only repository configuration, without sync or restore controls", async () => {
+  mock(() => ({}));
   render(createElement(ThemeProvider, null, createElement(ConfigGitSettings)));
-  fireEvent.click(await screen.findByRole("button", { name: "从远端恢复" }));
-  await screen.findByText("没有可恢复的配置提交。");
-  assert.ok(paths.indexOf("/api/config-git/fetch") < paths.findIndex(p => p.includes("source=remote")));
+  await screen.findByText("git@example.test:config.git");
+  assert.equal(screen.queryByLabelText("变更描述"), null);
+  assert.equal(screen.queryByRole("button", { name: "从远端恢复" }), null);
+  assert.equal(screen.queryByText("本地恢复点"), null);
+  assert.ok(screen.getByRole("button", { name: "解除绑定" }));
 });
 
 test("asynchronous commit preview polls operation result and renders raw file differences", async () => {
@@ -73,49 +70,39 @@ test("asynchronous commit preview polls operation result and renders raw file di
     if (path.endsWith("/operations/preview-op")) return { operationId: "preview-op", phase: "completed", result: { token: "raw", expiresAt: Date.now() + 60_000, diff: [{ path: "scripts/a/source.ts", before: null, after: "source" }], cumulativeDiff: [], push: true } };
     return {};
   });
-  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings)));
-  fireEvent.change(await screen.findByLabelText("提交说明"), { target: { value: "async backup" } });
-  fireEvent.click(screen.getByRole("button", { name: "生成提交预览" }));
+  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings, { sync: true })));
   await screen.findByText(/add · scripts\/a\/source.ts/);
-  assert.ok(screen.getByRole("button", { name: "确认提交并推送" }));
-});
-
-test("interrupted operations stop locking the page after restart and allow result checks and a new preview", async () => {
-  const requests: { path: string; body: Record<string, unknown> }[] = [];
-  localStorage.setItem("orchard-config-git-operation", "interrupted-op");
-  mock((path, body) => {
-    requests.push({ path, body });
-    if (path.endsWith("/operations/interrupted-op")) return { operationId: "interrupted-op", phase: "interrupted", error: { code: "OPERATION_INTERRUPTED", message: "服务已重启" } };
-    if (path.includes("/commits?")) return { items: [{ sha: "previous", message: "之前的提交", author: "Test", date: "2026-11-06" }], startSha: "previous" };
-    if (path.endsWith("/commit-preview")) return { token: "new-preview", expiresAt: Date.now() + 60_000, categories: ["general"], diffs: [], blockers: [], requiredMappings: [] };
-    throw new Error(`Unexpected request: ${path}`);
-  });
-  const mount = () => render(createElement(ThemeProvider, null, createElement(ConfigGitSettings)));
-  const first = mount();
-  await screen.findByText(/操作结果尚未确认/);
-  assert.equal((screen.getByRole("button", { name: "推送" }) as HTMLButtonElement).disabled, false);
-  first.unmount(); mount();
-  await screen.findByText(/操作结果尚未确认/);
-  assert.equal((screen.getByRole("button", { name: "推送" }) as HTMLButtonElement).disabled, false);
-  fireEvent.click(screen.getByRole("button", { name: "核对状态与本地历史" }));
-  await screen.findByText("之前的提交");
-  await new Promise(resolve => setTimeout(resolve, 1600));
-  assert.equal(requests.filter(r => r.path.endsWith("/operations/interrupted-op")).length, 2);
-  assert.ok(requests.every(r => Object.keys(r.body).length === 0), "result checks must not replay a write");
-  fireEvent.change(screen.getByLabelText("提交说明"), { target: { value: "retry after checking" } });
-  fireEvent.click(screen.getByRole("button", { name: "生成提交预览" }));
-  const confirm = await screen.findByRole("button", { name: "确认提交并推送" });
-  fireEvent.click(screen.getByRole("checkbox"));
-  await waitFor(() => assert.equal((confirm as HTMLButtonElement).disabled, false));
+  assert.ok(screen.getByRole("button", { name: "进行备份（commit + push）" }));
 });
 
 test("recovery-required operations keep writes locked and expose the recovery action", async () => {
   localStorage.setItem("orchard-config-git-operation", "recovery-op");
   mock(() => ({ operationId: "recovery-op", phase: "recovery_required", error: { code: "RECOVERY_REQUIRED", message: "恢复尚未完成" } }));
-  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings)));
+  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings, { sync: true })));
   const recover = await screen.findByRole("button", { name: "重试恢复未完成阶段" });
   assert.equal((recover as HTMLButtonElement).disabled, false);
-  assert.equal((screen.getByRole("button", { name: "推送" }) as HTMLButtonElement).disabled, true);
+  assert.equal((screen.getByRole("button", { name: "生成提交预览" }) as HTMLButtonElement).disabled, true);
+});
+
+test("agent generates a description from a preview token and refreshes the bound commit preview", async () => {
+  const requests: { path: string; body: Record<string, unknown> }[] = [];
+  const original = mock;
+  original((path, body) => {
+    requests.push({ path, body });
+    if (path.endsWith("/commit-preview")) return { token: "agent-preview", expiresAt: Date.now() + 60000, diffs: [{ category: "scripts", path: "scripts/a.ts", changeType: "add" }] };
+    if (path.endsWith("/generate-message")) return { message: "更新脚本配置" };
+    return {};
+  });
+  const fetch = globalThis.fetch;
+  globalThis.fetch = (url, options) => String(url).endsWith("/providers") ? Promise.resolve(Response.json({ items: [{ id: "pi", name: "Pi", enabled: true }] })) : fetch(url, options);
+  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings, { sync: true })));
+  await screen.findByRole("button", { name: "进行备份（commit + push）" });
+  fireEvent.change(screen.getByLabelText("生成描述的 Agent"), { target: { value: "pi" } });
+  fireEvent.click(screen.getByRole("button", { name: "用 Agent 生成描述" }));
+  await waitFor(() => assert.equal((screen.getByLabelText("变更描述") as HTMLInputElement).value, "更新脚本配置"));
+  await waitFor(() => assert.equal(requests.filter(r => r.path.endsWith("/commit-preview")).length, 2));
+  assert.deepEqual(requests.find(r => r.path.endsWith("/generate-message"))!.body, { token: "agent-preview", providerId: "pi" });
+  assert.equal(requests.findLast(r => r.path.endsWith("/commit-preview"))!.body.message, "更新脚本配置");
 });
 
 test("raw previews preserve cumulative remote differences and restore details", () => {

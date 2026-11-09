@@ -43,6 +43,8 @@ const { render, screen, fireEvent, cleanup, waitFor, act } = await import("@test
 const { ProviderPicker } = await import("../src/web/features/ProviderPicker.js");
 const { AgentModelConfigPicker } = await import("../src/web/features/AgentModelConfigPicker.js");
 const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
+const { AgentPromptPreview } = await import("../src/web/features/AgentPromptPreview.js");
+const { AgentModelConfigSettings } = await import("../src/web/features/AgentModelConfigSettings.js");
 const { WebBridgeSettings } = await import("../src/web/features/WebBridgeSettings.js");
 const { ModelManager } = await import("../src/web/features/ModelManager.js");
 const { DraftPage } = await import("../src/web/features/DraftPage.js");
@@ -933,8 +935,7 @@ test("settings previews all three default Agent prompts read-only", async () => 
     { id: "script", name: "脚本", prompt: "script rules", schema: { type: "object" }, contextNote: "动态脚本上下文" },
   ] } : { items: [] });
   try {
-    render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Agent 提示词预览" }));
+    render(createElement(AgentPromptPreview));
     const workflow = await screen.findByLabelText("工作流默认提示词") as HTMLTextAreaElement;
     assert.equal(workflow.value, "workflow rules");
     assert.equal(workflow.readOnly, true);
@@ -946,38 +947,17 @@ test("settings previews all three default Agent prompts read-only", async () => 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("settings connection form preserves separately managed model state", async () => {
-  const originalFetch = globalThis.fetch, requests: { url: string; body: unknown }[] = [];
-  let setting = provider({ enabled: false, models: [{ id: "disabled-model", name: "Disabled", source: "configured", enabled: false }] });
-  globalThis.fetch = async (url, options) => {
-    if (options?.method === "PATCH") {
-      const input = JSON.parse(String(options.body));
-      requests.push({ url: String(url), body: input });
-      setting = { ...setting, ...input };
-      return Response.json(setting);
-    }
-    return Response.json({ items: [setting] });
+test("settings only requests repository configuration and removes previous categories", async () => {
+  const originalFetch = globalThis.fetch, requests: string[] = [];
+  globalThis.fetch = async url => {
+    requests.push(String(url));
+    return Response.json(String(url).endsWith("/repository") ? { binding: null } : { ahead: 0, behind: 0, diverged: false, dirtyPaths: [] });
   };
   try {
     render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "启用 Third Agent" });
-    fireEvent.click(checkbox);
-    await waitFor(() => assert.equal(requests.length, 1));
-    assert.deepEqual(requests[0]!.body, { enabled: true });
-    await waitFor(() => assert.equal((checkbox as HTMLInputElement).disabled, false));
-    fireEvent.click(screen.getByRole("button", { name: "配置 Third Agent" }));
-    fireEvent.change(screen.getByLabelText("CLI 可执行文件"), { target: { value: "/usr/local/bin/updated" } });
-    fireEvent.click(screen.getByRole("button", { name: /保存设置/ }));
-    await waitFor(() => assert.equal(requests.length, 2));
-    const body = requests[1]!.body as { enabled: boolean; config: { executable: string; transport: string } };
-    assert.equal(body.enabled, true); assert.equal(body.config.executable, "/usr/local/bin/updated");
-    assert.equal(body.config.transport, "native");
-    assert.equal(screen.queryByLabelText("传输模式"), null);
-    assert.equal(screen.queryByText("兼容单次（legacy）"), null);
-    assert.equal(Object.hasOwn(body, "models"), false);
-    assert.equal(setting.models[0]!.enabled, false);
-    assert.ok(await screen.findByText("设置已保存"));
+    await screen.findByLabelText("仓库地址");
+    for (const name of ["Provider", "常规", "Agent 模型配置", "Agent 提示词预览", "加密字典密钥"]) assert.equal(screen.queryByRole("button", { name }), null);
+    assert.ok(requests.every(path => path.startsWith("/api/config-git/")));
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -1000,8 +980,7 @@ test("model configuration settings create, revise, disable and inspect named con
     return Response.json({ items: configs });
   };
   try {
-    render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Agent 模型配置" }));
+    render(createElement(AgentModelConfigSettings, { providers: [availableProvider] }));
     await screen.findByText("还没有 Agent 模型配置");
     fireEvent.click(screen.getAllByRole("button", { name: "新增配置" })[0]!);
     fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "xxx 分析" } });
@@ -1169,8 +1148,11 @@ test("model manager lists, disables, adds, searches and confirms deletion", { ti
     return Response.json(setting);
   };
   try {
-    render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    function Manager() {
+      const [current, setCurrent] = useState(setting);
+      return createElement(ModelManager, { provider: current, onUpdated: setCurrent });
+    }
+    render(createElement(Manager));
     fireEvent.click(await screen.findByRole("button", { name: "管理 Third Agent 模型" }));
     assert.ok(await screen.findByRole("dialog", { name: "Third Agent 模型管理" }));
     const first = screen.getByRole("checkbox", { name: "启用模型 first" });
@@ -1370,7 +1352,7 @@ test("existing inline source views retain full-screen file switching and read-on
   assert.ok(screen.getByRole("textbox", { name: "代码：scripts/c.sh" }));
 });
 
-test("navigation supports keyboard access and settings defaults to general", async () => {
+test("navigation supports keyboard access and settings defaults to repository configuration", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({ items: [] });
   try {
@@ -1390,12 +1372,11 @@ test("navigation supports keyboard access and settings defaults to general", asy
     assert.equal(document.activeElement?.getAttribute("aria-current"), "page");
     dom.window.history.replaceState({}, "", "/settings");
     view.rerender(createElement(App));
-    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置常规");
-    assert.ok(screen.getByRole("button", { name: "常规" }).classList.contains("active"));
-    assert.ok(screen.getByRole("region", { name: "外观设置" }));
-    assert.equal(screen.getByRole("button", { name: "Provider" }).classList.contains("active"), false);
-    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
-    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Provider");
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Git 仓库配置");
+    assert.ok(screen.getByRole("region", { name: "Git 配置存储" }));
+    assert.equal(screen.queryByRole("button", { name: "Provider" }), null);
+    fireEvent.click(screen.getByRole("button", { name: "配置同步" }));
+    assert.ok(await screen.findByRole("dialog", { name: "配置同步" }));
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
 });
 test("sidebar collapse persists and workflow children remain accessible", async () => {
@@ -1468,45 +1449,6 @@ test("run filters are reflected in requests, URLs and detail return links", asyn
     fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
     assert.equal(dom.window.location.search, "");
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
-});
-test("Provider toggle rolls back when an immediate save fails", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, options) => options?.method === "PATCH"
-    ? Response.json({ message: "配置写入失败" }, { status: 500 })
-    : Response.json({ items: [provider({ enabled: false })] });
-  try {
-    render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
-    const checkbox = await screen.findByRole("checkbox", { name: "启用 Third Agent" });
-    fireEvent.click(checkbox);
-    assert.ok(await screen.findByText("配置写入失败"));
-    assert.equal((checkbox as HTMLInputElement).checked, false);
-  } finally { globalThis.fetch = originalFetch; }
-});
-test("Provider model selection immediately saves only the default model", async () => {
-  const originalFetch = globalThis.fetch;
-  const requests: unknown[] = [];
-  let setting = provider({
-    models: [{ id: "first", name: "First model", source: "configured" }, { id: "second", name: "Second model", source: "configured" }],
-    defaultModel: "first",
-  });
-  globalThis.fetch = async (_url, options) => {
-    if (options?.method === "PATCH") {
-      const input = JSON.parse(String(options.body));
-      requests.push(input); setting = { ...setting, ...input };
-      return Response.json(setting);
-    }
-    return Response.json({ items: [setting] });
-  };
-  try {
-    render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
-    const select = await screen.findByRole("combobox", { name: "Third Agent 默认模型" });
-    fireEvent.keyDown(select, { key: "Enter" });
-    fireEvent.click(await screen.findByRole("option", { name: "Second model" }));
-    await waitFor(() => assert.deepEqual(requests, [{ defaultModel: "second" }]));
-    assert.equal(screen.queryByLabelText("CLI 可执行文件"), null);
-  } finally { globalThis.fetch = originalFetch; }
 });
 test("theme selection persists across remounts and system changes update the resolved theme", () => {
   const originalMatchMedia = dom.window.matchMedia;

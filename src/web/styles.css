@@ -647,6 +647,9 @@ summary { cursor: pointer; }
 .web-bridge-profile-list dd { margin: 0; overflow-wrap: anywhere; }
 .web-bridge-tool-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(620px, calc(100dvh - 64px)); overflow-y: auto; }
 .web-bridge-test-output { min-height: 70px; max-height: 220px; overflow: auto; padding: 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); color: var(--muted-foreground); font-size: 11px; }
+.config-sync-dialog { width: min(900px, calc(100vw - 32px)); max-width: 900px; max-height: calc(100dvh - 48px); overflow-y: auto; }
+.config-sync-dialog .config-git-repository { font-size: 12px; }
+.config-sync-dialog select { max-width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: inherit; }
 .config-git-settings { min-width: 0; }
 .config-git-settings .settings-section-heading { flex-wrap: wrap; }
 .config-git-settings h2, .config-git-settings h3 { display: flex; align-items: center; gap: 7px; }

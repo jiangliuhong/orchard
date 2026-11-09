@@ -92,6 +92,12 @@ export class ConfigGitService {
     this.previews.set(view.token, { view, diffs, cumulative, kind: "commit", preference: { ...prefs, theme }, revision });
     return this.previewPage(view.token);
   }
+  messageContext(token: string) {
+    const entry = this.previews.get(token);
+    check(entry?.kind === "commit" && entry.view.expiresAt > Date.now(), "PREVIEW_EXPIRED", "提交预览已过期", 409);
+    // Only send already-redacted diff text, never raw repository/configuration data.
+    return JSON.stringify([...entry.diffs, ...entry.cumulative]).slice(0, 60000);
+  }
   async commit(input: Preference & { token: string; requestId: string }) {
     const intentPath = `config-git/commit-intents/${digest(input.requestId)}.json`;
     const inputHash = digest(canonicalJson(JSON.parse(JSON.stringify(input))));
