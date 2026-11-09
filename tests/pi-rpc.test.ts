@@ -190,6 +190,44 @@ test("missing or escaping session files are refused without fake recovery", asyn
   }), { code: "PROTOCOL_STATE_INVALID" });
 });
 
+test("get_state accepts raw or provider-qualified model IDs without hiding mismatches", async t => {
+  const cases = [
+    { requested: "openai/gpt-6.1-sol", provider: "openai", id: "gpt-6.1-sol", matches: true },
+    { requested: "gpt-6.1-sol", provider: "openai", id: "gpt-6.1-sol", matches: true },
+    { requested: "openrouter/vendor/model", provider: "openrouter", id: "vendor/model", matches: true },
+    { requested: "vendor/model", provider: "gateway", id: "vendor/model", matches: true },
+    { requested: "custom/provider/vendor/model", provider: "custom/provider", id: "vendor/model", matches: true },
+    { requested: "openai/gpt-6.1-sol", provider: "other", id: "gpt-6.1-sol", matches: false },
+    { requested: "openai/gpt-6.1-sol", provider: "openai", id: "other-model", matches: false },
+    { requested: "openrouter/vendor/model", provider: "openrouter", id: "other/model", matches: false },
+    { requested: "openai/gpt-6.1-sol", id: "gpt-6.1-sol", matches: false },
+  ];
+  for (const [index, example] of cases.entries()) {
+    await t.test(`${example.requested} vs ${example.provider ?? "unknown"}/${example.id}`, async t => {
+      const { provider, setting, root, logPath } = nativeSetup(t, "state-model", {
+        PI_STATE_MODEL: JSON.stringify({ provider: example.provider, id: example.id }),
+      });
+      const key = `conv-model-${index}`;
+      const opening = provider.openSession(setting, {
+        key, modelId: example.requested, cwd: workspace(root, key), persistent: true, signal: new AbortController().signal,
+      });
+      if (example.matches) {
+        const handle = await opening;
+        // 首轮接受后的状态刷新也必须兼容完整模型标识。
+        const result = await provider.sendTurn(handle, turn("RETURN:ok", { modelId: example.requested }).request);
+        assert.equal(result.output, "ok");
+        await provider.releaseSession(handle);
+      } else {
+        await assert.rejects(opening, {
+          code: "PROTOCOL_STATE_INVALID",
+          message: `Pi 实际模型与请求不一致: 请求 ${example.requested}，实际 ${example.provider ? `${example.provider}/` : ""}${example.id}`,
+        });
+        assert.ok(!readLog(logPath).lines.some(line => JSON.parse(line).type === "prompt"));
+      }
+    });
+  }
+});
+
 test("get_state model mismatch refuses to open the session", async t => {
   const { provider, setting, root } = nativeSetup(t, "state-model-mismatch");
   const key = "conv-mismatch";

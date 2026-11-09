@@ -1,15 +1,20 @@
 .agent-chat { position: relative; isolation: isolate; display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; background: var(--card); border-right: 1px solid var(--border); }
 .agent-chat > .panel-bar { flex-shrink: 0; }
-.agent-chat .agent-chat-messages { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 17px; overflow-wrap: anywhere; }
-.agent-chat .chat-compose { flex-shrink: 0; min-width: 0; max-height: 65%; overflow: auto; border-top: 1px solid var(--border-soft); padding: 12px; }
+.agent-chat .agent-chat-messages { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none; overscroll-behavior: contain; padding: 17px; overflow-wrap: anywhere; }
+.agent-chat .chat-compose { display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; min-width: 0; max-height: 65%; overflow: hidden; border-top: 1px solid var(--border-soft); padding: 12px; }
+.agent-chat .chat-compose-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 3px; margin: -3px; }
+.agent-chat .chat-compose > :not(.chat-compose-body) { flex-shrink: 0; }
 .agent-chat .provider-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; min-width: 0; }
 .agent-chat .provider-picker .field { min-width: 0; margin: 0 0 10px; }
 .agent-chat .provider-picker .field-hint { grid-column: 1 / -1; }
 .agent-chat [data-slot=select-trigger] { width: 100%; min-width: 0; max-width: 100%; font-size: 11px; padding: 0 8px; }
 .agent-chat [data-slot=select-value] { display: block; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-.agent-chat textarea { width: 100%; min-width: 0; font-size: 12px; }
+.agent-chat textarea { width: 100%; min-width: 0; max-height: min(240px, 30dvh); overflow-y: auto; resize: none; font-size: 12px; }
 .agent-chat .compose-footer { display: flex; align-items: center; justify-content: space-between; gap: 7px; padding-top: 10px; }
 .agent-chat .compose-footer > span { flex: 1; min-width: 0; font-size: 10px; color: var(--muted-foreground); }
+.agent-chat-quote-action { position: fixed; z-index: 70; transform: translate(-50%, -100%); box-shadow: 0 3px 12px rgb(0 0 0 / 16%); }
+.agent-chat .message-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.agent-chat .message-heading .message-role { margin-bottom: 0; }
 .agent-chat-change { display: grid; gap: 10px; min-width: 0; margin-top: 10px; padding: 10px; border: 1px solid var(--border-soft); border-radius: 7px; }
 .agent-chat-change > button { justify-self: start; }
 .agent-chat-history-group { display: grid; gap: 7px; }

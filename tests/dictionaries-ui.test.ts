@@ -13,10 +13,46 @@ for (const key of Object.getOwnPropertyNames(dom.window)) {
 for (const key of ["window", "document", "Event", "CustomEvent", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "HTMLFormElement", "DocumentFragment", "Node", "Element", "MutationObserver", "getComputedStyle", "navigator"] as const) {
   Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
 }
-const { render, screen, fireEvent, cleanup, waitFor } = await import("@testing-library/react");
+const { render, screen, fireEvent, cleanup, waitFor, within } = await import("@testing-library/react");
 const { SecretKeySettings } = await import("../src/web/features/SecretKeySettings.js");
+const { DictionariesPage } = await import("../src/web/features/DictionariesPage.js");
 const originalFetch = globalThis.fetch;
 afterEach(() => { cleanup(); globalThis.fetch = originalFetch; });
+
+test("字典空状态：中间加号和页头按钮均可打开新建字典弹窗", async () => {
+  globalThis.fetch = (async () => Response.json({ items: [], nextCursor: null })) as typeof fetch;
+  const { container } = render(createElement(DictionariesPage));
+  await screen.findByText("还没有字典");
+  const emptyButton = container.querySelector<HTMLButtonElement>(".empty button");
+  assert.ok(emptyButton);
+  assert.equal(emptyButton.getAttribute("aria-label"), "新建字典");
+  fireEvent.click(emptyButton);
+  await screen.findByRole("dialog", { name: "新建字典" });
+  assert.ok(screen.getByLabelText("名称（1–100 字符）"));
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await waitFor(() => assert.equal(screen.queryByRole("dialog"), null));
+  fireEvent.click(screen.getAllByRole("button", { name: "新建字典" })[0]!);
+  await screen.findByRole("dialog", { name: "新建字典" });
+});
+
+test("字典列表：有无备注均展示字典类型和键数量", async () => {
+  globalThis.fetch = (async () => Response.json({ items: [
+    { id: "plain", name: "配置", kind: "plain", description: "共享配置备注", keyCount: 3, enabled: true, updatedAt: 1 },
+    { id: "encrypted", name: "凭据", kind: "encrypted", description: "凭据备注", keyCount: 2, enabled: true, readiness: "ready", updatedAt: 1 },
+    { id: "empty", name: "空字典", kind: "plain", description: "", keyCount: 0, enabled: false, updatedAt: 1 },
+  ], nextCursor: null })) as typeof fetch;
+  render(createElement(DictionariesPage));
+  for (const [id, metadata, description] of [
+    ["plain", "普通字典 · 3 个键", "共享配置备注"],
+    ["encrypted", "加密字典 · 2 个键", "凭据备注"],
+    ["empty", "普通字典 · 0 个键", ""],
+  ]) {
+    const metadataElement = await screen.findByText(metadata!);
+    const row = metadataElement.closest("a");
+    assert.equal(row?.getAttribute("href"), `/dictionaries/${id}`);
+    if (description) assert.ok(row?.textContent?.includes(description));
+  }
+});
 
 const unconfigured = { configured: false, generation: 0, activeKeyId: null, readOnly: false, keys: [], encryptedDictionaries: 0, missingKeyIds: [] };
 const configured = (generation = 1, activeKeyId = "key-aaaaaaaa") => ({
@@ -47,7 +83,7 @@ test("密钥设置页：未配置提示、生成请求携带代次与 requestId�
   assert.equal(requests[0]!.body.expectedGeneration, 0);
   assert.equal(typeof requests[0]!.body.requestId, "string");
   // 刷新后展示活动密钥标识与代次，不回填任何密钥材料。
-  await screen.findByText(/活动密钥 key-new/);
+  await waitFor(() => assert.ok(within(screen.getByLabelText("密钥环状态")).getByText("key-newg…")));
   assert.equal(screen.queryByText(/generateKeyMaterial|randomBytes/), null);
 });
 
@@ -73,7 +109,8 @@ test("密钥设置页：导入完成或取消后清空文本，备份下载使�
     return Response.json({});
   }) as typeof fetch;
   render(createElement(SecretKeySettings));
-  await screen.findByText(/活动密钥 key-aa/);
+  await screen.findByLabelText("密钥环状态");
+  assert.ok(within(screen.getByLabelText("密钥环状态")).getByText("key-aaaa…"));
   fireEvent.click(screen.getByRole("button", { name: "导入备份" }));
   const textarea = await screen.findByLabelText(/粘贴完整备份文本/);
   fireEvent.change(textarea, { target: { value: '{"formatVersion":1,"keys":[{"keyId":"key-bb","algorithm":"aes-256-gcm","material":"x"}],"activeKeyId":"key-bb"}' } });
@@ -109,7 +146,8 @@ test("密钥设置页：验证结果只含安全诊断，不出现明文或材�
     return Response.json({});
   }) as typeof fetch;
   render(createElement(SecretKeySettings));
-  await screen.findByText(/活动密钥 key-aa/);
+  await screen.findByLabelText("密钥环状态");
+  assert.ok(within(screen.getByLabelText("密钥环状态")).getByText("key-aaaa…"));
   fireEvent.click(screen.getByRole("button", { name: "验证解密" }));
   await screen.findByText(/验证完成/);
   assert.ok(screen.getByText(/认证失败键 apiToken/));

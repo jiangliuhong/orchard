@@ -4,7 +4,7 @@ import { createElement } from "react";
 import { JSDOM } from "jsdom";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/dictionaries/d1" });
-for (const key of ["window", "document", "Event", "CustomEvent", "HTMLElement", "HTMLInputElement", "HTMLFormElement", "DocumentFragment", "Node", "Element", "MutationObserver", "getComputedStyle", "navigator"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
+for (const key of ["window", "document", "Event", "CustomEvent", "HTMLElement", "HTMLInputElement", "HTMLFormElement", "DocumentFragment", "Node", "NodeFilter", "HTMLTextAreaElement", "Element", "MutationObserver", "getComputedStyle", "navigator"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
 const { render, screen, fireEvent, cleanup, waitFor } = await import("@testing-library/react");
 const { DictionaryPage } = await import("../src/web/features/DictionariesPage.js");
 const originalFetch = globalThis.fetch;
@@ -21,6 +21,62 @@ function mock(kind: "plain" | "encrypted", keys: Record<string, unknown>, readin
   };
   return requests;
 }
+
+test("dictionary summary omits revision and current version numbers", async () => {
+  mock("plain", {});
+  render(createElement(DictionaryPage, { id: "d1" }));
+  const summary = await screen.findByRole("status", { name: "字典状态" });
+  assert.ok(summary.textContent?.includes("普通字典"));
+  assert.ok(summary.textContent?.includes("0 个键"));
+  assert.doesNotMatch(summary.textContent ?? "", /修订|当前版本|v\d+/);
+});
+
+test("desktop workspace filters keys without losing edits and protects unsaved changes", async () => {
+  mock("plain", { alpha: { type: "string", value: "a" }, beta: { type: "string", value: "b" } });
+  render(createElement(DictionaryPage, { id: "d1" }));
+  fireEvent.change(await screen.findByLabelText("alpha 的值"), { target: { value: "edited" } });
+  assert.equal((screen.getByRole("button", { name: "禁用字典" }) as HTMLButtonElement).disabled, true);
+  assert.equal((screen.getByRole("button", { name: "保存字典信息" }) as HTMLButtonElement).disabled, true);
+  const unload = new dom.window.Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(unload);
+  assert.equal(unload.defaultPrevented, true);
+  fireEvent.change(screen.getByLabelText("搜索字典键"), { target: { value: "beta" } });
+  assert.equal(screen.queryByLabelText("alpha 的值"), null);
+  fireEvent.change(screen.getByLabelText("搜索字典键"), { target: { value: "missing" } });
+  assert.ok(screen.getByText("没有匹配的键"));
+  fireEvent.click(screen.getByRole("button", { name: "清空搜索" }));
+  assert.equal((screen.getByLabelText("alpha 的值") as HTMLInputElement).value, "edited");
+  fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+  assert.equal((screen.getByLabelText("alpha 的值") as HTMLInputElement).value, "a");
+  assert.equal((screen.getByRole("button", { name: "禁用字典" }) as HTMLButtonElement).disabled, false);
+});
+
+test("inspector tabs support keyboard navigation, empty history and incomplete references", async () => {
+  mock("plain", {});
+  render(createElement(DictionaryPage, { id: "d1" }));
+  await screen.findByRole("tab", { name: "字典信息" });
+  fireEvent.keyDown(screen.getByRole("tab", { name: "字典信息" }), { key: "ArrowRight" });
+  assert.equal(screen.getByRole("tab", { name: "修订历史" }).getAttribute("aria-selected"), "true");
+  assert.ok(screen.getByText("暂无修订历史。"));
+  assert.equal(screen.queryByRole("region", { name: "字典信息" }), null);
+  fireEvent.click(screen.getByRole("tab", { name: "引用影响" }));
+  assert.ok(screen.getByText("引用信息暂不完整"));
+  assert.ok(screen.getByText("引用扫描尚未接入"));
+});
+
+test("disabling a dictionary requires confirmation", async () => {
+  const requests = mock("plain", {});
+  render(createElement(DictionaryPage, { id: "d1" }));
+  fireEvent.click(await screen.findByRole("button", { name: "禁用字典" }));
+  assert.ok(screen.getByRole("dialog", { name: "禁用“示例配置”？" }));
+  assert.equal(requests.length, 0);
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  assert.equal(requests.length, 0);
+  fireEvent.click(screen.getByRole("button", { name: "禁用字典" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认禁用" }));
+  await waitFor(() => assert.equal(requests.length, 1));
+  assert.equal((requests[0] as unknown as { enabled: boolean }).enabled, false);
+});
 
 for (const [readiness, label] of [["authentication-failed", "认证失败"], ["keyring-unavailable", "密钥环不可用"]]) {
   test(`encrypted detail displays ${readiness} with a link to key settings`, async () => {

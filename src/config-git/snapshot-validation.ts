@@ -4,7 +4,9 @@ import { spawnSync } from "node:child_process";
 import { validateScript, type ScriptDefinition } from "../domain/scripts.js";
 import { validateWorkflow } from "../domain/validation.js";
 import { checkFiles, readLayout } from "../persistence/files.js";
-import { validateBridgeConfigV1 } from "../migrations/config.js";
+import { validateStoredHttpTool } from "../web-bridge/execution.js";
+import type { WebBridgeTool } from "../web-bridge/catalog.js";
+import { validateBridgeConfigV1 } from "../web-bridge/config-validation.js";
 import type { SourceFiles } from "../domain/types.js";
 import type { PortableSnapshot, PortableBridge, SnapshotDependency } from "./snapshot-types.js";
 import { array, bool, canonicalSnapshotJson, compareCodePoints, encodeSnapshotId, localReference, normalizeSnapshotText, object, parseSnapshotJson, snapshotDigest, snapshotPath, string, unique } from "./snapshot-primitives.js";
@@ -85,8 +87,9 @@ export function validatePortableBridge(value: unknown): asserts value is Portabl
       return { id: env.id, origin: env.origin, enabled: env.enabled, bound: false, tabAvailable: false };
     });
   }
-  for (const raw of Object.values(object(b.tools))) object(raw, ["toolId", "application", "site", "description", "parameters", "path", "method", "fields", "risk", "approval", "timeoutMs", "catalogVersion", "enabled"]);
+  for (const raw of Object.values(object(b.tools))) object(raw, ["toolId", "application", "site", "description", "parameters", "path", "method", "fields", "risk", "approval", "timeoutMs", "catalogVersion", "enabled"], ["execution"]);
   validateBridgeConfigV1(canonicalSnapshotJson({ ...b, schemaVersion: 1, environments: localEnvironments }));
+  for (const raw of Object.values(object(b.tools))) validateStoredHttpTool(raw as unknown as WebBridgeTool);
 }
 export function validatePortableSnapshot(value: unknown): asserts value is PortableSnapshot {
   // Reject accessors and non-JSON data before touching caller-owned fields.

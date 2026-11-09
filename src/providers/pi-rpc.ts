@@ -230,8 +230,13 @@ export class PiRpcProvider implements SessionProvider {
     const response = await this.command(session, "get_state", "get_state", this.limits.initializeTimeoutMs);
     const data = (response as { data?: Record<string, unknown> }).data;
     check(data && typeof data === "object", "PROTOCOL_STATE_INVALID", "Pi get_state 未返回状态");
-    const model = data.model as { id?: unknown } | undefined;
-    check(!model || typeof model.id !== "string" || model.id === session.modelId, "PROTOCOL_STATE_INVALID", `Pi 实际模型与请求不一致: ${String(model?.id)}`);
+    const model = data.model as { id?: unknown; provider?: unknown } | undefined;
+    // 模型目录保存 provider/id，而 Pi get_state 将 provider 与 id 分开返回。
+    // 同时兼容手动配置的原始 id；不可按 / 截断，因为 provider 和 id 都可能包含 /。
+    const actualModel = typeof model?.provider === "string" && model.provider
+      ? `${model.provider}/${String(model.id)}` : String(model?.id);
+    check(!model || typeof model.id !== "string" || model.id === session.modelId || actualModel === session.modelId,
+      "PROTOCOL_STATE_INVALID", `Pi 实际模型与请求不一致: 请求 ${session.modelId}，实际 ${actualModel}`);
     check(data.isStreaming !== true, "PROTOCOL_STATE_INVALID", "Pi 新会话不能处于流式执行状态");
     if (typeof data.sessionId === "string" && data.sessionId) session.sessionId = data.sessionId;
     if (typeof data.sessionFile === "string" && data.sessionFile) {

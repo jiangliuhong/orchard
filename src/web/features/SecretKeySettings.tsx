@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, PlusCircle, ShieldCheck, Upload } from "lucide-react";
+import { AlertTriangle, Download, KeyRound, LockKeyhole, PlusCircle, ShieldCheck, Upload } from "lucide-react";
 import { send, useCommandKey, useResource } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -81,27 +81,41 @@ export function SecretKeySettings() {
   };
   if (error) return <ErrorNotice message={error} />;
   if (!status) return <p className="field-hint">正在加载密钥状态…</p>;
-  return <section className="panel dictionary-panel" aria-label="加密字典密钥">
-    <div className="panel-bar"><strong>加密字典密钥</strong><span>代次 {status.generation}{status.readOnly ? " · 存储只读" : ""}</span></div>
+  return <section className="secret-key-settings" aria-label="加密字典密钥" aria-busy={!!busy}>
+    <header className="secret-key-heading">
+      <div><h2><KeyRound size={18} />加密字典密钥</h2><p>管理本机密钥环，用于加密字典值及解密历史修订。</p></div>
+      <span className="secret-key-generation">代次 {status.generation}{status.readOnly ? " · 存储只读" : ""}</span>
+    </header>
     <ErrorNotice message={actionError} />
     {notice && <div className="notice" role="status">{notice}</div>}
-    {!status.configured ? <p>尚未配置密钥环。生成随机密钥，或从其他设备导入备份文件。</p> : <>
-      <p>活动密钥 {status.activeKeyId ? `${status.activeKeyId.slice(0, 8)}…` : "未设置"} · 共 {status.keys.length} 把 · {status.encryptedDictionaries} 个加密字典</p>
-      {status.missingKeyIds.length > 0 && <p>缺少 keyId：{status.missingKeyIds.join("、")}</p>}
-      <table className="dictionary-entries"><thead><tr><th>密钥标识</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
-        {status.keys.map(key => <tr key={key.keyId}><td><code>{key.keyId}</code>{key.active && <strong> · 活动</strong>}</td>
+    <div className="secret-key-overview" aria-label="密钥环状态">
+      <div><span>活动密钥</span><strong><code>{status.activeKeyId ? `${status.activeKeyId.slice(0, 8)}…` : "未设置"}</code></strong></div>
+      <div><span>密钥总数</span><strong>{status.keys.length}<small>把</small></strong></div>
+      <div><span>加密字典</span><strong>{status.encryptedDictionaries}<small>个</small></strong></div>
+    </div>
+    {status.readOnly && <div className="secret-key-warning" role="status"><LockKeyhole size={16} /><p>密钥存储当前为只读，无法生成、导入或切换密钥。仍可下载备份与验证解密。</p></div>}
+    {!status.configured ? <div className="secret-key-empty"><KeyRound size={24} /><strong>尚未配置密钥环</strong><p>生成随机密钥，或从其他设备导入备份文件。</p></div> : <>
+      {status.missingKeyIds.length > 0 && <div className="secret-key-warning" role="alert"><AlertTriangle size={16} /><p>缺少 keyId：{status.missingKeyIds.join("、")}</p></div>}
+      <section className="secret-key-list" aria-label="密钥列表">
+      <div className="secret-key-list-heading"><h3>密钥列表</h3><span>历史密钥保留用于解密旧数据</span></div>
+      <div className="secret-key-table-scroll"><table className="secret-key-table"><thead><tr><th>密钥标识</th><th>创建时间</th><th>操作</th></tr></thead><tbody>
+        {status.keys.map(key => <tr key={key.keyId}><td><div className="secret-key-identity"><code>{key.keyId}</code>{key.active && <span className="secret-key-active">活动</span>}</div></td>
           <td>{new Date(key.createdAt).toLocaleString("zh-CN")}</td><td><Button variant="outline" size="sm" disabled={!!busy || key.active || status.readOnly}
             aria-label={`设为活动密钥 ${key.keyId.slice(0, 8)}`} onClick={() => setConfirmation({ kind: "activate", keyId: key.keyId })}>设为活动</Button></td></tr>)}
-      </tbody></table>
+      </tbody></table></div></section>
     </>}
-    {status.configured && <label><input type="checkbox" checked={makeActive} onChange={event => setMakeActive(event.target.checked)} /> 将新密钥设为活动，保留历史密钥</label>}
-    <div className="entry-actions">
-      <Button variant="outline" disabled={!!busy || status.readOnly} onClick={() => void generate()}><PlusCircle size={14} />生成密钥</Button>
+    <section className="secret-key-actions" aria-label="密钥操作">
+    <div className="secret-key-action-heading"><h3>密钥操作</h3><span>生成后请及时备份，备份应与 Git 仓库分开保管。</span></div>
+    <div className="secret-key-buttons">
+      <Button disabled={!!busy || status.readOnly} onClick={() => void generate()}><PlusCircle size={14} />生成密钥</Button>
       <Button variant="outline" disabled={!!busy || status.readOnly} onClick={() => importOpen ? clearImport() : setImportOpen(true)}><Upload size={14} />导入备份</Button>
       <Button variant="outline" disabled={!!busy || !status.configured} onClick={() => setConfirmation({ kind: "export" })}><Download size={14} />下载备份</Button>
       <Button variant="outline" disabled={!!busy || !status.configured} onClick={() => void verify()}><ShieldCheck size={14} />验证解密</Button>
     </div>
-    {importOpen && <div className="dictionary-form" aria-label="导入备份">
+    {status.configured && <label className="secret-key-activate-option"><input type="checkbox" checked={makeActive} disabled={!!busy || status.readOnly} onChange={event => setMakeActive(event.target.checked)} /> 将新密钥设为活动，保留历史密钥</label>}
+    </section>
+    {importOpen && <div className="dictionary-form secret-key-import" aria-label="导入备份">
+      <div className="secret-key-import-heading"><Upload size={16} /><h3>导入密钥备份</h3><span>JSON · 最大 1 MiB</span></div>
       <label htmlFor="secret-import-file">上传备份文件</label><Input ref={file} id="secret-import-file" type="file" accept=".json,application/json" disabled={!!busy} onChange={event => void readFile(event.target.files?.[0])} />
       <label htmlFor="secret-import">粘贴完整备份文本（JSON，最多 1 MiB）</label>
       <Textarea id="secret-import" rows={6} className="font-mono" value={importText} disabled={!!busy} onChange={event => { setImportText(event.target.value); setImportActiveKeyId(""); }} autoComplete="off" spellCheck={false} />
@@ -113,7 +127,7 @@ export function SecretKeySettings() {
       <div className="entry-actions"><Button size="sm" disabled={!!busy || !importText.trim() || status.readOnly || !status.configured && !importActiveKeyId} onClick={() => void importBackup()}>导入并合并</Button>
         <Button variant="ghost" size="sm" disabled={!!busy} onClick={clearImport}>取消并清空</Button></div>
     </div>}
-    {verification && verification.generation === status.generation && <div className="notice" aria-label="验证结果"><p>{verification.message}</p><ul>
+    {verification && verification.generation === status.generation && <div className={`secret-key-verification ${verification.verified ? "is-verified" : ""}`} aria-label="验证结果" role="status"><p>{verification.message}</p><ul>
       {verification.dictionaries.map(entry => <li key={entry.dictionaryId}>字典 {entry.dictionaryId.slice(0, 8)}…：{entry.verified}/{entry.entries} 可解密
         {entry.missingKeyIds.length > 0 && ` · 缺少 ${entry.missingKeyIds.join("、")}`}{entry.failedKeys.length > 0 && ` · 认证失败键 ${entry.failedKeys.join("、")}`}</li>)}
     </ul><p>验证结果为本次检查记录，修改字典或密钥后请重新验证。</p></div>}
@@ -123,7 +137,7 @@ export function SecretKeySettings() {
       <DialogFooter><Button variant="outline" disabled={!!busy} onClick={() => setConfirmation(null)}>取消</Button>
         <Button disabled={!!busy} onClick={() => confirmation?.kind === "export" ? void exportBackup() : void activate(confirmation!.keyId!)}>{confirmation?.kind === "export" ? "确认下载全部密钥" : "确认切换"}</Button></DialogFooter>
     </DialogContent></Dialog>
-    <p className="page-footnote">密钥丢失后无法解密已有值。页面不会回填、显示或持久化缓存密钥材料。</p>
+    <footer className="secret-key-footnote"><LockKeyhole size={14} /><p>密钥丢失后无法解密已有值。页面不会回填、显示或持久化缓存密钥材料。</p></footer>
   </section>;
 }
 

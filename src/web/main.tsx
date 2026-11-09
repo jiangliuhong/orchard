@@ -3,5 +3,7 @@ import App from "./App";
 import { ThemeProvider } from "./lib/theme";
 import "./styles.css";
 import "./features/dictionaries.css";
+import "./features/agent-prompt-preview.css";
+import "./features/secret-key-settings.css";
 import "./agent-chat/agent-chat.css";
 createRoot(document.getElementById("root")!).render(<ThemeProvider><App /></ThemeProvider>);

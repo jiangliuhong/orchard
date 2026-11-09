@@ -4,8 +4,9 @@
   "name": "Orchard Web Bridge",
   "version": "0.1.0",
   "description": "Orchard browser bridge extension",
-  "permissions": ["nativeMessaging", "storage", "tabs", "alarms"],
+  "permissions": ["nativeMessaging", "storage", "tabs", "alarms", "scripting"],
   "host_permissions": ["http://127.0.0.1/*"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "action": { "default_title": "Orchard Web Bridge", "default_popup": "popup.html" }
 }

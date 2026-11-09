@@ -1,4 +1,6 @@
 import Fastify from "fastify";
+import { NotificationFeed } from "./notifications.js";
+import { defaultAgentPromptPreviews } from "../authoring/prompt-preview.js";
 import staticPlugin from "@fastify/static";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -21,6 +23,8 @@ import { codexNativeAdapter } from "../providers/codex-app-server.js";
 import { piNativeAdapter } from "../providers/pi-rpc.js";
 import { ScriptTestRunner } from "../runtime/script-tests.js";
 import { checkScriptSource } from "../runtime/script.js";
+import { encryptedDictionaryCredentials } from "../web-bridge/credentials.js";
+import type { CredentialBindings } from "../web-bridge/credential-inputs.js";
 import { WebBridgeGateway } from "../web-bridge/gateway.js";
 import { WebBridgeClient } from "../web-bridge/client.js";
 import { catalogHash, extensionDirectory } from "../web-bridge/catalog.js";
@@ -102,7 +106,21 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       const keyring = new KeyringStore(resolveKeyringPath(opened.root));
       const secretsService = new SecretsService(opened, keyring, new CommandHmac(opened, opened.root, keyring));
       add("secrets", secretsService);
+      gateway.httpDependencies.resolveCredential = encryptedDictionaryCredentials(opened, secretsService);
       add("dictionaries", new DictionaryService(opened, secretsService));
+      const notifications = add("notifications", new NotificationFeed());
+      const listener = (event: StreamEvent) => {
+        if (event.streamType === "run" && /^run\.(succeeded|failed|cancelled|interrupted)$/.test(event.type)) {
+          notifications.complete(`run:${event.streamId}`, event.type.split(".")[1]!, "工作流执行", `/runs/${encodeURIComponent(event.streamId)}`);
+        } else if (event.streamType === "authoring_turn" && /^turn\.(succeeded|failed|cancelled|interrupted)$/.test(event.type)) {
+          const turn = opened.turn(event.streamId);
+          notifications.complete(`turn:${event.streamId}`, event.type.split(".")[1]!, "工作流 Agent ", `/drafts/${encodeURIComponent(turn.draftId)}`);
+        }
+      };
+      opened.events.on("event", listener);
+      cleanup.push(() => { opened.events.off("event", listener); });
+      agent.journal.onSaved = turn => notifications.complete(`script:${turn.id}`, turn.status, "脚本 Agent ", `/scripts/${encodeURIComponent(turn.scriptId)}`);
+      browserAgent.onSaved = turn => notifications.complete(`bridge:${turn.id}`, turn.status, "Web Bridge Agent ", "/web-bridge");
       clean = true;
     } catch (error) { await closeServices(); throw error; }
   };
@@ -142,7 +160,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       try {
         const originUrl = new URL(origin);
         const localOrigin = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(originUrl.hostname);
-        const extensionRegistration = request.method === "POST" && request.url === "/api/web-bridge/profiles/register" && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+        const extensionRegistration = request.method === "POST" && ["/api/web-bridge/profiles/register", "/api/web-bridge/browser/poll", "/api/web-bridge/browser/result"].includes(request.url) && /^chrome-extension:\/\/[a-p]{32}$/.test(origin);
         if (!(localOrigin && originUrl.protocol === "http:") && !extensionRegistration) return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" });
       } catch { return reply.code(403).send({ code: "INVALID_ORIGIN", message: "请求来源与工作台不一致" }); }
     }
@@ -154,6 +172,11 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   });
   app.setErrorHandler((error, _request, reply) => {
     const known = error instanceof AppError;
+    // Parser/runtime errors may quote portions of a call-local secret payload.
+    if (_request.url.split("?")[0] === "/api/web-bridge/calls") {
+      reply.header("Cache-Control", "no-store");
+      if (!known) return reply.code((error as { statusCode?: number }).statusCode ?? 500).send({ code: "CALL_FAILED", message: "调用失败，请检查请求格式、运行环境和连接状态" });
+    }
     // §22.3：除 NOT_FOUND 外优先使用 AppError.statusCode；新增代码显式设置正确状态码，
     // 旧代码缺少显式状态码时沿用字符串匹配兼容。
     const status = known
@@ -169,6 +192,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     return services.configGit as ConfigGitService;
   });
   if (!bootstrap) app.get("/api/health", async () => ({ ok: true, ready: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount }));
+  app.get("/api/settings/agent-prompts", async () => defaultAgentPromptPreviews());
   app.get("/api/web-bridge/auth", async () => apiAuth.view());
   app.get("/api/web-bridge/extension", async () => ({ directory: extensionDirectory() }));
   app.get("/api/web-bridge/status", async () => bridge.status());
@@ -194,7 +218,18 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       ["id", "name", "extensionId"]);
     const origin = request.headers.origin;
     check(!origin?.startsWith("chrome-extension:") || origin === `chrome-extension://${profile.extensionId}`, "INVALID_ORIGIN", "浏览器插件来源与插件 ID 不一致");
-    return bridge.registerProfile(profile);
+    return { ...bridge.registerProfile(profile), bridgeToken: bridge.browserChannel.register(profile.id, profile.extensionId) };
+  });
+  app.post("/api/web-bridge/browser/poll", async request => {
+    const input = request.body as { profileId: string };
+    bridge.browserChannel.authenticate(input?.profileId, request.headers["x-orchard-bridge-token"], request.headers.origin);
+    return { items: bridge.browserChannel.poll(input.profileId) };
+  });
+  app.post("/api/web-bridge/browser/result", async request => {
+    const input = request.body as { profileId: string; id: string; result?: unknown; error?: string };
+    bridge.browserChannel.authenticate(input?.profileId, request.headers["x-orchard-bridge-token"], request.headers.origin);
+    bridge.browserChannel.complete(input.profileId, input.id, input.result, input.error);
+    return { ok: true };
   });
   app.get("/api/web-bridge/applications", async () => ({ items: bridge.applications() }));
   app.post("/api/web-bridge/applications", async request => {
@@ -217,7 +252,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.patch<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => bridge.saveEnvironment(request.params.applicationId, { ...(request.body as any), id: request.params.environmentId }));
   app.delete<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => { bridge.deleteEnvironment(request.params.applicationId, request.params.environmentId); return { ok: true }; });
   app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { const body = request.body as { enabled?: boolean }; check(typeof body?.enabled === "boolean", "INVALID_REQUEST", "enabled 必须为布尔值"); bridge.setToolEnabled(request.params.applicationId, request.params.toolId, body.enabled); return { ok: true }; });
-  app.post<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body));
+  app.post<{ Params: { applicationId: string; toolId: string }; Querystring: { environmentId?: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body, { environmentId: request.query.environmentId }));
   app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => {
     const input = request.body as { toolId?: string };
     check(input && typeof input.toolId === "string", "INVALID_TOOL", "工具 ID 无效");
@@ -226,11 +261,12 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   });
   app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/definition", async request => bridge.saveTool({ ...(request.body as any), application: request.params.applicationId, toolId: request.params.toolId }));
   app.delete<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { bridge.deleteTool(request.params.applicationId, request.params.toolId); return { ok: true }; });
-  app.post("/api/web-bridge/calls", async request => {
-    const input = body<{ requestId?: string; application: string; tool: string; args: unknown; timeoutMs?: number }>(request.body,
-      { requestId: { type: "string" }, application: { type: "string", minLength: 1 }, tool: { type: "string", minLength: 1 }, args: {}, timeoutMs: { type: "integer", minimum: 1, maximum: 120000 } },
+  app.post("/api/web-bridge/calls", async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    const input = body<{ requestId?: string; application: string; tool: string; args: unknown; timeoutMs?: number; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings }>(request.body,
+      { credentialBindings: {}, approved: { type: "boolean" }, requestId: { type: "string" }, environmentId: { type: "string", minLength: 1 }, application: { type: "string", minLength: 1 }, tool: { type: "string", minLength: 1 }, args: {}, timeoutMs: { type: "integer", minimum: 1, maximum: 120000 } },
       ["application", "tool", "args"]);
-    return bridge.call(input.application, input.tool, input.args, { requestId: input.requestId, timeoutMs: input.timeoutMs });
+    return bridge.call(input.application, input.tool, input.args, { requestId: input.requestId, timeoutMs: input.timeoutMs, environmentId: input.environmentId, approved: input.approved, credentialBindings: input.credentialBindings });
   });
   app.get("/api/providers", async () => ({ items: providers.views() }));
   app.get<{ Querystring: { enabled?: string } }>("/api/agent-model-configs", async request => {
@@ -441,6 +477,26 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     return store.files.readBlob(String(artifact.relative_path), String(artifact.sha256), Number(artifact.byte_size));
   });
   app.post<{ Params: { id: string } }>("/api/runs/:id/cancel", async request => runner.cancel(request.params.id));
+  app.get("/api/notifications/stream", async (request, reply) => {
+    const feed = services.notifications as NotificationFeed;
+    const last = request.headers["last-event-id"];
+    const after = typeof last === "string" && /^\d+$/.test(last) ? last : feed.cursor;
+    reply.hijack();
+    reply.raw.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+    let closed = false;
+    const close = () => {
+      if (closed) return; closed = true;
+      clearInterval(heartbeat); feed.events.off("notification", send); connections.delete(close); reply.raw.end();
+    };
+    const send = (item: { id: string }) => {
+      if (!closed && !reply.raw.write(`id: ${item.id}\ndata: ${JSON.stringify(item)}\n\n`)) close();
+    };
+    const heartbeat = setInterval(() => { if (!reply.raw.write(": heartbeat\n\n")) close(); }, 15000);
+    heartbeat.unref();
+    connections.add(close); feed.events.on("notification", send); reply.raw.on("close", close);
+    reply.raw.write(`id: ${after}\n: connected\n\n`);
+    for (const item of feed.after(after)) send(item);
+  });
   for (const [resource, type] of [["runs", "run"], ["turns", "authoring_turn"]] as const) {
     app.get<{ Params: { id: string }; Querystring: { after?: string } }>(`/api/${resource}/:id/events`, async request => {
       if (type === "run") store.run(request.params.id); else store.turn(request.params.id);

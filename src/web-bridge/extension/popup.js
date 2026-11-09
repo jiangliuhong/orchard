@@ -52,4 +52,13 @@ window.addEventListener("pagehide", () => {
   closed = true;
   window.clearTimeout(refreshTimer);
 });
+document.getElementById("grant-site")?.addEventListener("click", async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const url = new URL(tab.url);
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) throw new Error("仅支持 HTTPS 或本机站点");
+    const granted = await chrome.permissions.request({ origins: [url.origin + "/*"] });
+    status.textContent = granted ? "当前站点已授权；请确保已完成网关登录。" : "站点授权已取消。";
+  } catch (error) { status.textContent = error.message; }
+});
 void connect();

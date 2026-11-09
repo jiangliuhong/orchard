@@ -1,5 +1,7 @@
+import type { BridgeHttpMethod } from "./http-methods.js";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import type { BridgeExecution } from "./execution.js";
 import { assertSchema } from "../domain/validation.js";
 import type { JsonSchema } from "../domain/types.js";
 
@@ -11,8 +13,9 @@ export interface WebBridgeTool {
   description: string;
   parameters: JsonSchema;
   path: string;
-  method: "GET" | "POST";
+  method: BridgeHttpMethod;
   fields: string[];
+  execution?: BridgeExecution;
   risk: WebBridgeRisk;
   approval: "none" | "user";
   timeoutMs: number;

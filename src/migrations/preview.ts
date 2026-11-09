@@ -7,7 +7,8 @@ import { resourceRoots, MigrationError } from './types.js';
 import { applyDefinitions } from './definitions.js';
 import { verifyDatabase } from './validators.js';
 import { captureRows, verifyMapping } from './mapping.js';
-import { defaultBridgeConfig, validateBridgeConfigV1 } from './config.js';
+import { defaultBridgeConfig } from './config.js';
+import { validateBridgeConfigV1 } from '../web-bridge/config-validation.js';
 /** Read-only rehearsal. SQLite backup sees committed WAL frames without checkpointing the source. */
 export async function preview(root:string,answers:Record<string,unknown>={}){
  const initial=plan(root);if(!initial.steps.length)return initial;

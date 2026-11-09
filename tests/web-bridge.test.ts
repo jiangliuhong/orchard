@@ -45,7 +45,7 @@ function extensionHarness(stored: Record<string, string> = {}, initiallyAvailabl
     },
     fetch: async (url: string, options: RequestInit) => {
       requests.push({ url, profile: JSON.parse(String(options.body)) });
-      return { ok: available && url.includes(":7443/") };
+      return { ok: available && url.includes(":7443/"), json: async () => ({}) };
     },
   });
   return {

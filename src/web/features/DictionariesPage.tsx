@@ -27,7 +27,7 @@ const readError = (error: unknown): { message: string; details?: { impacts: { ke
   return { message: value.message, details: value.details };
 };
 
-function CreateDictionaryDialog({ onCreated }: { onCreated: (id: string) => void }) {
+function CreateDictionaryDialog({ onCreated, iconOnly = false }: { onCreated: (id: string) => void; iconOnly?: boolean }) {
   const [open, setOpen] = useState(false), [name, setName] = useState(""), [description, setDescription] = useState("");
   const [kind, setKind] = useState<"plain" | "encrypted">("plain"), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const commandKey = useCommandKey();
@@ -41,7 +41,7 @@ function CreateDictionaryDialog({ onCreated }: { onCreated: (id: string) => void
     } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
   };
   return <>
-    <Button onClick={() => setOpen(true)}><Plus size={15} />新建字典</Button>
+    <Button variant={iconOnly ? "ghost" : "default"} className={iconOnly ? "empty-symbol h-auto" : undefined} aria-label={iconOnly ? "新建字典" : undefined} onClick={() => setOpen(true)}>{iconOnly ? <Plus className="size-[25px]" /> : <><Plus size={15} />新建字典</>}</Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}>
       <DialogContent>
         <DialogHeader><DialogTitle>新建字典</DialogTitle><DialogDescription>普通字典保存共享键值配置；加密字典以密文保存敏感字符串，需要先在设置中配置加密字典密钥。</DialogDescription></DialogHeader>
@@ -82,12 +82,11 @@ export function DictionariesPage() {
       <div className="workflow-row" key={item.id}>
         <a className="workflow-row-link" href={`/dictionaries/${item.id}`}>
           <div className="workflow-row-icon">{item.kind === "encrypted" ? <KeyRound size={19} /> : <BookOpen size={19} />}</div>
-          <div className="workflow-identity"><h2>{item.name}</h2><p>{item.description || `${item.kind === "encrypted" ? "加密" : "普通"}字典 · ${item.keyCount} 个键`}</p></div>
+          <div className="workflow-identity"><h2>{item.name}</h2><p>{item.kind === "encrypted" ? "加密" : "普通"}字典 · {item.keyCount} 个键</p>{item.description && <p>{item.description}</p>}</div>
           <span>{item.kind === "encrypted" ? <span>{readinessLabels[item.readiness]} · {item.enabled ? "启用" : "禁用"}</span> : <span>{item.enabled ? "启用" : "禁用"}</span>}</span>
-          <span className="workflow-published"><span className="status-dot" />修订 {item.revision}</span>
           <time dateTime={new Date(item.updatedAt).toISOString()}>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
         </a>
-      </div>)}</div> : <div className="panel"><EmptyState title="还没有字典" description="创建共享配置字典或加密凭据字典，供工作流与脚本引用。" /></div>}
+      </div>)}</div> : <div className="panel"><EmptyState title="还没有字典" description="创建共享配置字典或加密凭据字典，供工作流与脚本引用。" symbol={<CreateDictionaryDialog iconOnly onCreated={id => { window.location.href = `/dictionaries/${id}`; }} />} /></div>}
     <div className="entry-actions">{cursor && <Button variant="outline" onClick={() => setCursor("")}>返回第一页</Button>}
       {data?.nextCursor && <Button variant="outline" onClick={() => setCursor(data.nextCursor!)}>下一页字典</Button>}</div>
   </>;
@@ -97,7 +96,7 @@ function editText(entry: { type: string; value?: unknown }): string {
   return entry.type === "string" ? String(entry.value ?? "") : JSON.stringify(entry.value) ?? "";
 }
 
-function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onOperations: (operations: Operation[], label: string) => Promise<void> }) {
+function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: DictionaryDetail; onOperations: (operations: Operation[], label: string) => Promise<void>; onDirtyChange: (dirty: boolean) => void }) {
   const encrypted = detail.kind === "encrypted";
   const [edits, setEdits] = useState<Record<string, { type: string; value: string }>>({});
   const [removals, setRemovals] = useState<string[]>([]);
@@ -106,6 +105,14 @@ function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onO
   const [pending, setPending] = useState<{ operations: Operation[]; label: string; confirmationToken: string; impacts: { key: string; workflows: number; scripts: number }[] } | null>(null);
   useEffect(() => { setEdits({}); setRemovals([]); setPending(null); setError(""); setNotice(""); }, [detail.revision, detail.currentVersionId]);
   const hasEdits = Object.keys(edits).length > 0 || removals.length > 0;
+  const dirty = hasEdits || !!newKey || !!newValue;
+  const [query, setQuery] = useState("");
+  useEffect(() => { onDirtyChange(dirty || busy); }, [dirty, busy, onDirtyChange]);
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => { if (dirty) event.preventDefault(); };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   const commandKey = useCommandKey();
   const parseValue = (type: string, value: string): unknown => {
     if (type === "string") return value;
@@ -121,7 +128,7 @@ function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onO
       const business = { expectedRevision: detail.revision, operations };
       const result = await send<{ changed: boolean }>(`/dictionaries/${detail.id}`, { ...business, requestId: commandKey(business), ...(confirmationToken ? { confirmationToken } : {}) }, "PATCH");
       setPending(null); setEdits({}); setRemovals([]); setNewKey(""); setNewValue(""); commandKey({ cleared: true });
-      setNotice(label + (result.changed ? "已保存，产生新修订。" : "内容无变化，未产生修订。"));
+      setNotice(label + (result.changed ? "已保存。" : "内容无变化。"));
       await onOperations(operations, label);
     } catch (caught) {
       const failure = readError(caught);
@@ -146,11 +153,14 @@ function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onO
     if (!operations.length) { setError("没有需要保存的修改"); return; }
     await submit(operations, "条目");
   };
-  const entries = Object.entries(detail.keys).sort(([a], [b]) => a.localeCompare(b));
-  return <section className="panel" aria-label="字典条目">
-    <div className="panel-bar"><strong>{encrypted ? "加密条目（仅显示键名与状态）" : "普通条目"}</strong>
-      <Button variant="outline" size="sm" disabled={busy || !hasEdits && !newKey.trim() && !pending} onClick={() => void save()}><Save size={14} />保存修改</Button>
+  const entries = Object.entries(detail.keys).sort(([a], [b]) => a.localeCompare(b)).filter(([key]) => key.toLowerCase().includes(query.trim().toLowerCase()));
+  return <section className="panel dictionary-editor" aria-label="字典条目">
+    <div className="panel-bar"><strong>字典条目 <span className="field-hint">{detail.keyCount}</span></strong>
+      <div className="entry-actions"><span className="field-hint" role="status">{busy ? "正在保存…" : dirty ? "有未保存的修改" : "已保存"}</span>
+      <Button variant="ghost" size="sm" disabled={busy || !dirty} onClick={() => { setEdits({}); setRemovals([]); setNewKey(""); setNewValue(""); setPending(null); setError(""); }}>放弃修改</Button>
+      <Button size="sm" disabled={busy || !hasEdits && !newKey.trim() && !pending} onClick={() => void save()}><Save size={14} />保存修改</Button></div>
     </div>
+    <div className="dictionary-search"><Input aria-label="搜索字典键" placeholder="按键名搜索…" value={query} onChange={event => setQuery(event.target.value)} /><span className="field-hint">{entries.length} / {detail.keyCount} 个键</span></div>
     <ErrorNotice message={error} />
     {notice && <div className="notice" role="status">{notice}</div>}
     {pending && <div className="notice error" role="alert">
@@ -158,14 +168,15 @@ function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onO
       <ul>{pending.impacts.map(impact => <li key={impact.key}>键 {impact.key} · {impact.workflows} 个工作流 · {impact.scripts} 个脚本</li>)}</ul>
       <Button variant="outline" size="sm" disabled={busy} onClick={() => void submit(pending.operations, pending.label, pending.confirmationToken)}>确认移除并保存</Button>
     </div>}
-    {entries.length ? <table className="dictionary-entries"><tbody>
+    <div className="dictionary-table-scroll">
+    {entries.length ? <table className="dictionary-entries"><thead><tr><th scope="col">键名</th><th scope="col">{encrypted ? "密钥状态" : "类型"}</th><th scope="col">值与操作</th></tr></thead><tbody>
       {entries.map(([key, entry]) => {
         const removed = removals.includes(key);
         return <tr key={key} className={removed ? "is-removed" : ""}>
           <td><code>{key}</code></td>
           {encrypted
             ? <td className="field-hint">已设置 · 封装 {entry.type === "string" && "set" in entry && entry.set ? (entry as { keyId: string }).keyId.slice(0, 8) : "—"}…</td>
-            : <td><code>{JSON.stringify((entry as { value: unknown }).value)}</code></td>}
+            : <td><code>{entry.type}</code></td>}
           <td className="entry-actions">
             {encrypted
               ? <><label><input type="checkbox" aria-label={`替换键 ${key}`} checked={Object.hasOwn(edits, key)} disabled={busy || removed}
@@ -186,7 +197,9 @@ function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onO
           </td>
         </tr>;
       })}
-    </tbody></table> : <p className="field-hint">还没有条目。</p>}
+    </tbody></table> : <div className="dictionary-empty"><BookOpen size={28} /><strong>{query.trim() ? "没有匹配的键" : "还没有条目"}</strong><p>{query.trim() ? "尝试其他键名，或清空搜索条件。" : "在下方填写键名和值，添加第一个配置条目。"}</p>{query.trim() && <Button variant="outline" size="sm" onClick={() => setQuery("")}>清空搜索</Button>}</div>}
+    </div>
+    <div className="dictionary-add-label">添加条目<span className="field-hint">{encrypted ? "敏感值仅写入，不可回读" : "键名以字母开头，支持数字、下划线和短横线"}</span></div>
     <div className="entry-add">
       <Input aria-label="新键名" placeholder="键名（字母开头，字母/数字/_/-）" value={newKey} disabled={busy} onChange={event => setNewKey(event.target.value)} />
       {encrypted
@@ -202,7 +215,7 @@ function EntriesEditor({ detail, onOperations }: { detail: DictionaryDetail; onO
   </section>;
 }
 
-function DictionaryMetadata({ detail, onDone }: { detail: DictionaryDetail; onDone: () => void }) {
+function DictionaryMetadata({ detail, onDone, locked }: { detail: DictionaryDetail; onDone: () => void; locked: boolean }) {
   const [name, setName] = useState(detail.name), [description, setDescription] = useState(detail.description);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
   const commandKey = useCommandKey();
@@ -214,9 +227,9 @@ function DictionaryMetadata({ detail, onDone }: { detail: DictionaryDetail; onDo
     catch (error) { setError((error as Error).message); } finally { setBusy(false); }
   };
   return <section className="panel dictionary-panel" aria-label="字典信息"><div className="panel-bar"><strong>字典信息</strong></div>
-    <div className="dictionary-form"><label htmlFor="dictionary-edit-name">字典名称</label><Input id="dictionary-edit-name" value={name} onChange={event => setName(event.target.value)} disabled={busy} />
-      <label htmlFor="dictionary-edit-description">说明（不承诺保密）</label><Input id="dictionary-edit-description" value={description} onChange={event => setDescription(event.target.value)} disabled={busy} />
-      <ErrorNotice message={error} /><Button variant="outline" disabled={busy || !name.trim()} onClick={() => void save()}>保存字典信息</Button></div>
+    <div className="dictionary-form"><label htmlFor="dictionary-edit-name">字典名称</label><Input id="dictionary-edit-name" maxLength={100} value={name} onChange={event => setName(event.target.value)} disabled={busy || locked} />
+      <label htmlFor="dictionary-edit-description">说明（不承诺保密）</label><Input id="dictionary-edit-description" maxLength={2000} value={description} onChange={event => setDescription(event.target.value)} disabled={busy || locked} />
+      <ErrorNotice message={error} /><Button variant="outline" disabled={busy || locked || !name.trim() || name === detail.name && description === detail.description} onClick={() => void save()}>保存字典信息</Button></div>
   </section>;
 }
 
@@ -234,7 +247,7 @@ function ReEncryptPanel({ detail, onDone }: { detail: DictionaryDetail; onDone: 
     try {
       const result = await send<{ changed: boolean; reEncrypted: number }>(`/dictionaries/${detail.id}/re-encrypt`, { requestId: requestId(), token: preview.token, expectedRevision: detail.revision });
       setPreview(null);
-      setNotice(result.changed ? `已用活动密钥重新加密 ${result.reEncrypted} 个条目，产生新修订。` : "全部条目已使用活动密钥，无需重新加密。");
+      setNotice(result.changed ? `已用活动密钥重新加密 ${result.reEncrypted} 个条目。` : "全部条目已使用活动密钥，无需重新加密。");
       onDone();
     } catch (error) { setError((error as Error).message); setPreview(null); } finally { setBusy(false); }
   };
@@ -254,46 +267,81 @@ export function DictionaryPage({ id }: { id: string }) {
   const { data: detail, error, reload } = useResource<DictionaryDetail>(`/dictionaries/${id}`);
   const [versionCursor, setVersionCursor] = useState("");
   const [history, setHistory] = useState<{ versionNo: number; keys: DictionaryDetail["keys"] } | null>(null);
+  const [historyBusy, setHistoryBusy] = useState(false);
   const versions = useResource<{ items: VersionSummary[]; nextCursor: string | null }>(`/dictionaries/${id}/versions${versionCursor ? `?cursor=${encodeURIComponent(versionCursor)}` : ""}`);
   const references = useResource<{ items: unknown[]; complete: boolean; note: string }>(`/dictionaries/${id}/references`);
+  const [tab, setTab] = useState("info"), [dirty, setDirty] = useState(false);
+  const [toggleOpen, setToggleOpen] = useState(false);
   const [busy, setBusy] = useState(false), [actionError, setActionError] = useState("");
+  const refresh = () => { reload(); versions.reload(); };
   const toggle = async () => {
     if (!detail) return;
     setBusy(true); setActionError("");
-    try { await send(`/dictionaries/${id}`, { requestId: requestId(), expectedRevision: detail.revision, enabled: !detail.enabled, operations: [] }, "PATCH"); reload(); }
+    try { await send(`/dictionaries/${id}`, { requestId: requestId(), expectedRevision: detail.revision, enabled: !detail.enabled, operations: [] }, "PATCH"); setToggleOpen(false); refresh(); }
     catch (error) { setActionError((error as Error).message); } finally { setBusy(false); }
   };
-  return <>
+  const viewVersion = async (versionId: string) => {
+    setHistoryBusy(true); setActionError("");
+    try { setHistory(await api(`/dictionaries/${id}/versions/${versionId}`)); }
+    catch (error) { setActionError((error as Error).message); } finally { setHistoryBusy(false); }
+  };
+  const tabs = [{ id: "info", label: "字典信息" }, { id: "history", label: "修订历史" }, { id: "references", label: "引用影响" }, ...(detail?.kind === "encrypted" ? [{ id: "security", label: "密钥管理" }] : [])];
+  return <div className="dictionary-desktop">
     <PageHeading parents={[{ label: "字典", href: "/dictionaries" }]} title={detail?.name ?? "字典详情"}>
-      {detail && <Button variant="outline" disabled={busy} onClick={() => void toggle()}>
-        {detail.enabled ? <><Lock size={14} />禁用</> : <><Unlock size={14} />启用</>}
-      </Button>}
+      {detail && <><span className={`dictionary-state ${detail.enabled ? "is-enabled" : ""}`}>{detail.enabled ? "已启用" : "已禁用"}</span>
+        <Button variant="outline" disabled={busy || dirty} onClick={() => { setActionError(""); setToggleOpen(true); }}>
+          {detail.enabled ? <><Lock size={14} />禁用字典</> : <><Unlock size={14} />启用字典</>}
+        </Button></>}
     </PageHeading>
     <ErrorNotice message={error || actionError} />
     {!detail ? !error && <Loading /> : <>
-      <div className="notice" role="status" aria-label="字典状态">
-        <span>{detail.kind === "encrypted" ? "加密字典" : "普通字典"} · 修订 {detail.revision} · 当前版本 v{detail.versionNo} · {detail.keyCount} 个键</span>
+      <div className="dictionary-summary" role="status" aria-label="字典状态">
+        <span>{detail.kind === "encrypted" ? <KeyRound size={15} /> : <BookOpen size={15} />}{detail.kind === "encrypted" ? "加密字典" : "普通字典"}</span>
+        <span>{detail.keyCount} 个键</span>
         {detail.kind === "encrypted" && <span>密钥状态 <Status value={detail.readiness === "ready" ? "成功" : "失败"} /> · {readinessLabels[detail.readiness]}{detail.missingKeyIds.length > 0 && `（缺少 ${detail.missingKeyIds.join("、")}）`}</span>}
-        {!detail.enabled && <span>已禁用：阻止新发布与入队引用，不改写已创建运行的绑定。</span>}
         {detail.kind === "encrypted" && detail.readiness !== "ready" && <a href="/settings?section=dictionary-keys">前往密钥设置 →</a>}
       </div>
-      <DictionaryMetadata detail={detail} onDone={() => { reload(); versions.reload(); }} />
-      <EntriesEditor key={`${detail.revision}-${detail.currentVersionId}`} detail={detail} onOperations={async () => { reload(); versions.reload(); }} />
-      {detail.kind === "encrypted" && <ReEncryptPanel key={`reencrypt-${detail.revision}`} detail={detail} onDone={reload} />}
-      <section className="panel" aria-label="修订历史">
-        <div className="panel-bar"><strong>修订历史</strong></div>
-        {versions.data?.items.length ? <ul className="version-list">{versions.data.items.map(version =>
-          <li key={version.id}><Button variant="ghost" size="sm" onClick={() => void api<{ versionNo: number; keys: DictionaryDetail["keys"] }>(`/dictionaries/${id}/versions/${version.id}`).then(setHistory).catch(error => setActionError(error.message))}>查看 v{version.versionNo}</Button> {version.enabled ? "启用" : "禁用"} · {new Date(version.createdAt).toLocaleString("zh-CN")}{version.id === detail.currentVersionId && <strong> · 当前</strong>}</li>)}</ul> : <Loading />}
-        <div className="entry-actions">{versionCursor && <Button variant="outline" onClick={() => setVersionCursor("")}>最新修订</Button>}{versions.data?.nextCursor && <Button variant="outline" onClick={() => setVersionCursor(versions.data!.nextCursor!)}>更早修订</Button>}</div>
-        {history && <div className="dictionary-form" aria-label="历史修订内容"><strong>历史 v{history.versionNo}（只读）</strong>
-          <ul>{Object.entries(history.keys).map(([key, entry]) => <li key={key}><code>{key}</code> · {entry.type} · {"set" in entry ? "已设置" : JSON.stringify(entry.value)}
-            {!Object.hasOwn(detail.keys, key) && " · 当前已移除"}</li>)}</ul><Button variant="ghost" onClick={() => setHistory(null)}>关闭历史内容</Button></div>}
-        <p className="page-footnote">普通条目可查看历史值；加密条目仅显示键集合与状态，不提供密文或明文下载。</p>
-      </section>
-      <section className="panel" aria-label="引用影响">
-        <div className="panel-bar"><strong>引用影响</strong></div>
-        <p className="field-hint">{references.data?.complete ? "扫描完成。" : references.data?.note ?? "正在扫描…"}</p>
-      </section>
+      {!detail.enabled && <div className="notice">已禁用：阻止新发布与入队引用，不改写已创建运行的绑定。</div>}
+      <div className="dictionary-workspace">
+        <EntriesEditor key={`${detail.revision}-${detail.currentVersionId}`} detail={detail} onDirtyChange={setDirty} onOperations={async () => { refresh(); }} />
+        <aside className="panel dictionary-inspector" aria-label="字典检查器">
+          <div className="dictionary-tabs" role="tablist" aria-label="字典详情">
+            {tabs.map((item, index) => <button type="button" key={item.id} id={`dictionary-tab-${item.id}`} role="tab" aria-selected={tab === item.id} aria-controls={`dictionary-panel-${item.id}`} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)} onKeyDown={event => {
+              const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : -1;
+              if (next >= 0) { event.preventDefault(); setTab(tabs[next]!.id); document.getElementById(`dictionary-tab-${tabs[next]!.id}`)?.focus(); }
+            }}>{item.label}</button>)}
+          </div>
+          <div className="dictionary-inspector-body">
+            {dirty && <p className="dictionary-lock-hint">请先保存或放弃条目修改，再更改字典信息或密钥。</p>}
+            <div role="tabpanel" id="dictionary-panel-info" aria-labelledby="dictionary-tab-info" hidden={tab !== "info"}>
+              <DictionaryMetadata detail={detail} locked={dirty || busy} onDone={refresh} />
+              <dl className="dictionary-facts"><dt>字典 ID</dt><dd><code>{detail.id}</code></dd><dt>最近更新</dt><dd>{new Date(detail.updatedAt).toLocaleString("zh-CN")}</dd><dt>创建时间</dt><dd>{new Date(detail.createdAt).toLocaleString("zh-CN")}</dd></dl>
+            </div>
+            <section role="tabpanel" id="dictionary-panel-history" aria-labelledby="dictionary-tab-history" hidden={tab !== "history"} aria-label="修订历史">
+              <ErrorNotice message={versions.error} />
+              {!versions.data ? !versions.error && <Loading /> : versions.data.items.length ? <ul className="dictionary-version-list">{versions.data.items.map(version =>
+                <li key={version.id}><div><strong>v{version.versionNo}</strong>{version.id === detail.currentVersionId && <span className="dictionary-state is-enabled">当前</span>}<span className="field-hint">{version.enabled ? "启用" : "禁用"}</span><time>{new Date(version.createdAt).toLocaleString("zh-CN")}</time></div><Button variant="outline" size="sm" disabled={historyBusy} onClick={() => void viewVersion(version.id)}>查看 v{version.versionNo}</Button></li>)}</ul> : <p className="dictionary-panel-message">暂无修订历史。</p>}
+              {versions.error && <Button variant="outline" size="sm" onClick={versions.reload}>重试</Button>}
+              <div className="entry-actions dictionary-pagination">{versionCursor && <Button variant="outline" size="sm" onClick={() => setVersionCursor("")}>最新修订</Button>}{versions.data?.nextCursor && <Button variant="outline" size="sm" onClick={() => setVersionCursor(versions.data!.nextCursor!)}>更早修订</Button>}</div>
+              <p className="page-footnote">普通条目可查看历史值；加密条目仅显示键集合与状态。</p>
+            </section>
+            <section role="tabpanel" id="dictionary-panel-references" aria-labelledby="dictionary-tab-references" hidden={tab !== "references"} aria-label="引用影响">
+              <ErrorNotice message={references.error} />
+              {references.error ? <Button variant="outline" size="sm" onClick={references.reload}>重试</Button> : !references.data ? <Loading /> : <div className="dictionary-panel-message"><strong>{references.data.complete ? "引用扫描完成" : "引用信息暂不完整"}</strong><p>{references.data.note || (references.data.complete && !references.data.items.length ? "暂无引用。" : "请在移除键时查看引用影响确认。")}</p></div>}
+            </section>
+            {detail.kind === "encrypted" && <section role="tabpanel" id="dictionary-panel-security" aria-labelledby="dictionary-tab-security" hidden={tab !== "security"}><fieldset disabled={dirty || busy}><ReEncryptPanel key={`reencrypt-${detail.revision}`} detail={detail} onDone={refresh} /></fieldset></section>}
+          </div>
+        </aside>
+      </div>
+      <Dialog open={toggleOpen} onOpenChange={value => { if (!busy) setToggleOpen(value); }}>
+        <DialogContent><DialogHeader><DialogTitle>{detail.enabled ? "禁用" : "启用"}“{detail.name}”？</DialogTitle><DialogDescription>{detail.enabled ? "禁用后将阻止新发布与入队引用，已创建运行和历史版本不受影响。" : "启用后允许新的工作流与脚本引用此字典。"}</DialogDescription></DialogHeader><ErrorNotice message={actionError} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setToggleOpen(false)}>取消</Button><Button disabled={busy} onClick={() => void toggle()}>{busy ? "正在处理…" : detail.enabled ? "确认禁用" : "确认启用"}</Button></DialogFooter></DialogContent>
+      </Dialog>
+      <Dialog open={!!history} onOpenChange={value => { if (!value) setHistory(null); }}>
+        <DialogContent className="dictionary-history-dialog"><DialogHeader><DialogTitle>历史 v{history?.versionNo}（只读）</DialogTitle><DialogDescription>历史内容仅供查看，不会覆盖当前编辑。加密条目不展示明文。</DialogDescription></DialogHeader>
+          <div className="dictionary-history-scroll" aria-label="历史修订内容">{history && Object.keys(history.keys).length ? <table className="dictionary-entries"><thead><tr><th>键名</th><th>类型</th><th>值 / 状态</th></tr></thead><tbody>{Object.entries(history!.keys).map(([key, entry]) => <tr key={key}><td><code>{key}</code>{!Object.hasOwn(detail.keys, key) && <small> · 当前已移除</small>}</td><td>{entry.type}</td><td><code>{"set" in entry ? "已设置" : JSON.stringify(entry.value)}</code></td></tr>)}</tbody></table> : <p className="dictionary-panel-message">此修订没有条目。</p>}</div>
+          <DialogFooter><Button variant="outline" onClick={() => setHistory(null)}>关闭历史内容</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>}
-  </>;
+  </div>;
 }

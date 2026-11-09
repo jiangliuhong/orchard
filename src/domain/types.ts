@@ -37,6 +37,7 @@ export interface WorkflowNode {
     defaultLabel?: string;
     timeoutMs?: number;
     application?: string;
+    environmentId?: string;
     tool?: string;
   };
 }

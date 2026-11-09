@@ -115,6 +115,89 @@ test("shared Agent chat lets integrations hide attachments and provide their own
   } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
 });
 
+test("shared Agent chat keeps send controls outside the scrollable composer body for long prompts", async () => {
+  const originalFetch = globalThis.fetch, submissions: ChatSubmission[] = [];
+  globalThis.fetch = async () => Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  try {
+    const context: TestChatContext = { allowAttachments: false, send: async input => { submissions.push(input); } };
+    render(createElement(AgentChat<TestChatContext>, { config: testChatConfig, context, resourceKey: "long-prompt" }));
+    const input = screen.getByLabelText("测试需求");
+    const prompt = "这是一段很长的代码和说明。\n".repeat(500);
+    fireEvent.change(input, { target: { value: prompt } });
+    const send = screen.getByRole("button", { name: "发送" });
+    await waitFor(() => assert.equal((send as HTMLButtonElement).disabled, false));
+    const body = input.closest(".chat-compose-body");
+    assert.ok(body);
+    assert.equal(body.contains(send), false);
+    assert.equal(send.closest(".compose-footer")?.parentElement, body.parentElement);
+    fireEvent.click(send);
+    await waitFor(() => assert.equal(submissions.length, 1));
+    assert.equal(submissions[0]!.prompt, prompt.trim());
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+});
+
+test("shared Agent chat quotes only selected text into the editable prompt and follows sends", async () => {
+  const originalFetch = globalThis.fetch, submissions: ChatSubmission[] = [];
+  globalThis.fetch = async () => Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  let fail = true;
+  const config: AgentChatConfig<TestChatContext> = {
+    ...testChatConfig,
+    useSession: (context, choice, choose) => ({
+      ...testChatConfig.useSession(context, choice, choose),
+      messages: [{ id: "answer", role: "assistant", text: "开头：第一行\n第二行：结尾" }],
+    }),
+  };
+  try {
+    const context: TestChatContext = { allowAttachments: false, send: async input => {
+      submissions.push(input);
+      if (fail) throw new Error("发送失败");
+    } };
+    render(createElement(AgentChat<TestChatContext>, { config, context, resourceKey: "reply" }));
+    const transcript = document.querySelector(".agent-chat-messages") as HTMLDivElement;
+    Object.defineProperty(transcript, "scrollHeight", { value: 1800, configurable: true });
+    transcript.scrollTop = 0;
+    fireEvent.scroll(transcript);
+    assert.ok(!screen.queryByRole("button", { name: "引用回复" }));
+    const input = screen.getByLabelText("测试需求") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "已有的问题" } });
+    const node = screen.getByText(/开头：第一行/).firstChild!;
+    const range = document.createRange();
+    range.setStart(node, 3);
+    range.setEnd(node, 10);
+    Object.defineProperty(range, "getClientRects", { value: () => [{ top: 200, left: 100, width: 120 }] });
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+    fireEvent.mouseUp(transcript);
+    const quoteButton = screen.getByRole("button", { name: "引用回复" });
+    assert.equal(quoteButton.style.top, "192px");
+    assert.equal(quoteButton.style.left, "160px");
+    assert.equal(quoteButton.parentElement, document.body, "floating action is not clipped by the message scroller");
+    fireEvent.keyDown(document, { key: "Escape" });
+    assert.ok(!screen.queryByRole("button", { name: "引用回复" }));
+    fireEvent.mouseUp(transcript);
+    fireEvent.click(screen.getByRole("button", { name: "引用回复" }));
+    assert.equal(input.value, "已有的问题\n\n>第一行\n>第二行\n\n");
+    assert.equal(document.activeElement, input);
+    assert.ok(!screen.queryByRole("button", { name: "引用回复" }));
+    assert.equal(transcript.scrollTop, 0, "quoting should not interrupt reading history");
+    fireEvent.change(input, { target: { value: input.value + "请详细解释" } });
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByText("发送失败");
+    assert.equal(transcript.scrollTop, 1800);
+    assert.equal(submissions[0]!.prompt, "已有的问题\n\n>第一行\n>第二行\n\n请详细解释");
+    assert.equal(input.value, submissions[0]!.prompt, "failed sends preserve the editable quote");
+    fail = false;
+    fireEvent.keyDown(input, { ctrlKey: true, key: "Enter" });
+    await waitFor(() => assert.equal(input.value, ""));
+    assert.equal(submissions.length, 2);
+    assert.equal(submissions[0]!.requestId, submissions[1]!.requestId);
+  } finally { window.getSelection()?.removeAllRanges(); globalThis.fetch = originalFetch; localStorage.clear(); }
+});
+
 test("shared Agent chat preserves failed prompts and request IDs, prevents duplicate sends, and resets resources", async () => {
   const originalFetch = globalThis.fetch, submissions: ChatSubmission[] = [];
   globalThis.fetch = async () => Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
@@ -842,6 +925,27 @@ test("conversation Provider picker hides disabled CLIs and allows replacing a sa
   fireEvent.keyDown(screen.getByRole("combobox", { name: "Provider" }), { key: "Enter" });
   assert.equal(screen.queryAllByRole("option").length, 0);
 });
+test("settings previews all three default Agent prompts read-only", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => Response.json(String(url).endsWith("/settings/agent-prompts") ? { items: [
+    { id: "workflow", name: "工作流", prompt: "workflow rules", schema: { type: "object" }, contextNote: "动态工作流上下文" },
+    { id: "web-bridge", name: "Web Bridge 工具", prompt: "bridge rules", schema: { type: "object" }, contextNote: "应用占位示例" },
+    { id: "script", name: "脚本", prompt: "script rules", schema: { type: "object" }, contextNote: "动态脚本上下文" },
+  ] } : { items: [] });
+  try {
+    render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Agent 提示词预览" }));
+    const workflow = await screen.findByLabelText("工作流默认提示词") as HTMLTextAreaElement;
+    assert.equal(workflow.value, "workflow rules");
+    assert.equal(workflow.readOnly, true);
+    fireEvent.click(screen.getByRole("button", { name: "Web Bridge 工具" }));
+    assert.equal((screen.getByLabelText("Web Bridge 工具默认提示词") as HTMLTextAreaElement).value, "bridge rules");
+    fireEvent.click(screen.getByRole("button", { name: "脚本" }));
+    assert.equal((screen.getByLabelText("脚本默认提示词") as HTMLTextAreaElement).value, "script rules");
+    assert.equal((screen.getByLabelText("脚本输出 Schema") as HTMLTextAreaElement).readOnly, true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("settings connection form preserves separately managed model state", async () => {
   const originalFetch = globalThis.fetch, requests: { url: string; body: unknown }[] = [];
   let setting = provider({ enabled: false, models: [{ id: "disabled-model", name: "Disabled", source: "configured", enabled: false }] });

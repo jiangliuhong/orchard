@@ -62,7 +62,7 @@ async function main() {
     const application = args[2], tool = args[3]; let body = "{}";
     const jsonArg = value("--args-json", ""); const file = value("--args-file", "");
     if (jsonArg) body = jsonArg; else if (file) body = await (await import("node:fs/promises")).readFile(file, "utf8"); else if (args.includes("--stdin-json")) body = await new Promise<string>(resolve => { let text = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => text += chunk); process.stdin.on("end", () => resolve(text)); });
-    return request("/api/web-bridge/calls", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: randomUUID(), application, tool, args: JSON.parse(body) }) });
+    return request("/api/web-bridge/calls", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: randomUUID(), application, tool, args: JSON.parse(body), environmentId: value("--environment-id", "") || undefined, approved: args.includes("--approve") }) });
   }
   if (command === "doctor") return request("/api/web-bridge/status");
   if (command === "host") {

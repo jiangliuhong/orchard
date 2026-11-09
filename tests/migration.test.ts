@@ -73,6 +73,46 @@ async function boot(root:string,initialization?:()=>Promise<void>){
 const headers=(bootstrap:Bootstrap,post=false)=>({host:'127.0.0.1:32199','x-orchard-bootstrap-token':bootstrap.token,...(post?{origin:'http://127.0.0.1:32199','content-type':'application/json'}:{})});
 async function confirm(bootstrap:Bootstrap){const p=await bootstrap.getPlan(),checked=await bootstrap.validate({planHash:p.planHash,answers:{}});return {requestId:randomUUID(),planHash:p.planHash,confirmationHash:checked.confirmationHash!,answers:{}};}
 
+test('bootstrap permits only extension bridge POSTs and preserves bridge authentication',async t=>{
+ const {app}=await boot(rootFor(t));
+ const extensionId='a'.repeat(32),origin=`chrome-extension://${extensionId}`;
+ const extensionHeaders={host:'127.0.0.1:32199',origin,'sec-fetch-site':'cross-site'};
+ const registration=await app.inject({method:'POST',url:'/api/web-bridge/profiles/register',headers:extensionHeaders,payload:{id:'work',name:'Work',extensionId}});
+ assert.equal(registration.statusCode,200,registration.body);
+ const token=registration.json().bridgeToken;
+ assert.equal(typeof token,'string');
+ const poll=await app.inject({method:'POST',url:'/api/web-bridge/browser/poll',headers:{...extensionHeaders,'x-orchard-bridge-token':token},payload:{profileId:'work'}});
+ assert.equal(poll.statusCode,200,poll.body);
+ assert.deepEqual(poll.json(),{items:[]});
+ for(const url of ['/api/web-bridge/browser/poll','/api/web-bridge/browser/result']){
+  const response=await app.inject({method:'POST',url,headers:extensionHeaders,payload:{profileId:'work'}});
+  assert.equal(response.statusCode,401,response.body);
+ }
+ const mismatch=await app.inject({method:'POST',url:'/api/web-bridge/profiles/register',headers:extensionHeaders,payload:{id:'other',name:'Other',extensionId:'b'.repeat(32)}});
+ assert.equal(mismatch.statusCode,400);
+ assert.equal(mismatch.json().code,'INVALID_ORIGIN');
+ for(const options of [
+  {method:'GET' as const,url:'/api/web-bridge/profiles/register'},
+  {method:'OPTIONS' as const,url:'/api/web-bridge/profiles/register'},
+  {method:'POST' as const,url:'/api/web-bridge/calls'},
+  {method:'POST' as const,url:'/api/bootstrap/initialize'},
+  {method:'POST' as const,url:'/api/migrations/jobs'},
+  {method:'POST' as const,url:'/api/web-bridge/profiles/register',headers:{...extensionHeaders,origin:'https://evil.test'}},
+  {method:'POST' as const,url:'/api/web-bridge/profiles/register',headers:{...extensionHeaders,origin:'chrome-extension://invalid'}},
+  {method:'POST' as const,url:'/api/web-bridge/profiles/register',headers:{...extensionHeaders,host:'evil.test:32199'}},
+ ]){
+  const response=await app.inject({headers:extensionHeaders,...options});
+  assert.equal(response.statusCode,403,`${options.method} ${options.url}: ${response.body}`);
+ }
+});
+
+test('bootstrap keeps extension registration behind the readiness barrier',async t=>{
+ const {app}=await boot(fixture(t),async()=>{});
+ const response=await app.inject({method:'POST',url:'/api/web-bridge/profiles/register',headers:{host:'127.0.0.1:32199',origin:`chrome-extension://${'a'.repeat(32)}`,'sec-fetch-site':'cross-site'},payload:{id:'work',name:'Work',extensionId:'a'.repeat(32)}});
+ assert.equal(response.statusCode,503,response.body);
+ assert.equal(response.json().code,'MIGRATION_REQUIRED');
+});
+
 test('M01 new installation and reopen initialize once; Store requires an authentic lease',async t=>{
  const root=rootFor(t),instance=await boot(root);assert.equal(instance.bootstrap.ready,true);
  assert.equal(readJson<{schemaVersion:number}>(safe(root,'config/web-bridge.json')).schemaVersion,1);

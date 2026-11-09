@@ -2,7 +2,7 @@ import { questionActive, validateAnswers } from './questions.js';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { declarations, approval, currentVersion } from './frozen.js';
-import { inspectBridgeConfig } from './config.js';
+import { inspectBridgeConfig } from '../web-bridge/config-validation.js';
 import { canonical, hash, safe, present, scan, readJson } from './journal.js';
 import { resourceRoots, MigrationError, type Plan, type Ledger, type Question } from './types.js';
 import { databaseFingerprint, verifyDatabase } from './validators.js';

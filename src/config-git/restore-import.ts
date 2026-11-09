@@ -7,7 +7,7 @@ import type { ScriptDefinition } from "../domain/scripts.js";
 import { validateScript } from "../domain/scripts.js";
 import { checkScriptSource } from "../runtime/script.js";
 import { schemaSubset, bindingSchema } from "../domain/schema-compatibility.js";
-import { validateBridgeConfigV1 } from "../migrations/config.js";
+import { validateBridgeConfigV1 } from "../web-bridge/config-validation.js";
 import type { PortableSnapshot, PortableBridge, PortableProvider, PortableScript, PortableWorkflow, SnapshotCategory, SnapshotTheme, LocalRef } from "./snapshot-types.js";
 import type { RestorePreview, RestorePreviewOptions } from "./restore.js";
 import { persistArtifact, readOptional } from "./restore-files.js";

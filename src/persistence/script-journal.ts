@@ -6,6 +6,7 @@ import { FileStore, json } from "./files.js";
 import type { ScriptAgentTurn } from "../authoring/script-agent.js";
 
 export class ScriptJournal {
+  onSaved?: (record: ScriptAgentTurn) => void;
   constructor(readonly files: FileStore) {}
   private directory(scriptId: string) {
     check(/^[a-z][a-z0-9-]{0,99}$/.test(scriptId), "INVALID_SCRIPT", "脚本 ID 无效");
@@ -46,5 +47,6 @@ export class ScriptJournal {
       writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
       renameSync(temporary, path);
     } finally { if (existsSync(temporary)) unlinkSync(temporary); }
+    this.onSaved?.(record);
   }
 }

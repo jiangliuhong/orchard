@@ -69,7 +69,7 @@ function handle(msg) {
   if (msg.type === "get_state") {
     if (scenario === "state-model-mismatch") { send({ id: msg.id, type: "response", command: "get_state", success: true, data: { model: { id: "different/model" }, sessionId: "s-fixture", isStreaming: false } }); return; }
     const sessionFile = process.env.PI_SESSION_FILE;
-    send({ id: msg.id, type: "response", command: "get_state", success: true, data: { model: { id: modelFlag }, sessionId: "s-fixture", isStreaming: false, ...(sessionFile ? { sessionFile } : {}), messageCount: prompts } });
+    send({ id: msg.id, type: "response", command: "get_state", success: true, data: { model: scenario === "state-model" ? JSON.parse(process.env.PI_STATE_MODEL) : { id: modelFlag }, sessionId: "s-fixture", isStreaming: false, ...(sessionFile ? { sessionFile } : {}), messageCount: prompts } });
     return;
   }
   if (msg.type === "prompt") {

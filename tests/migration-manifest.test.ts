@@ -15,6 +15,11 @@ test('release locks independent historical baselines and executable dependencies
  for(const path of ['src/server/bootstrap.ts','tests/fixtures/migrations/database/provenance.json','src/web/Bootstrap.tsx','vite.config.ts','src/domain/validation.ts'])assert.ok(manifest.fileChecksums[path],path);
  assert.equal(manifest.entries.length,12);
 });
+test('v9 migration identities survive later business-code releases',()=>{
+ const historical=JSON.parse(readFileSync(new URL('docs/features/2026-11-06-data-migration/release-v9.json',root),'utf8'));
+ for(const prior of historical.entries)assert.deepEqual(manifest.entries.find((entry:{id:string})=>entry.id===prior.id),prior);
+ for(const id of ['db.v6-v7','db.v7-v8','db.v8-v9'])assert.ok(historical.entries.some((entry:{id:string})=>entry.id===id));
+});
 test('locked release passes approval verification and deterministic bundle generation',()=>{
  const result=execFileSync(process.execPath,['scripts/check-migration-manifest.mjs','--require-review'],{cwd:root,encoding:'utf8'});assert.match(result,/Verified 12 locked migration declarations/);
  execFileSync(process.execPath,['scripts/generate-migration-bundle.mjs','--check'],{cwd:root,encoding:'utf8'});

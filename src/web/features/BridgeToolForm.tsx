@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { BRIDGE_HTTP_METHODS } from "../../web-bridge/http-methods";
 import type { WebBridgeTool } from "../../web-bridge/catalog";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
@@ -10,31 +11,42 @@ export function BridgeToolForm({ value, existing, disabled, onChange, onInvalidC
   const definition = JSON.parse(value) as WebBridgeTool;
   const [parameters, setParameters] = useState(JSON.stringify(definition.parameters, null, 2));
   const [fields, setFields] = useState(JSON.stringify(definition.fields, null, 2));
+  const [execution, setExecution] = useState(definition.execution ? JSON.stringify(definition.execution, null, 2) : "");
   const [error, setError] = useState("");
   const update = (patch: Partial<WebBridgeTool>) => onChange(JSON.stringify({ ...definition, ...patch }, null, 2));
-  const jsonField = (key: "parameters" | "fields", text: string) => {
-    if (key === "parameters") setParameters(text); else setFields(text);
+  const jsonField = (key: "parameters" | "fields" | "execution", text: string) => {
+    if (key === "parameters") setParameters(text); else if (key === "fields") setFields(text); else setExecution(text);
     try {
-      const parsed = JSON.parse(text);
-      if (key === "parameters" ? !parsed || typeof parsed !== "object" || Array.isArray(parsed) : !Array.isArray(parsed) || !parsed.every(item => typeof item === "string")) throw new Error(key === "parameters" ? "参数 Schema 必须是 JSON 对象" : "返回字段必须是 JSON 字符串数组");
-      const other = JSON.parse(key === "parameters" ? fields : parameters);
-      if (key === "parameters" ? !Array.isArray(other) || !other.every(item => typeof item === "string") : !other || typeof other !== "object" || Array.isArray(other)) throw new Error("请修正另一个 JSON 字段");
+      const parsedParameters = JSON.parse(key === "parameters" ? text : parameters);
+      const parsedFields = JSON.parse(key === "fields" ? text : fields);
+      const executionText = key === "execution" ? text : execution;
+      const parsedExecution = executionText.trim() ? JSON.parse(executionText) : undefined;
+      if (!parsedParameters || typeof parsedParameters !== "object" || Array.isArray(parsedParameters)) throw new Error("参数 Schema 必须是 JSON 对象");
+      if (!Array.isArray(parsedFields) || !parsedFields.every(item => typeof item === "string")) throw new Error("返回字段必须是 JSON 字符串数组");
+      if (parsedExecution !== undefined && (!parsedExecution || typeof parsedExecution !== "object" || Array.isArray(parsedExecution))) throw new Error("HTTP 执行配置必须是 JSON 对象");
       setError(""); onInvalidChange(false);
-      update({ parameters: key === "parameters" ? parsed : other, fields: key === "fields" ? parsed : other });
+      update({ parameters: parsedParameters, fields: parsedFields, execution: parsedExecution });
     } catch (error) { setError((error as Error).message); onInvalidChange(true); }
   };
   return <fieldset className="bridge-tool-form" disabled={disabled}>
     <label htmlFor="bridge-tool-id">工具 ID</label><Input id="bridge-tool-id" value={definition.toolId} disabled={existing} onChange={event => update({ toolId: event.target.value })} />
     <label htmlFor="bridge-tool-description">工具说明</label><Input id="bridge-tool-description" value={definition.description} onChange={event => update({ description: event.target.value })} />
-    <label htmlFor="bridge-tool-site">站点标识</label><Input id="bridge-tool-site" value={definition.site} onChange={event => update({ site: event.target.value })} />
-    <label htmlFor="bridge-tool-method">请求方法</label><select id="bridge-tool-method" value={definition.method} onChange={event => update({ method: event.target.value as WebBridgeTool["method"] })}><option>GET</option><option>POST</option></select>
+    <label htmlFor="bridge-tool-method">请求方法</label><select id="bridge-tool-method" value={definition.method} onChange={event => update({ method: event.target.value as WebBridgeTool["method"] })}>{BRIDGE_HTTP_METHODS.map(method => <option key={method}>{method}</option>)}</select>
     <label htmlFor="bridge-tool-path">接口路径</label><Input id="bridge-tool-path" value={definition.path} onChange={event => update({ path: event.target.value })} />
     <label htmlFor="bridge-tool-risk">风险类型</label><select id="bridge-tool-risk" value={definition.risk} onChange={event => update({ risk: event.target.value as WebBridgeTool["risk"] })}>{[["read", "读取"], ["write", "写入"], ["delete", "删除"], ["execute", "执行"], ["download", "下载"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
     <label htmlFor="bridge-tool-approval">执行确认</label><select id="bridge-tool-approval" value={definition.approval} onChange={event => update({ approval: event.target.value as WebBridgeTool["approval"] })}><option value="none">无需确认</option><option value="user">用户确认</option></select>
     <label htmlFor="bridge-tool-timeout">超时（毫秒）</label><Input id="bridge-tool-timeout" type="number" min={100} max={120000} value={definition.timeoutMs} onChange={event => update({ timeoutMs: Number(event.target.value) })} />
     <label htmlFor="bridge-tool-version">定义版本</label><Input id="bridge-tool-version" value={definition.catalogVersion} onChange={event => update({ catalogVersion: event.target.value })} />
-    <label htmlFor="bridge-tool-parameters">参数 Schema（JSON）</label><Textarea id="bridge-tool-parameters" className="font-mono" rows={6} value={parameters} onChange={event => jsonField("parameters", event.target.value)} />
-    <label htmlFor="bridge-tool-fields">返回字段（JSON 数组）</label><Textarea id="bridge-tool-fields" className="font-mono" rows={3} value={fields} onChange={event => jsonField("fields", event.target.value)} />
+    <p className="field-hint bridge-form-hint">工具在调用时选择应用下的运行环境，使用该环境的网站和浏览器资料。</p>
+    {([
+      ["parameters", "参数 Schema（JSON）", parameters],
+      ["fields", "返回字段（JSON 数组）", fields],
+      ["execution", "执行配置（JSON，可选）", execution],
+    ] as const).map(([key, label, text]) => <details key={key} className="bridge-json-section">
+      <summary>{label}</summary>
+      <Textarea id={`bridge-tool-${key}`} aria-label={label} className="font-mono" rows={key === "fields" ? 3 : 6} spellCheck={false} value={text} onChange={event => jsonField(key, event.target.value)} />
+      {key === "execution" && <p className="field-hint">localHttp 不复用浏览器 Cookie；凭据只填写加密字典引用，勿填写真实 AK/SK。browser 使用运行环境绑定的已登录页签，需在插件授权站点。调用凭据可用 credentialInputs 声明；完整返回设置 response.mode 为 fullJson。</p>}
+    </details>)}
     <ErrorNotice message={error} />
   </fieldset>;
 }

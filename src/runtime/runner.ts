@@ -228,7 +228,7 @@ export class GraphRunner {
   }
   private async webBridgeCall(node: WorkflowNode, input: unknown, signal: AbortSignal) {
     check(this.webBridge, "BROWSER_NOT_CONNECTED", "Web Bridge 未配置");
-    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs });
+    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs, environmentId: node.config.environmentId });
     assertSchema(output, node.outputSchema, `${node.id} Web Bridge 输出`);
     return { output, execution: { application: node.config.application, tool: node.config.tool, resultMode: node.config.resultMode ?? "result" } };
   }

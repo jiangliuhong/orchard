@@ -5,8 +5,12 @@ import { resolve, relative, isAbsolute } from 'node:path';
 const root=fileURLToPath(new URL('../',import.meta.url));
 export const manifestPath='docs/features/2026-11-06-data-migration/migration-manifest.json';
 export const historicalReleasePath='docs/features/2026-11-06-data-migration/release-v6.json';
+export const historicalReleasePaths=[historicalReleasePath,'docs/features/2026-11-06-data-migration/release-v9.json'];
+export function historicalReleases(){
+ return historicalReleasePaths.filter(path=>existsSync(resolve(root,path))).map(path=>JSON.parse(resourceBytes(path)));
+}
 export function historicalRelease(){
- return existsSync(resolve(root,historicalReleasePath))?JSON.parse(resourceBytes(historicalReleasePath)):null;
+ return historicalReleases().at(-1)??null;
 }
 export function canonical(value){
  if(Array.isArray(value))return `[${value.map(canonical).join(',')}]`;
@@ -21,7 +25,7 @@ export function resourceBytes(path){
 }
 export function entryChecksum(entry){
  const {checksum,reviewReference,...declaration}=entry;
- const historical=historicalRelease(),prior=historical?.entries.find(candidate=>candidate.id===entry.id);
+ const historical=historicalReleases().find(release=>release.entries.some(candidate=>candidate.id===entry.id&&canonical(candidate.files)===canonical(entry.files))),prior=historical?.entries.find(candidate=>candidate.id===entry.id);
  const preserve=prior&&canonical(prior.files)===canonical(entry.files);
  return sha256(canonical({declaration,resources:entry.files.map(path=>({path,sha256:preserve?historical.fileChecksums[path]:sha256(resourceBytes(path))}))}));
 }
@@ -29,7 +33,7 @@ const walk=path=>readdirSync(resolve(root,path),{withFileTypes:true}).flatMap(en
 export const migrationFiles=()=>walk('src/migrations').filter(path=>path!=='src/migrations/frozen.ts');
 export function releaseFiles(entries,approvalPath='docs/features/2026-11-06-data-migration/schema-approval-v8.json'){
  return [...new Set([...walk('src').filter(path=>path!=='src/migrations/frozen.ts'),...walk('scripts'),...walk('tests/fixtures/migrations'),...entries.flatMap(entry=>entry.files),
-  approvalPath,'docs/features/2026-11-06-data-migration/schema-review.md','docs/features/2026-11-06-data-migration/schema-approval.json','docs/features/2026-11-06-data-migration/schema-approval-v8.json',historicalReleasePath,'package.json','pnpm-lock.yaml','tsconfig.json','tsconfig.server.json','vite.config.ts','index.html'])].sort();
+  approvalPath,'docs/features/2026-11-06-data-migration/schema-review.md','docs/features/2026-11-06-data-migration/schema-approval.json','docs/features/2026-11-06-data-migration/schema-approval-v8.json',...historicalReleasePaths,'package.json','pnpm-lock.yaml','tsconfig.json','tsconfig.server.json','vite.config.ts','index.html'])].sort();
 }
 export function contentDigest(manifest){
  const entries=manifest.entries.map(({id,checksum})=>({id,checksum}));
@@ -39,9 +43,12 @@ export function checkManifest({requireReview=false}={}){
  const manifest=JSON.parse(resourceBytes(manifestPath));
  if(manifest.formatVersion!==1||manifest.status!=='release_locked')throw new Error('Executable migrations require a locked release manifest');
  const approved=JSON.parse(resourceBytes(manifest.schemaApproval));
- const historical=historicalRelease();
- if(!historical||historical.contentDigest!==contentDigest(historical))throw new Error('Invalid historical release archive');
- for(const entry of historical.entries)if(canonical(manifest.entries.find(candidate=>candidate.id===entry.id))!==canonical(entry))throw new Error(`Historical migration identity changed: ${entry.id}`);
+ const histories=historicalReleases();
+ if(histories.length!==historicalReleasePaths.length)throw new Error('Missing historical release archive');
+ for(const historical of histories){
+  if(historical.contentDigest!==contentDigest(historical))throw new Error('Invalid historical release archive');
+  for(const entry of historical.entries)if(canonical(manifest.entries.find(candidate=>candidate.id===entry.id))!==canonical(entry))throw new Error(`Historical migration identity changed: ${entry.id}`);
+ }
  if(approved.formatVersion!==1||approved.status!=='review_candidate'||approved.contentDigest!==contentDigest(approved))throw new Error('Invalid schema approval archive');
  if(approved.review.status!=='approved'||!approved.review.reviewer||!approved.review.date||approved.review.contentDigest!==approved.contentDigest||canonical(manifest.review)!==canonical(approved.review))throw new Error('Schema approval does not match the reviewed archive');
  for(const entry of approved.entries)if(entryChecksum(entry)!==entry.checksum)throw new Error(`Approved schema/protocol bytes changed: ${entry.id}`);

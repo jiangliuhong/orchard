@@ -200,7 +200,10 @@ export class Bootstrap {
    const allowed=['127.0.0.1','localhost','[::1]'].some(name=>host===`${name}:${port}`||(port===80&&host===name));
    if(!allowed)return reply.code(403).send(publicError(new MigrationError('INVALID_HOST')));
    const expected=`http://${host}`,origin=request.headers.origin,site=request.headers['sec-fetch-site'];
-   if(origin!==undefined&&origin!==expected||site!==undefined&&!['same-origin','none'].includes(site)||site==='none'&&request.method!=='GET')return reply.code(403).send(publicError(new MigrationError('INVALID_ORIGIN')));
+   // Extension traffic is cross-origin by design. Only these POST endpoints may
+   // reach the business hook, which checks the extension ID and bridge token.
+   const extensionBridge=request.method==='POST'&&['/api/web-bridge/profiles/register','/api/web-bridge/browser/poll','/api/web-bridge/browser/result'].includes(request.url)&&typeof origin==='string'&&/^chrome-extension:\/\/[a-p]{32}$/.test(origin);
+   if(!extensionBridge&&(origin!==undefined&&origin!==expected||site!==undefined&&!['same-origin','none'].includes(site)||site==='none'&&request.method!=='GET'))return reply.code(403).send(publicError(new MigrationError('INVALID_ORIGIN')));
    if(request.method==='OPTIONS')return reply.code(403).send(publicError(new MigrationError('INVALID_ORIGIN')));
    const url=request.url.split('?')[0], protectedPath=url.startsWith('/api/migrations/')||url==='/api/migrations/plan'||url==='/api/bootstrap/initialize';
    if(protectedPath&&!this.authenticated(request))return reply.code(401).send(publicError(new MigrationError('UNAUTHORIZED')));

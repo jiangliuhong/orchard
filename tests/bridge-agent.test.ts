@@ -6,7 +6,7 @@ import { createApp } from "../src/server/app.js";
 import { BridgeAgentService } from "../src/web-bridge/agent.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import type { WebBridgeTool } from "../src/web-bridge/catalog.js";
-import { prepareBridgeProposal } from "../src/web-bridge/authoring.js";
+import { BRIDGE_PROPOSAL_SCHEMA, bridgeAuthoringContract, prepareBridgeProposal } from "../src/web-bridge/authoring.js";
 import { setup, until } from "./helpers.js";
 
 const definition = (application = "crm", toolId = "customers"): WebBridgeTool => ({
@@ -59,6 +59,98 @@ test("Bridge Agent conversations persist, isolate context and only apply reviewe
   assert.equal((await app.inject({ method: "POST", url: base, payload: { ...request(), arbitrary: true } })).statusCode, 400);
   assert.equal((await app.inject({ method: "POST", url: base, headers: { origin: "https://evil.test" }, payload: request() })).statusCode, 403);
   assert.deepEqual(store.all("SELECT name, sql FROM sqlite_master ORDER BY name"), schema);
+});
+
+test("Bridge Agent includes the entire conversation, including failed turns, without mixing conversations", async context => {
+  const { store, providers, provider } = setup(context);
+  const config = new WebBridgeConfig(store.root), service = new BridgeAgentService(store.files, config, providers);
+  context.after(async () => { await service.close(); store.close(); });
+  config.saveApplication({ id: "crm", name: "CRM" });
+  const conversationId = randomUUID();
+  provider.handler = async input => {
+    return { output: { summary: "已回答", changes: [] }, providerId: provider.id, modelId: input.modelId };
+  };
+  const send = async (prompt: string, conversation = conversationId) => {
+    const turn = service.start("crm", { ...request(), conversationId: conversation, prompt });
+    await until(() => !service.list("crm").active);
+    return service.list("crm").items.find(item => item.id === turn.id)!;
+  };
+  await send("other conversation", randomUUID());
+  for (let index = 0; index < 10; index++) await send(`message ${index}`);
+  // Fail a provider call without discarding the user's request from subsequent context.
+  provider.handler = async () => { throw new Error("test failure"); };
+  assert.equal((await send("failed request")).status, "failed");
+  provider.handler = async input => ({ output: { summary: "继续回答", changes: [] }, providerId: provider.id, modelId: input.modelId });
+  await send("continue");
+  const data = JSON.parse(provider.calls.at(-1)!.prompt.split("\nUser context:\n")[1]);
+  assert.equal(data.history.length, 11);
+  assert.deepEqual(data.history.slice(0, 10).map((item: { user: string }) => item.user), Array.from({ length: 10 }, (_, index) => `message ${index}`));
+  assert.equal(data.history[10].user, "failed request");
+  assert.equal(data.history[10].status, "failed");
+  assert.ok(data.history[10].error);
+  assert.equal(data.history.some((item: { user: string }) => item.user === "other conversation"), false);
+});
+
+test("Bridge authoring supplies its format and capability boundaries without requiring environments", async context => {
+  const { store, providers, provider } = setup(context);
+  const config = new WebBridgeConfig(store.root), service = new BridgeAgentService(store.files, config, providers);
+  context.after(async () => { await service.close(); store.close(); });
+  config.saveApplication({ id: "crm", name: "CRM" });
+  provider.handler = async input => {
+    const [platform, user] = input.prompt.split("Platform contract:\n")[1].split("\nUser context:\n");
+    const contract = JSON.parse(platform), data = JSON.parse(user);
+    assert.deepEqual(contract, bridgeAuthoringContract("crm"));
+    assert.deepEqual(contract.proposalSchema, BRIDGE_PROPOSAL_SCHEMA);
+    assert.equal(contract.environmentRequiredForAuthoring, false);
+    assert.equal(contract.defaultSite, "crm");
+    assert.equal(contract.version, 5);
+    assert.match(contract.capabilities.sensitiveParameterHandling, /credentialBindings/);
+    assert.match(contract.capabilities.sensitiveParameterHandling, /source:'inline'/);
+    assert.deepEqual(prepareBridgeProposal("crm", [], contract.examples.create).proposal, contract.examples.create);
+    assert.deepEqual(prepareBridgeProposal("crm", [], contract.examples.unsupported).proposal.changes, []);
+    assert.equal(contract.capabilities.embeddedExecutionCode, true);
+    assert.match(contract.capabilities.browserDynamicPath, /compute and return path from args/);
+    assert.match(contract.capabilities.requestTarget, /browser preprocess may return a dynamically computed same-origin path/);
+    assert.ok(input.prompt.includes("The definition path is only the default in request.path, not a restriction to one product"));
+    assert.ok(!JSON.stringify(contract.proposalSchema).includes("otherwise fixed paths only"));
+    for (const capability of ["dynamicPathTemplates", "internalSigning", "dynamicHeaders", "sensitiveParameterHandling", "rawRequestBodyMapping", "fullJsonResponseMode"] as const) {
+      assert.match(contract.capabilities[capability], /localHttp/);
+    }
+    assert.deepEqual(data.snapshot.environments, []);
+    assert.ok(input.prompt.includes("Empty environments, an offline browser or missing bindings do not block"));
+    assert.ok(input.prompt.includes("Never ask the user to provide Orchard/Web Bridge configuration syntax"));
+    assert.ok(input.prompt.includes("No environment-to-site mapping is required for authoring"));
+    assert.ok(input.prompt.includes("Do not claim fields:[]"));
+    assert.ok(input.prompt.includes("Act as the implementer, not a configuration questionnaire"));
+    assert.ok(input.prompt.includes("Historical assistant responses may describe obsolete platform limitations"));
+    assert.ok(input.prompt.includes("Classify risk from actual effects"));
+    return { output: proposal(), providerId: provider.id, modelId: input.modelId };
+  };
+  const turn = service.start("crm", request());
+  await until(() => service.list("crm").items[0]?.status !== "running" && service.list("crm").items[0]?.status !== "queued");
+  assert.equal(service.list("crm").items[0].status, "succeeded");
+  service.apply("crm", turn.id);
+  assert.deepEqual(config.tools("crm"), [definition()]);
+  assert.deepEqual(config.environments("crm"), []);
+});
+
+test("Bridge definitions remain environment-independent and reject unsupported execution fields", async context => {
+  const { store } = setup(context);
+  context.after(() => store.close());
+  const config = new WebBridgeConfig(store.root);
+  config.saveApplication({ id: "crm", name: "CRM" });
+  const tool = { ...definition(), site: "legacy-crm-site" };
+  config.saveTool(tool);
+  config.saveEnvironment("crm", { origin: "https://test.example.test" });
+  config.saveEnvironment("crm", { origin: "https://prod.example.test" });
+  config.saveTool({ ...tool, description: "更新说明" });
+  assert.equal(config.tools("crm")[0].site, "legacy-crm-site");
+  assert.equal(config.tools("crm")[0].path, "/api/customers");
+  const original = config.authoringSnapshot("crm");
+  for (const field of ["headers", "signing", "sensitiveParameters", "rawBody", "responseMode", "origin", "environmentId"]) {
+    assert.throws(() => config.saveTool({ ...tool, [field]: "unsupported" }));
+    assert.equal(config.authoringSnapshot("crm").hash, original.hash);
+  }
 });
 
 test("Bridge proposals validate all changes before writing and reject stale snapshots", async context => {

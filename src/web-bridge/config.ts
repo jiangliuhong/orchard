@@ -5,9 +5,14 @@ import { randomUUID } from "node:crypto";
 import { check } from "../domain/errors.js";
 import type { WebBridgeApplication } from "./catalog.js";
 import type { WebBridgeTool } from "./catalog.js";
-import { validateBridgeConfigV1 } from "../migrations/config.js";
+import { validateBridgeConfigV1 } from "./config-validation.js";
 import { canonicalJson, digest } from "../persistence/files.js";
 import { prepareBridgeProposal } from "./authoring.js";
+import { validateStoredHttpTool } from "./execution.js";
+
+function validateExecutions(value: ConfigFile) {
+  for (const tool of Object.values(value.tools)) validateStoredHttpTool(tool);
+}
 
 export interface WebBridgeEnvironment {
   id: string;
@@ -34,10 +39,12 @@ export class WebBridgeConfig {
     const directory = join(dataDir, "config");
     this.path = join(directory, "web-bridge.json");
     this.value = validateBridgeConfigV1(readFileSync(this.path, "utf8")) as unknown as ConfigFile;
+    validateExecutions(this.value);
   }
   /** Called inside the restore barrier after the configuration file is installed. */
   reloadAfterRestore() {
     const value = validateBridgeConfigV1(readFileSync(this.path, "utf8")) as unknown as ConfigFile;
+    validateExecutions(value);
     for (const environments of Object.values(value.environments)) for (const environment of environments) {
       environment.bound = false;
       environment.tabAvailable = false;
@@ -114,7 +121,8 @@ export class WebBridgeConfig {
     return this.coordinator.withWrite(() => {
       const snapshot = this.authoringSnapshot(tool.application);
       const key = `${tool.application}/${tool.toolId}`;
-      const definition = { ...this.value.tools[key], ...tool, enabled: tool.enabled ?? this.toolEnabled(tool.application, tool.toolId) };
+      // This API saves a complete definition: omitted optional execution resets to legacy mode.
+      const definition = { ...tool, enabled: tool.enabled ?? this.toolEnabled(tool.application, tool.toolId) };
       this.applyProposal(tool.application, snapshot.hash, { summary: "保存工具定义", changes: [{ operation: this.value.tools[key] ? "update" : "create", toolId: tool.toolId, definition }] });
       return definition;
     });
