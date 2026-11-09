@@ -103,7 +103,7 @@ test("Bridge authoring supplies its format and capability boundaries without req
     assert.deepEqual(contract.proposalSchema, BRIDGE_PROPOSAL_SCHEMA);
     assert.equal(contract.environmentRequiredForAuthoring, false);
     assert.equal(contract.defaultSite, "crm");
-    assert.equal(contract.version, 5);
+    assert.equal(contract.version, 7);
     assert.match(contract.capabilities.sensitiveParameterHandling, /credentialBindings/);
     assert.match(contract.capabilities.sensitiveParameterHandling, /source:'inline'/);
     assert.deepEqual(prepareBridgeProposal("crm", [], contract.examples.create).proposal, contract.examples.create);

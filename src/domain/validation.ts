@@ -3,6 +3,22 @@ import { check, AppError } from "./errors.js";
 import type { Binding, JsonSchema, Workflow, WorkflowNode } from "./types.js";
 
 const ajv = new Ajv({ strict: true, allErrors: true, allowUnionTypes: true });
+ajv.addKeyword({
+  keyword: "x-ui", schemaType: "object",
+  metaSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      widget: { enum: ["input", "textarea"] },
+      rows: { type: "integer", minimum: 2, maximum: 30 },
+      placeholder: { type: "string", maxLength: 1000 },
+    },
+  },
+  compile: (config, parentSchema) => {
+    if (parentSchema.type !== "string") throw new Error("x-ui 仅支持 string 参数");
+    if (config.rows !== undefined && config.widget !== "textarea") throw new Error("rows 仅适用于 textarea");
+    return () => true;
+  },
+});
 const schemaValue = { anyOf: [{ type: "boolean" }, { type: "object" }] };
 const bindingSchema = {
   $id: "binding",

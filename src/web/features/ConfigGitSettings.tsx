@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
-import { api, pretty, requestId, send } from "../lib/api";
+import { ToastNotice } from "../components/ToastNotice";
+import { RefreshCw, Sparkles } from "lucide-react";
+import { api, pretty, requestId, send, useResource } from "../lib/api";
+import { ConfigGitMessageAgentSettings, type MessageAgentSetting } from "./ConfigGitMessageAgentSettings";
 import { useTheme, type Theme } from "../lib/theme";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { ErrorNotice, Loading } from "../components/common";
 
@@ -137,9 +140,7 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
   const [operation, setOperation] = useState<Operation>();
   const [preview, setPreview] = useState<Preview>();
   const [message, setMessage] = useState("备份配置");
-  const [providerId, setProviderId] = useState("");
-  const [providers, setProviders] = useState<{ id: string; name: string; enabled: boolean }[]>([]);
-  useEffect(() => { if (sync) void api<{ items: { id: string; name: string; enabled: boolean }[] }>("/providers").then(value => setProviders(value.items.filter(p => p.enabled))).catch(e => setError(errorText(e))); }, [sync]);
+  const messageAgent = useResource<MessageAgentSetting>(`${root}/message-agent`);
   const [confirmed, setConfirmed] = useState(false);
   const [confirmation, setConfirmation] = useState<{ title: string; description: string; action: () => Promise<void> }>();
   const mounted = useRef(true);
@@ -238,12 +239,13 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
   const cannotConfirm = !preview || !confirmed || !!preview.nextCursor || preview.noChanges || preview.blockers.length > 0 || preview.diffs.some(d => d.blockingReason) || preview.expiresAt <= Date.now();
   const snapshotBlocked = binding?.snapshotState === "invalid" || binding?.snapshotState === "unsupported";
-  return <section className="config-git-settings" aria-label="Git 配置存储" aria-busy={locked}>
-    <div className="settings-section-heading"><Button variant="outline" size="sm" disabled={busy} onClick={() => void run(reload)}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />刷新状态</Button></div>
-    <div className="config-git-body"><ErrorNotice message={error} />{notice && <p role="status" className="success-note">{notice}</p>}
-      {operation && <div role="status"><p>操作 {operation.operationId} · {operation.phase}</p>{operation.phase === "interrupted" && <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await reload(); })}>核对仓库状态</Button>}{operation.phase === "recovery_required" && <Button disabled={busy} onClick={() => void run(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}))}>重试恢复未完成阶段</Button>}</div>}
+  return <section className={`config-git-settings${sync ? " config-git-sync" : ""}`} aria-label="Git 配置存储" aria-busy={locked}>
+    <div className="settings-section-heading"><span className="field-hint">{sync ? "本地变更" : "管理配置备份仓库及描述生成方式"}</span><Button variant="outline" size={sync ? "icon-sm" : "sm"} aria-label="刷新状态" title="刷新状态" disabled={busy} onClick={() => void run(reload)}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />{!sync && "刷新状态"}</Button></div>
+    <div className="config-git-body"><ErrorNotice message={error || messageAgent.error} /><ToastNotice message={notice} onDismiss={() => setNotice("")} />
+      {operation && <div role="status" className="config-git-operation"><p>{activeOperation ? "正在处理配置，请稍候…" : operation.phase === "completed" ? "操作已完成" : operation.phase === "recovery_required" ? "操作需要恢复" : "操作已结束"}</p><details><summary>操作详情</summary><code>{operation.operationId} · {operation.phase}</code></details>{operation.phase === "interrupted" && <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await reload(); })}>核对仓库状态</Button>}{operation.phase === "recovery_required" && <Button disabled={busy} onClick={() => void run(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}))}>重试恢复未完成阶段</Button>}</div>}
       {binding === undefined && !error && <Loading />}
-      {sync && binding === null && <p>请先在<a href="/settings">设置</a>中配置 Git 仓库。</p>}
+      {!sync && messageAgent.data && <ConfigGitMessageAgentSettings setting={messageAgent.data} onSaved={messageAgent.reload} />}
+      {sync && binding === null && <p>请先在<a href="/settings?section=config-git">设置 → Git 仓库配置</a>中配置仓库。</p>}
       {!sync && binding === null && <fieldset disabled={locked} className="config-git-binding"><legend>绑定远端仓库</legend>
         <label className="field">仓库地址<Input value={remoteUrl} placeholder="git@github.com:team/config.git 或 https://…" onChange={e => { setRemoteUrl(e.target.value); setChecked(undefined); }} /></label>
         <p className="field-hint">复用服务端系统用户的 SSH key/agent 或 Git credential helper。请勿在地址中填写密码或 Token；未知 SSH 主机需先在服务端验证密钥。</p>
@@ -257,26 +259,36 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
         </>}
       </fieldset>}
       {binding && <>
-        <dl className="config-git-repository"><dt>仓库</dt><dd>{binding.remoteUrl}</dd><dt>分支 / remote / 配置目录</dt><dd>{binding.branch} / {binding.remote ?? "origin"} / {binding.configDir}</dd><dt>本地 / 远程 SHA</dt><dd>{status?.localSha ?? "无"} / {status?.remoteSha ?? "未知"}</dd><dt>同步状态</dt><dd>{status ? `领先 ${status.ahead} · 落后 ${status.behind}${status.diverged ? " · 已分叉" : ""}` : "正在读取"}</dd></dl>
-        <p className="field-hint">远端最近观测：{status?.remoteObservedAt ?? "尚未获取"}。本地历史可离线使用；远端状态可能过期。</p>
+        {sync ? <div className="config-git-sync-repository"><span title={binding.remoteUrl}>{binding.remoteUrl}</span><code>{binding.branch}</code><span>{status ? `领先 ${status.ahead} · 落后 ${status.behind}${status.diverged ? " · 已分叉" : ""}` : "正在读取"}</span></div> : <><dl className="config-git-repository"><dt>仓库</dt><dd>{binding.remoteUrl}</dd><dt>分支 / remote / 配置目录</dt><dd>{binding.branch} / {binding.remote ?? "origin"} / {binding.configDir}</dd><dt>本地 / 远程 SHA</dt><dd>{status?.localSha ?? "无"} / {status?.remoteSha ?? "未知"}</dd><dt>同步状态</dt><dd>{status ? `领先 ${status.ahead} · 落后 ${status.behind}${status.diverged ? " · 已分叉" : ""}` : "正在读取"}</dd></dl>
+        <p className="field-hint">远端最近观测：{status?.remoteObservedAt ?? "尚未获取"}。本地历史可离线使用；远端状态可能过期。</p></>}
         {status?.message && <p>{status.message}</p>}
         {!!status?.dirtyPaths.length && <ErrorNotice message={`工作区不干净，请先处理：${status.dirtyPaths.join("、")}`} />}
         {!!status?.pendingCommits?.length && <details><summary>待推送提交（{status.pendingCommits.length}）</summary><pre className="overflow-auto">{status.pendingCommits.join("\n")}</pre></details>}
-        {binding.snapshotState === "empty" || binding.snapshotState === "missing" ? <p>仓库尚无配置快照，请通过左下角“配置同步”进行首次备份。</p> : binding.snapshotState === "valid" ? <p>仓库已有配置快照。通过左下角“配置同步”备份当前变更。</p> : snapshotBlocked ? <ErrorNotice message="配置目录格式无效或版本不兼容，不能覆盖。请修复目录或升级 Orchard。" /> : null}
+        {binding.snapshotState === "empty" || binding.snapshotState === "missing" ? <p className="field-hint">{sync ? "首次备份将创建完整配置快照。" : "仓库尚无配置快照，请通过左下角“配置同步”进行首次备份。"}</p> : binding.snapshotState === "valid" ? !sync && <p className="field-hint">仓库已有配置快照。通过左下角“配置同步”备份当前变更。</p> : snapshotBlocked ? <ErrorNotice message="配置目录格式无效或版本不兼容，不能覆盖。请修复目录或升级 Orchard。" /> : null}
         {!sync && <Button variant="ghost" disabled={locked} onClick={() => setConfirmation({ title: "解除仓库绑定", description: "应用配置、本地副本和未推送提交都会保留。", action: () => mutate("/unbind", {}) })}>解除绑定</Button>}
       </>}
-      {sync && binding && <section className="management-section"><fieldset disabled={locked} className="space-y-3"><legend>本次配置变更</legend>
-        <><label className="field">变更描述<Input value={message} maxLength={4000} onChange={e => { setMessage(e.target.value); invalidate(); }} /></label><div className="actions"><label className="field">生成描述的 Agent<select aria-label="生成描述的 Agent" value={providerId} disabled={locked} onChange={e => setProviderId(e.target.value)}><option value="">选择 Provider（使用默认模型）</option>{providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label><Button variant="outline" disabled={locked || !providerId || !preview || !!preview.nextCursor || preview.noChanges} onClick={() => void run(async () => { const result = await send<{ message: string }>(`${root}/generate-message`, { token: preview!.token, providerId }); setMessage(result.message); setPreview(undefined); await mutate("/commit-preview", { message: result.message, push: true, ...general() }, showPreview); })}>用 Agent 生成描述</Button></div>        <p className="field-hint">备份将创建提交并推送，不会强制覆盖远端。修改描述后请重新生成预览。</p></>
-        <Button disabled={locked || !message.trim() || snapshotBlocked} onClick={() => void createPreview()}>生成提交预览</Button>
-      </fieldset></section>}
-      {sync && preview && <section className="management-section" aria-label="配置差异预览"><h3>确认差异</h3><p>最终范围：{preview.categories.map(c => categories[c]).join("、")} · 有效至 {new Date(preview.expiresAt).toLocaleString()}</p>{preview.sourceSha && <p className="break-all">来源 SHA：{preview.sourceSha}</p>}
+      {sync && preview && <section className="management-section config-git-preview" aria-label="配置差异预览"><h3>配置差异 · {preview.diffs.length}</h3>
         {preview.warnings?.map((warning, i) => <p key={i}>{warning}</p>)}{preview.blockers.map((blocker, i) => <ErrorNotice key={i} message={blocker} />)}
         {(Object.keys(categories) as Category[]).map(category => { const diffs = preview.diffs.filter(d => d.category === category); return diffs.length ? <div key={category}><h4>{categories[category]}</h4>{diffs.map((diff, i) => <details key={`${diff.path}:${i}`} className="my-2"><summary className="break-all">{diff.changeType} · {diff.path} {diff.objectId} {diff.versionId}</summary>{diff.detail && <p>{diff.detail}</p>}{diff.blockingReason && <ErrorNotice message={diff.blockingReason} />}{diff.sensitive ? <p>敏感字段已隐藏，仅显示变化状态。</p> : <div className="grid gap-3 md:grid-cols-2"><div><h5>之前</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{typeof diff.before === "string" ? diff.before : pretty(diff.before)}</pre></div><div><h5>之后</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{typeof diff.after === "string" ? diff.after : pretty(diff.after)}</pre></div></div>}</details>)}</div> : null; })}
         {!!preview.cumulativeDiffs?.length && <details><summary>累计待推送差异（相对已获取远端）</summary>{preview.cumulativeDiffs.map((diff, i) => <details key={i}><summary>{diff.path}</summary><h5>之前</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{diff.sensitive ? "敏感字段已隐藏" : diff.before == null ? "—" : String(diff.before)}</pre><h5>之后</h5><pre className="max-h-96 overflow-auto whitespace-pre-wrap break-all">{diff.sensitive ? "敏感字段已隐藏" : diff.after == null ? "—" : String(diff.after)}</pre></details>)}</details>}
         {preview.nextCursor && <Button disabled={locked} variant="outline" onClick={() => void run(async () => { const page = await api<{ diffs: Diff[]; cumulativeDiffs?: Diff[]; nextCursor?: string }>(`${root}/previews/${encodeURIComponent(preview.token)}/diffs?cursor=${encodeURIComponent(preview.nextCursor!)}`); setPreview(old => old?.token === preview.token ? { ...old, diffs: [...old.diffs, ...page.diffs], cumulativeDiffs: [...(old.cumulativeDiffs ?? []), ...(page.cumulativeDiffs ?? [])], nextCursor: page.nextCursor } : old); })}>加载剩余差异（全部加载后可确认）</Button>}
-        {preview.noChanges ? <p>没有配置变更，无需备份。</p> : <><label className="flex gap-2 my-4"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整变更，确认备份到远端仓库。</label><div className="actions"><Button variant="outline" disabled={locked} onClick={invalidate}>取消预览</Button><Button disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate("/commit", { token: preview.token, ...general() }))}>进行备份（commit + push）</Button></div></>}
+        {preview.noChanges && <p>没有配置变更，无需备份。</p>}
       </section>}
     </div>
+    {sync && binding && <section className="config-git-commit" aria-label="提交信息"><fieldset disabled={locked}>
+      <div className="config-git-message-row">
+        <label className="field" htmlFor="config-git-commit-message">变更描述</label>
+        <Button size="icon-sm" variant="ghost" aria-label="用 Agent 生成描述" title={busy ? "处理中…" : "用 Agent 生成描述"} disabled={locked || !messageAgent.data?.available || !preview || !!preview.nextCursor || preview.noChanges || preview.expiresAt <= Date.now() || preview.blockers.length > 0} onClick={() => void run(async () => {
+          const result = await send<{ message: string }>(`${root}/generate-message`, { token: preview!.token });
+          setMessage(result.message); setPreview(undefined);
+          await mutate("/commit-preview", { message: result.message, push: true, ...general() }, showPreview);
+        })}><Sparkles size={14} className={busy ? "animate-pulse" : ""} /></Button>
+      </div>
+      <Textarea id="config-git-commit-message" value={message} maxLength={4000} placeholder="填写提交信息…" onChange={e => { setMessage(e.target.value); invalidate(); }} />
+      <p className="field-hint">{messageAgent.data?.available ? `使用「${messageAgent.data.name}」生成描述。` : messageAgent.data?.agentConfigId ? messageAgent.data.unavailableReason ?? "生成描述的 Agent 暂不可用。" : "尚未配置生成描述的 Agent，可手动填写。"} <a href="/settings?section=config-git">前往设置</a></p>
+      {preview && !preview.noChanges && <label className="config-git-confirm"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整变更，确认备份到远端仓库。</label>}
+      <div className="config-git-commit-actions"><span className="field-hint">提交并推送到远端</span><div className="actions"><Button size="sm" variant="outline" disabled={locked || !message.trim() || snapshotBlocked} onClick={() => void createPreview()}>生成提交预览</Button><Button size="sm" aria-label="进行备份（commit + push）" disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate("/commit", { token: preview!.token, ...general() }))}>提交并推送</Button></div></div>
+    </fieldset></section>}
     <Dialog open={!!confirmation} onOpenChange={open => { if (!open && !locked) setConfirmation(undefined); }}><DialogContent><DialogHeader><DialogTitle>{confirmation?.title}</DialogTitle><DialogDescription>{confirmation?.description}</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={locked} onClick={() => setConfirmation(undefined)}>取消</Button><Button variant="destructive" disabled={locked} onClick={() => void run(async () => { await confirmation?.action(); setConfirmation(undefined); })}>确认</Button></DialogFooter></DialogContent></Dialog>
   </section>;
 }

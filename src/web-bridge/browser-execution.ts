@@ -5,6 +5,7 @@ import type { JsonSchema } from "../domain/types.js";
 import type { CredentialResolver } from "./execution.js";
 import { validatePath } from "./request-path.js";
 import { CREDENTIAL_INPUTS_SCHEMA, resolveCredentialInputs, type CredentialBindings } from "./credential-inputs.js";
+import { RESPONSE_POSTPROCESS_SCHEMA, type ResponsePostprocess } from "./postprocess.js";
 
 export interface BrowserExecution {
   version: 1;
@@ -13,11 +14,13 @@ export interface BrowserExecution {
   credentialInputs?: string[];
   preprocess: { runtime: "nodejs"; code: string; credentials?: Record<string, { dictionaryId: string; key: string }> };
   response: { mode: "fields" | "fullJson"; maxBytes: number };
+  postprocess?: ResponsePostprocess;
 }
 export const BROWSER_EXECUTION_SCHEMA: JsonSchema = {
   type: "object", additionalProperties: false, required: ["version", "transport", "preprocess", "response"],
   properties: {
     version: { const: 1 }, transport: { const: "browser" }, credentialInputs: CREDENTIAL_INPUTS_SCHEMA,
+    postprocess: RESPONSE_POSTPROCESS_SCHEMA,
     preprocess: { type: "object", additionalProperties: false, required: ["runtime", "code"], properties: {
       runtime: { const: "nodejs" }, code: { type: "string", minLength: 1, maxLength: 65536 },
       credentials: { type: "object", maxProperties: 20, additionalProperties: { type: "object", additionalProperties: false, required: ["dictionaryId", "key"], properties: { dictionaryId: { type: "string", minLength: 1 }, key: { type: "string", minLength: 1 } } } },

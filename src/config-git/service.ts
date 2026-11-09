@@ -92,6 +92,19 @@ export class ConfigGitService {
     this.previews.set(view.token, { view, diffs, cumulative, kind: "commit", preference: { ...prefs, theme }, revision });
     return this.previewPage(view.token);
   }
+  messageAgent() {
+    return this.coordinator.withRead(() => {
+      const saved = readOptional(this.store, "config-git/message-agent.json");
+      return saved ? readJson<{ agentConfigId: string | null }>(this.store, "config-git/message-agent.json") : { agentConfigId: null };
+    });
+  }
+  saveMessageAgent(agentConfigId: string | null) {
+    return this.coordinator.withWrite(() => {
+      const setting = { agentConfigId };
+      durableJson(this.store, "config-git/message-agent.json", setting);
+      return setting;
+    });
+  }
   messageContext(token: string) {
     const entry = this.previews.get(token);
     check(entry?.kind === "commit" && entry.view.expiresAt > Date.now(), "PREVIEW_EXPIRED", "提交预览已过期", 409);

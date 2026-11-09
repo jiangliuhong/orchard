@@ -4,8 +4,8 @@ import { createElement, useState } from "react";
 import { JSDOM } from "jsdom";
 import type { CredentialBindings } from "../src/web-bridge/credential-inputs.js";
 
-const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/web-bridge" });
-for (const key of ["window", "document", "Event", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Node", "navigator"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/web-bridge", pretendToBeVisual: true });
+for (const key of ["window", "document", "Event", "CustomEvent", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "DocumentFragment", "Node", "NodeFilter", "Element", "MutationObserver", "getComputedStyle", "navigator"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
 const { render, screen, fireEvent, cleanup } = await import("@testing-library/react");
 const { BridgeToolForm } = await import("../src/web/features/BridgeToolForm.js");
 const { BridgeCredentialInputs } = await import("../src/web/features/BridgeCredentialInputs.js");
@@ -56,17 +56,43 @@ function CredentialsHarness() {
   });
 }
 
-test("credential panel switches sources independently and discards manual values when changing source", () => {
+test("clearing a definition reference overrides the default and busy fields stay disabled", () => {
+  let latest: CredentialBindings = {};
+  const execution = { version: 1 as const, transport: "browser" as const, preprocess: { runtime: "nodejs" as const, code: "return request", credentials: { ak: { dictionaryId: "default-dict", key: "access" } } }, response: { mode: "fullJson" as const, maxBytes: 1000 } };
+  const view = render(createElement(BridgeCredentialInputs, { execution, value: {}, disabled: false, onChange: value => { latest = value; } }));
+  assert.equal((screen.getByLabelText("ak:") as HTMLInputElement).value, "{{dictionary:default-dict:access}}");
+  fireEvent.click(screen.getByRole("button", { name: "清空字典 ak" }));
+  assert.deepEqual(latest, { ak: { source: "inline", value: "" } });
+  view.rerender(createElement(BridgeCredentialInputs, { execution, value: latest, disabled: true, onChange: () => {} }));
+  assert.equal((screen.getByLabelText("ak:") as HTMLInputElement).readOnly, false);
+  assert.equal((screen.getByLabelText("ak:") as HTMLInputElement).value, "");
+  assert.equal((screen.getByRole("button", { name: "引入字典 ak" }) as HTMLButtonElement).disabled, true);
+});
+
+test("credential picker inserts a read-only reference and clearing restores manual input independently", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => Response.json(String(url).includes("/dictionaries?") ? {
+    items: [{ id: "d1", name: "凭据字典", enabled: true, readiness: "ready" }], nextCursor: null,
+  } : { enabled: true, readiness: "ready", keys: { access: { type: "string", set: true } } });
+  try {
   render(createElement(CredentialsHarness));
-  fireEvent.change(screen.getByLabelText("ak 字典 ID"), { target: { value: "dictionary-id" } });
-  fireEvent.change(screen.getByLabelText("ak 字典键"), { target: { value: "access" } });
-  fireEvent.change(screen.getByLabelText("sk 来源"), { target: { value: "inline" } });
-  const input = screen.getByLabelText("sk 手动值") as HTMLInputElement;
+  const input = screen.getByLabelText("sk:") as HTMLInputElement;
   assert.equal(input.type, "password"); assert.equal(input.autocomplete, "off");
   fireEvent.change(input, { target: { value: "secret" } });
-  assert.equal((screen.getByLabelText("ak 字典 ID") as HTMLInputElement).value, "dictionary-id");
-  fireEvent.change(screen.getByLabelText("sk 来源"), { target: { value: "dictionary" } });
-  assert.equal(screen.queryByLabelText("sk 手动值"), null);
-  fireEvent.change(screen.getByLabelText("sk 来源"), { target: { value: "inline" } });
-  assert.equal((screen.getByLabelText("sk 手动值") as HTMLInputElement).value, "");
+  fireEvent.click(screen.getByRole("button", { name: "引入字典 ak" }));
+  await screen.findByRole("option", { name: "凭据字典" });
+  fireEvent.change(screen.getByLabelText("字典"), { target: { value: "d1" } });
+  await screen.findByRole("option", { name: "access" });
+  fireEvent.change(screen.getByLabelText("Key"), { target: { value: "access" } });
+  fireEvent.click(screen.getByRole("button", { name: "引入" }));
+  const access = screen.getByLabelText("ak:") as HTMLInputElement;
+  assert.equal(access.value, "{{dictionary:d1:access}}");
+  assert.equal(access.readOnly, true);
+  assert.equal(input.value, "secret");
+  fireEvent.click(screen.getByRole("button", { name: "清空字典 ak" }));
+  assert.equal(access.readOnly, false);
+  assert.equal(access.value, "");
+  fireEvent.change(access, { target: { value: "manual-access" } });
+  assert.equal(access.value, "manual-access");
+  } finally { globalThis.fetch = originalFetch; }
 });

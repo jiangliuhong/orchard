@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { EmptyState, ErrorNotice, Loading, PageHeading, Status } from "../components/common";
+import { ToastNotice } from "../components/ToastNotice";
 import type { DictionaryReadiness } from "../../secrets/service.js";
 
 export interface DictionaryListView {
@@ -162,7 +163,7 @@ function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: Dictio
     </div>
     <div className="dictionary-search"><Input aria-label="搜索字典键" placeholder="按键名搜索…" value={query} onChange={event => setQuery(event.target.value)} /><span className="field-hint">{entries.length} / {detail.keyCount} 个键</span></div>
     <ErrorNotice message={error} />
-    {notice && <div className="notice" role="status">{notice}</div>}
+    <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     {pending && <div className="notice error" role="alert">
       <p>移除以下正在被引用的键需要确认：</p>
       <ul>{pending.impacts.map(impact => <li key={impact.key}>键 {impact.key} · {impact.workflows} 个工作流 · {impact.scripts} 个脚本</li>)}</ul>
@@ -254,7 +255,7 @@ function ReEncryptPanel({ detail, onDone }: { detail: DictionaryDetail; onDone: 
   return <section className="panel" aria-label="重新加密">
     <div className="panel-bar"><strong>重新加密</strong><Button variant="outline" size="sm" disabled={busy} onClick={() => void start()}><ShieldCheck size={14} />按活动密钥预览</Button></div>
     <ErrorNotice message={error} />
-    {notice && <div className="notice" role="status">{notice}</div>}
+    <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     <p className="field-hint">旧修订保持原密钥不变；预览后修改字典、切换活动密钥或配置变化都需重新预览。</p>
     {preview && <div className="notice">
       <p>目标密钥 {preview.targetKeyId.slice(0, 8)}…：将重新加密 {preview.willReEncrypt} 个条目，{preview.alreadyMatched} 个已匹配。</p>

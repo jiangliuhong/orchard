@@ -5,6 +5,7 @@ import { ErrorNotice, Loading } from "../components/common";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import type { ScriptDetail } from "./ScriptPages";
+import { ToastNotice } from "../components/ToastNotice";
 
 const CodeDiffEditor = lazy(() => import("./CodeEditor").then(module => ({ default: module.CodeDiffEditor })));
 export function ScriptDiff({ original, modified }: { original: SourceFiles; modified: SourceFiles }) {
@@ -50,6 +51,6 @@ export function ScriptCleanup({ scriptId, onCleaned }: { scriptId: string; onCle
   };
   return <details className="panel script-secondary-panel"><summary>测试数据保留与清理</summary><p className="field-hint">默认保留所有数据，不自动删除。手动清理只处理此脚本的历史测试及无引用产物，每批最多 1000 条；执行中的测试及仍被引用的源码、产物会保留。</p>
     <div className="script-filters"><label>保留天数<Input type="number" min={1} max={3650} value={keepDays} onChange={event => { setKeepDays(Number(event.target.value)); setPreview(undefined); }} /></label><label>至少保留最新记录数<Input type="number" min={1} max={10000} value={keepLatest} onChange={event => { setKeepLatest(Number(event.target.value)); setPreview(undefined); }} /></label><Button variant="outline" disabled={busy} onClick={() => void action(false)}>预览清理范围</Button></div>
-    {preview && <div className="notice warning">将永久删除 {preview.count} 条已完成测试及其无引用产物。<Button variant="destructive" disabled={busy || !preview.count} onClick={() => void action(true)}>确认永久清理</Button></div>}<ErrorNotice message={error} />{message && <p>{message}</p>}
+    {preview && <div className="notice warning">将永久删除 {preview.count} 条已完成测试及其无引用产物。<Button variant="destructive" disabled={busy || !preview.count} onClick={() => void action(true)}>确认永久清理</Button></div>}<ErrorNotice message={error} /><ToastNotice message={message} onDismiss={() => setMessage("")} />
   </details>;
 }

@@ -1,6 +1,6 @@
 # Node.js 预处理与浏览器执行
 
-不变更数据库。工具可使用 `execution.transport: "browser"`，旧工具及 localHttp 保持原行为。Agent 契约版本为 4，支持生成下述配置。
+不变更数据库。工具可使用 `execution.transport: "browser"`，旧工具及 localHttp 保持原行为。Agent 契约版本为 7，支持生成下述配置。
 
 ```json
 {
@@ -21,6 +21,48 @@
 工具仍需完整的 path、method、parameters 等定义。上述脚本要求 body 为原始字符串，productNo/apiCode 为字符串；应在参数 Schema 中声明。不进行 HTTP Date 校时。签名顺序为 productNo + nonce + apiCode + timestamp + sk + body，无分隔符、小写 MD5；这里 nonce 为随机 16 字节 hex，实际协议不同应调整。
 
 ## 运行
+
+### 参数输入配置
+
+测试页只按工具 `parameters` 的 JSON Schema 生成表单，不保留整段参数 JSON 编辑框或旧模式切换。根节点必须声明 `type: "object"`，各字段在 `properties` 中声明明确类型。例如：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "productNo": { "type": "string", "title": "产品编号" },
+    "content": {
+      "type": "string",
+      "title": "请求内容",
+      "x-ui": { "widget": "textarea", "rows": 7, "placeholder": "请输入请求内容" }
+    }
+  },
+  "required": ["productNo"],
+  "additionalProperties": false
+}
+```
+
+字符串默认使用单行输入框，只有显式指定 `x-ui.widget: "textarea"` 才使用多行。`x-ui` 仅适用于字符串；支持 widget（input/textarea）、placeholder 和 textarea 专用 rows（2–30）。title 用于标签，description 用于说明，required 表示必填。enum 使用保留值类型的下拉框，number/integer 使用数字输入框，boolean 使用是/否选择，object/array 使用字段级 JSON 输入框。
+
+可选字段清空后不提交。字段类型、必填及其他 Schema 约束不满足时禁止执行。根级组合 Schema 和 `$ref`、没有明确支持类型的字段会提示修改工具定义，不回退至旧编辑器。textarea 值保持字符串，不自动解析为对象。参数控件配置不涉及数据库变更。
+
+### 响应后处理
+
+browser 和 localHttp 均支持在工具的“执行配置（JSON）”中添加可选的 `postprocess`：
+
+```json
+{
+  "postprocess": {
+    "runtime": "nodejs",
+    "timeoutMs": 1000,
+    "code": "return { items: response.data.list, total: response.data.total };"
+  }
+}
+```
+
+此片段合并到现有 `execution`，保留 version、transport、response 等配置。脚本接收 `response` 和 `args`，作为 async 函数体执行，使用 `return` 返回 JSON 值；不提供 credentials、request 或预处理局部变量，不使用顶层 import 或 console.log。提取嵌套上游字段时使用 `response.mode: "fullJson"`。
+
+处理顺序为原始响应大小与凭据回显检查、fields/fullJson 筛选、Node.js 后处理、输出大小与凭据回显检查。后处理结果是测试、Agent 和工作流收到的最终值。未配置时保持原行为。默认后处理超时 1000ms，可配置 1–10000ms，并受工具调用剩余时间约束；输出受 response.maxBytes 限制。脚本错误、无效 JSON、超时或取消都会使调用失败，不回退为原始结果。独立进程使用与预处理相同的权限和内存限制，只执行已审阅的可信代码，不构成恶意代码安全沙箱，也不保证网络隔离。
 
 1. 重新加载浏览器扩展以获得 scripting 和站点权限请求能力。
 2. 打开目标 HTTPS 业务页签，手动完成网关登录。在扩展弹窗点击“授权当前站点桥接”。权限按站点授予，不自动请求所有站点。

@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { AppError, check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import type { JsonSchema } from "../domain/types.js";
+import { postprocessResponse, RESPONSE_POSTPROCESS_SCHEMA, type ResponsePostprocess } from "./postprocess.js";
 
 /** Explicit opt-in: local HTTP, not browser cookies or page execution. */
 export interface BridgeHttpExecution {
@@ -26,6 +27,7 @@ export interface BridgeHttpExecution {
     headers: { ak: string; nonce: string; timestamp: string; signature: string };
   };
   response: { mode: "fields" | "fullJson"; maxBytes: number };
+  postprocess?: ResponsePostprocess;
 }
 const argument = { type: "string", pattern: "^[a-zA-Z][a-zA-Z0-9_]{0,99}$" };
 const header = { type: "string", pattern: "^[A-Za-z][A-Za-z0-9-]{0,99}$" };
@@ -33,6 +35,7 @@ const LOCAL_HTTP_SCHEMA: JsonSchema = {
   type: "object", additionalProperties: false, required: ["version", "transport", "response"],
   properties: {
     version: { const: 1 }, transport: { const: "localHttp" },
+    postprocess: RESPONSE_POSTPROCESS_SCHEMA,
     body: { type: "object", additionalProperties: false, required: ["mode", "argument"], properties: { mode: { enum: ["rawUtf8", "json"] }, argument } },
     signing: {
       type: "object", additionalProperties: false,
@@ -178,9 +181,10 @@ export async function executeHttpTool(tool: HttpTool, origin: string, args: Reco
     // Refuse upstream credential echoes before results can enter workflow history/logs.
     const serialized = JSON.stringify(result);
     check(!secrets.some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1, -1))), "SENSITIVE_RESPONSE", "上游响应包含鉴权信息，已阻止返回");
-    if (execution.response.mode === "fullJson" || result === null) return result;
+    if (execution.response.mode === "fullJson" || result === null) return await postprocessResponse(execution.postprocess, result, args, signal, execution.response.maxBytes, secrets);
     check(result !== null && typeof result === "object" && !Array.isArray(result), "INVALID_RESPONSE", "字段白名单要求对象响应");
-    return Object.fromEntries(tool.fields.filter(field => Object.hasOwn(result, field)).map(field => [field, (result as Record<string, unknown>)[field]]));
+    const selected = Object.fromEntries(tool.fields.filter(field => Object.hasOwn(result, field)).map(field => [field, (result as Record<string, unknown>)[field]]));
+    return await postprocessResponse(execution.postprocess, selected, args, signal, execution.response.maxBytes, secrets);
   } catch (error) {
     if (signal.aborted) throw signal.reason?.name === "TimeoutError" ? new AppError("HTTP_TIMEOUT", "HTTP 调用超时") : new AppError("CANCELLED", "HTTP 调用已取消");
     if (error instanceof AppError) throw error;

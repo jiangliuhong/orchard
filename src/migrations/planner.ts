@@ -30,7 +30,8 @@ export function validateLedger(root:string, versions:{database:number;webBridge:
   if(ledger.baseline.applicationId!==1331110449||!versionsValid(ledger.baseline))throw new MigrationError('LEDGER_MISMATCH');
   let previous={database:ledger.baseline.database,webBridge:ledger.baseline.webBridge};
   for(const job of ledger.completed){
-    if(canonical(previous)!==canonical(job.source))throw new MigrationError('LEDGER_MISMATCH');
+    const compatibleSource={...previous,webBridge:previous.webBridge===null&&job.source.webBridge===1?1:previous.webBridge};
+    if(canonical(compatibleSource)!==canonical(job.source))throw new MigrationError('LEDGER_MISMATCH');
     if(!versionsValid(job.target)||job.target.database<previous.database||job.target.webBridge!==1)throw new MigrationError('LEDGER_MISMATCH');
     const expected=declarations.filter(d=>d.kind==='database'?d.from>=previous.database&&d.to<=job.target.database:previous.webBridge===0).map(d=>({id:d.id,checksum:d.checksum}));
     if(!expected.length||canonical(expected)!==canonical(job.migrations.map(({id,checksum})=>({id,checksum}))))throw new MigrationError('LEDGER_MISMATCH');

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { JSDOM } from "jsdom";
 
-const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/", pretendToBeVisual: true });
 // Radix Select 等组件依赖完整的 DOM 全局；镜像 JSDOM window 上缺失的属性。
 for (const key of Object.getOwnPropertyNames(dom.window)) {
   if (!(key in globalThis)) {

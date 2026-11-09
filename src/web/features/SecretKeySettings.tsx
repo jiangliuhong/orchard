@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ToastNotice } from "../components/ToastNotice";
 import { AlertTriangle, Download, KeyRound, LockKeyhole, PlusCircle, ShieldCheck, Upload } from "lucide-react";
 import { send, useCommandKey, useResource } from "../lib/api";
 import { Button } from "../components/ui/button";
@@ -87,7 +88,7 @@ export function SecretKeySettings() {
       <span className="secret-key-generation">代次 {status.generation}{status.readOnly ? " · 存储只读" : ""}</span>
     </header>
     <ErrorNotice message={actionError} />
-    {notice && <div className="notice" role="status">{notice}</div>}
+    <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     <div className="secret-key-overview" aria-label="密钥环状态">
       <div><span>活动密钥</span><strong><code>{status.activeKeyId ? `${status.activeKeyId.slice(0, 8)}…` : "未设置"}</code></strong></div>
       <div><span>密钥总数</span><strong>{status.keys.length}<small>把</small></strong></div>

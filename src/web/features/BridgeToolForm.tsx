@@ -45,7 +45,8 @@ export function BridgeToolForm({ value, existing, disabled, onChange, onInvalidC
     ] as const).map(([key, label, text]) => <details key={key} className="bridge-json-section">
       <summary>{label}</summary>
       <Textarea id={`bridge-tool-${key}`} aria-label={label} className="font-mono" rows={key === "fields" ? 3 : 6} spellCheck={false} value={text} onChange={event => jsonField(key, event.target.value)} />
-      {key === "execution" && <p className="field-hint">localHttp 不复用浏览器 Cookie；凭据只填写加密字典引用，勿填写真实 AK/SK。browser 使用运行环境绑定的已登录页签，需在插件授权站点。调用凭据可用 credentialInputs 声明；完整返回设置 response.mode 为 fullJson。</p>}
+      {key === "parameters" && <p className="field-hint">测试输入由此 JSON Schema 生成。根节点声明 type: object 和 properties；string 默认单行，多行需配置 {"\"x-ui\": { \"widget\": \"textarea\", \"rows\": 7 }"}。使用 title、description 和 required 配置标签、说明与必填项。</p>}
+      {key === "execution" && <p className="field-hint">localHttp 不复用浏览器 Cookie；凭据只填写加密字典引用，勿填写真实 AK/SK。browser 使用运行环境绑定的已登录页签，需在插件授权站点。调用凭据可用 credentialInputs 声明；完整返回设置 response.mode 为 fullJson。两种模式均可配置 postprocess: {"{ runtime: \"nodejs\", code: \"return response;\", timeoutMs: 1000 }"}，使用 response 和 args 处理筛选后的结果。</p>}
     </details>)}
     <ErrorNotice message={error} />
   </fieldset>;

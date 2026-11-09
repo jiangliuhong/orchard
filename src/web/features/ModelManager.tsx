@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { ToastNotice } from "../components/ToastNotice";
 import { CheckCircle2, ChevronRight, Plus, RefreshCw, Search, Square, Trash2 } from "lucide-react";
 import type { Model, ModelVerification, ProviderView } from "../../domain/types.js";
 import { isModelEnabled } from "../../domain/models.js";
@@ -113,7 +114,7 @@ export function ModelManager({ provider, disabled, onUpdated }: {
       </div>
       <div className="models-summary"><span>已启用 {enabledCount} / {models.length}</span><span>设置即时保存</span></div>
       <ErrorNotice message={error} />
-      {notice && <p role="status" className="models-notice">{notice}</p>}
+      <ToastNotice message={notice} onDismiss={() => setNotice("")} />
       <div className="models-list" role="list" aria-label={`${provider.name} 模型列表`}>
         {filtered.length ? filtered.map(model => {
           const verification = verifications.get(model.id), verifying = busy === `verify:${model.id}`;

@@ -137,7 +137,8 @@ test("HTTP browser channel executes reviewed actions only after confirmation, is
   const headers = { origin, "x-orchard-bridge-token": token };
   bridge.saveEnvironment("crm", { origin: "https://gateway.test", profileId: "work" });
   bridge.httpDependencies.resolveCredential = resolver;
-  bridge.saveTool({ toolId: "outbound", application: "crm", site: "crm", description: "Outbound", ...defaults, method: "POST", parameters: { type: "object" }, fields: [], risk: "execute", approval: "user", timeoutMs: 5000, catalogVersion: "1", enabled: true, execution });
+  bridge.saveTool({ toolId: "outbound", application: "crm", site: "crm", description: "Outbound", ...defaults, method: "POST", parameters: { type: "object" }, fields: [], risk: "execute", approval: "user", timeoutMs: 5000, catalogVersion: "1", enabled: true,
+    execution: { ...execution, postprocess: { runtime: "nodejs", code: "return {items:response,product:args.productNo};" } } });
   assert.equal(new WebBridgeConfig(store.root).tools("crm")[0].execution?.transport, "browser");
   const payload = { application: "crm", tool: "outbound", args: { productNo: "p", apiCode: "outbound", body: "{}" } };
   const refused = await app.inject({ method: "POST", url: "/api/web-bridge/calls", payload });
@@ -159,6 +160,6 @@ test("HTTP browser channel executes reviewed actions only after confirmation, is
     assert.equal(completed.statusCode, 200);
     const result = await responsePromise;
     if (echo) { assert.equal(result.json().code, "SENSITIVE_RESPONSE"); assert.ok(!result.body.includes("secret-key")); }
-    else assert.deepEqual(result.json(), [1, null, { ok: true }]);
+    else assert.deepEqual(result.json(), { items: [1, null, { ok: true }], product: "p" });
   }
 });

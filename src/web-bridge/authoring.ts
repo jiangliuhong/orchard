@@ -25,7 +25,7 @@ export const BRIDGE_PROPOSAL_SCHEMA: JsonSchema = {
             toolId: { type: "string" }, application: { type: "string" },
             site: { type: "string", description: "Legacy logical site identifier, not an origin or environment ID. For new tools use the current application ID; preserve existing values on updates." },
             description: { type: "string" },
-            parameters: { type: "object", description: "JSON Schema for argument validation only; does not implement signing, secret storage, headers or request body mapping." },
+            parameters: { type: "object", description: "JSON Schema for argument validation and test inputs. Declare type:object with properties and required. String fields optionally use x-ui:{widget:'input'|'textarea',rows?,placeholder?}. Does not implement signing, secrets or request mapping." },
             path: { type: "string", pattern: "^/[^/]", description: "Same-origin absolute pathname without domain, query or fragment. localHttp supports {argument} placeholders. For browser, this field is a fixed request default; preprocess may return a different dynamically computed same-origin pathname using args. Legacy tools use fixed paths. Independent of environment configuration." }, method: { enum: [...BRIDGE_HTTP_METHODS] },
             execution: BRIDGE_HTTP_SCHEMA,
             fields: { type: "array", items: { type: "string" }, description: "Response field allowlist. An empty list or wildcard must not be assumed to return full JSON." },
@@ -41,6 +41,9 @@ export const BRIDGE_PROPOSAL_SCHEMA: JsonSchema = {
 
 /** Trusted platform guidance, kept separate from user requests and snapshot data. */
 export const BRIDGE_AUTHORING_GUIDANCE = [
+  "Both browser and localHttp support optional execution.postprocess:{runtime:'nodejs',code,timeoutMs:1000}. The function body receives response (after fields/fullJson selection) and args, uses return, and must produce JSON-serializable data. Use fullJson when extracting nested upstream data. It runs in a separate Node.js process with permission restrictions, no supplied credentials, a default 1000ms timeout (configurable 1–10000ms), and output bounded by response.maxBytes. Errors fail the call; sensitive credential echoes are rejected before and after transformation. Do not use imports in the function body or assume access to preprocess variables.",
+  "The protected browser test credential UI shows one input per declared credential. Users may type a call-local secret or choose an encrypted dictionary and key through an icon button. Dictionary references appear as read-only {{dictionary:dictionaryId:key}} display tokens and may be cleared to restore manual input. These tokens are UI display only: API callers must send structured credentialBindings, never the token as an actual credential or argument.",
+  "The test argument UI is generated exclusively from parameters JSON Schema; no legacy whole-argument JSON editor or UI mode switch remains. Declare root type:'object' with properties; each field needs an explicit type. string defaults to a single-line input. Only string fields may use 'x-ui':{widget:'textarea',rows:7,placeholder:'...'} for multiline text; widget:'input' is also supported. rows must be 2–30 and requires widget:'textarea'. title labels the field, description provides help, required marks mandatory fields. enum renders a typed select; number/integer use numeric inputs; boolean uses a true/false select; object/array use field-level JSON editors. Root oneOf/anyOf/allOf/$ref and fields without supported explicit types cannot be tested in the form: expand them into concrete properties. Empty optional inputs are omitted. Values remain typed, textarea strings are not parsed into objects. Never put credentials in ordinary parameters.",
   "Tool authoring and execution readiness are separate. Empty environments, an offline browser or missing bindings do not block creating or updating a tool definition when endpoint evidence is sufficient. Mention that testing/execution is not ready instead.",
   "Environment origin belongs to runtime configuration, never to a tool definition. Define only a same-origin path; do not hardcode domains or invent origin templates, environmentId arguments or site-to-environment mappings.",
   "site is a legacy logical identifier, not an environment ID or domain. For new tools set site to the current application ID; preserve an existing tool's site on update unless the user explicitly requests a supported change. No environment-to-site mapping is required for authoring.",
@@ -60,7 +63,7 @@ export const BRIDGE_AUTHORING_GUIDANCE = [
 
 export function bridgeAuthoringContract(application: string) {
   return {
-    version: 5,
+    version: 7,
     scope: "Tool definition proposals only; application and environment management are outside this Agent's scope.",
     environmentRequiredForAuthoring: false,
     defaultSite: application,
@@ -83,10 +86,12 @@ export function bridgeAuthoringContract(application: string) {
     },
     capabilities: {
       argumentValidation: "JSON Schema",
+      argumentInputs: "Schema-only form: root type:object and properties; string is single-line unless x-ui.widget=textarea (rows 2–30). title/description/required, typed enum, number/integer, boolean, field-level object/array JSON editors. No whole-argument JSON input or legacy mode.",
       methods: [...BRIDGE_HTTP_METHODS],
       requestTarget: "Same-origin pathname; origin is not part of the tool definition. localHttp expands {argument} placeholders; browser preprocess may return a dynamically computed same-origin path using args, overriding the fixed definition default.",
       responseSelection: "Legacy: explicit field allowlist; localHttp and browser: fields or fullJson",
       embeddedExecutionCode: true,
+      responsePostprocess: "browser and localHttp: optional execution.postprocess {runtime:'nodejs',code,timeoutMs?}; response and args are available; return JSON; runs after fields/fullJson selection, default 1000ms, max 10000ms, output bounded by response.maxBytes and checked for credential echoes.",
       dynamicPathTemplates: "localHttp execution only: {argument} path segments. Browser uses preprocess code instead of template expansion.",
       browserDynamicPath: "browser preprocess may compute and return path from args, including productNo; definition.path is a fixed default, not a fixed-product restriction. Same-origin absolute pathname only; no query, fragment, traversal or encoded separators. Method cannot change.",
       internalSigning: "localHttp declarative MD5; browser Node.js preprocess with node:crypto, args, credentials, request",

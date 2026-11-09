@@ -15,7 +15,7 @@ import { FileStore } from '../src/persistence/files.js';
 import { declarations, currentVersion } from '../src/migrations/frozen.js';
 import { questions as testQuestions } from './fixtures/migrations/question-migration.js';
 import { questionActive } from '../src/migrations/questions.js';
-import { source, plan, validateAnswers, resolvePlan } from '../src/migrations/planner.js';
+import { source, plan, validateLedger, validateAnswers, resolvePlan } from '../src/migrations/planner.js';
 import { preview } from '../src/migrations/preview.js';
 import { execute, recoverJobs, initializeData, restore, baseline } from '../src/migrations/runner.js';
 import { defaultBridgeConfig } from '../src/migrations/config.js';
@@ -140,6 +140,24 @@ test('v6 release ledgers keep their original migration identities when extending
  const updated=readJson<Ledger>(safe(root,'migrations/ledger.json'));
  assert.deepEqual(updated.completed[0],ledger.completed[0]);assert.equal(updated.completed.length,2);
  assert.equal(plan(root).steps.length,0);assert.equal(source(root).database,9);
+});
+test('ledger accepts default config initialization between baseline and migration without rewriting history',async t=>{
+ const root=fixture(t,8,null);
+ baseline(root);
+ const ledgerPath=safe(root,'migrations/ledger.json'),before=readFileSync(ledgerPath);
+ writeJson(safe(root,'config/web-bridge.json'),defaultBridgeConfig());
+ const job=execute(root,accept(root));assert.equal(job.phase,'committed',JSON.stringify(job.error));
+ const committed=readFileSync(ledgerPath),ledger=readJson<Ledger>(ledgerPath);
+ assert.deepEqual(ledger.baseline,JSON.parse(before.toString()).baseline);
+ assert.equal(ledger.baseline.webBridge,null);assert.equal(ledger.completed[0].source.webBridge,1);
+ assert.equal(plan(root).steps.length,0);
+ const instance=await boot(root,async()=>{});assert.equal(instance.bootstrap.ready,true);
+ assert.deepEqual(readFileSync(ledgerPath),committed);
+ for(const invalidSource of [{database:7,webBridge:1},{database:8,webBridge:0},{database:9,webBridge:1}]){
+  writeJson(ledgerPath,{...ledger,completed:[{...ledger.completed[0],source:invalidSource}]});
+  assert.throws(()=>validateLedger(root,source(root)),{code:'LEDGER_MISMATCH'});
+ }
+ writeJson(ledgerPath,ledger);
 });
 test('M03 old, mixed, unknown and nonempty incomplete directories are blocked without replacing source files',async t=>{
  for(const kind of ['old','mixed','unknown','incomplete']){

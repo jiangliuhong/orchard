@@ -175,6 +175,8 @@ summary { cursor: pointer; }
 .sidebar-nav { display: grid; gap: 6px; }
 .sidebar-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px; padding: 9px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--control-fg); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
 .sidebar-link svg { flex-shrink: 0; }
+/* Match Settings2's visual bounds while keeping the shared icon slot and label alignment. */
+.sidebar-sync-icon { transform: scale(0.9); }
 .sidebar-link:hover, .sidebar-submenu a:hover { color: var(--foreground); background: var(--pill-hover); }
 .sidebar-link.active, .sidebar-submenu a.active { background: var(--pill); color: var(--foreground); font-weight: 600; }
 .sidebar-workflows.is-current > .sidebar-group { color: var(--foreground); }
@@ -331,6 +333,14 @@ summary { cursor: pointer; }
 .notice.error svg { flex-shrink: 0; margin-top: 2px; }
 .notice.warning { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
 .notice.success, .success-note { color: var(--success); }
+.operation-toast-viewport { position: fixed; right: 20px; bottom: 20px; z-index: 100; display: flex; flex-direction: column; gap: 8px; width: 380px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); margin: 0; padding: 0; list-style: none; outline: none; pointer-events: none; }
+.operation-toast { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); color: var(--foreground); box-shadow: 0 4px 18px #0002; font-size: 13px; line-height: 1.6; pointer-events: auto; }
+.operation-toast-icon { flex-shrink: 0; margin-top: 3px; color: var(--text-secondary); }
+.operation-toast-message { flex: 1; min-width: 0; max-height: calc(100dvh - 100px); overflow: auto; overflow-wrap: anywhere; white-space: pre-wrap; }
+.operation-toast-close { display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.operation-toast-close:hover { background: var(--pill-hover); }
+.operation-toast-close:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.operation-toast[data-swipe="end"] { opacity: 0; }
 .status { font-size: 11px; font-weight: 400; gap: 6px; padding: 2px 7px; color: var(--muted-foreground); background: var(--pill); border: 0; }
 .status-running, .status-queued, .status-cancel_requested { color: var(--warning); background: var(--warning-soft); }
 .status-succeeded, .status-published { color: var(--success); background: var(--success-soft); }
@@ -647,9 +657,46 @@ summary { cursor: pointer; }
 .web-bridge-profile-list dd { margin: 0; overflow-wrap: anywhere; }
 .web-bridge-tool-dialog { width: min(720px, calc(100vw - 32px)); max-height: min(620px, calc(100dvh - 64px)); overflow-y: auto; }
 .web-bridge-test-output { min-height: 70px; max-height: 220px; overflow: auto; padding: 9px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-2); color: var(--muted-foreground); font-size: 11px; }
-.config-sync-dialog { width: min(900px, calc(100vw - 32px)); max-width: 900px; max-height: calc(100dvh - 48px); overflow-y: auto; }
-.config-sync-dialog .config-git-repository { font-size: 12px; }
-.config-sync-dialog select { max-width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); color: inherit; }
+[data-slot=dialog-content].config-sync-dialog { display: flex; flex-direction: column; width: min(860px, calc(100vw - 32px)); max-width: 860px; height: min(720px, calc(100dvh - 48px)); max-height: calc(100dvh - 48px); gap: 0; padding: 0; overflow: hidden; border-radius: 8px; font-size: 13px; }
+.config-sync-dialog > [data-slot=dialog-header] { flex: none; gap: 8px; padding: 18px 44px 16px 20px; border-bottom: 1px solid var(--border-soft); text-align: left; }
+.config-sync-dialog [data-slot=dialog-title] { font-size: 15px; line-height: 1.4; }
+.config-sync-dialog [data-slot=dialog-description] { font-size: 12px; line-height: 1.6; }
+.config-sync-dialog > .config-git-settings { display: flex; flex: 1; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
+.config-git-sync .settings-section-heading { flex: none; padding: 8px 20px; margin: 0; border-bottom: 1px solid var(--border-soft); }
+.config-git-sync .config-git-body { display: flex; flex: 1; flex-direction: column; min-height: 0; gap: 12px; padding: 12px 20px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.config-git-sync-repository { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; color: var(--text-secondary); font-size: 11px; }
+.config-git-sync-repository > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.config-git-commit { flex: none; min-width: 0; padding: 10px 20px 16px; border-top: 1px solid var(--border-soft); }
+.config-git-commit fieldset { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.config-git-commit .field, .config-git-commit .field-hint { margin: 0; font-size: 12px; }
+.config-git-commit .field-hint { color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.config-git-commit [data-slot=textarea] { field-sizing: fixed; height: 88px; min-height: 0; resize: none; overflow-y: auto; font-family: var(--font-mono, monospace); }
+.config-git-commit .config-git-message-row { flex-direction: row; align-items: center; justify-content: space-between; }
+.config-git-commit-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.config-git-commit .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.config-git-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; }
+.config-git-confirm input { flex: none; margin-top: 3px; }
+.config-git-sync .config-git-repository { padding: 12px; gap: 6px 16px; font-size: 12px; line-height: 1.6; }
+.config-git-operation { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; color: var(--text-secondary); }
+.config-git-operation p { margin: 0; }
+.config-git-operation details { font-size: 11px; overflow-wrap: anywhere; }
+.config-git-message-row, .config-git-agent-setting-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.config-git-message-row > .field, .config-git-agent-setting-row > .field { flex: 1; min-width: 0; }
+.config-git-message-row > button, .config-git-agent-setting-row > button { flex-shrink: 0; }
+.config-git-message-agent { max-width: 720px; }
+.config-git-message-agent > div:first-child { display: grid; gap: 6px; }
+.config-git-preview-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.config-git-sync .config-git-changes { padding-bottom: 16px; }
+.config-git-sync .config-git-body legend { margin-bottom: 10px; }
+.config-git-preview > p { margin: 0; color: var(--text-secondary); }
+.config-git-preview pre { padding: 8px; border-radius: 4px; background: var(--surface-2); font-size: 11px; }
+@media (max-width: 600px) {
+  [data-slot=dialog-content].config-sync-dialog { width: calc(100vw - 16px); height: min(720px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); }
+  .config-sync-dialog > [data-slot=dialog-header] { padding-left: 14px; }
+  .config-git-sync .settings-section-heading, .config-git-sync .config-git-body, .config-git-commit { padding-left: 14px; padding-right: 14px; }
+  .config-git-message-row, .config-git-agent-setting-row { align-items: stretch; flex-direction: column; }
+  .config-git-message-row > button, .config-git-agent-setting-row > button { align-self: flex-start; }
+}
 .config-git-settings { min-width: 0; }
 .config-git-settings .settings-section-heading { flex-wrap: wrap; }
 .config-git-settings h2, .config-git-settings h3 { display: flex; align-items: center; gap: 7px; }
@@ -796,6 +843,28 @@ summary { cursor: pointer; }
 .bridge-tool-form > label { padding-top: 6px; font-size: 12px; color: var(--muted-foreground); }
 .bridge-tool-form > select { border: 1px solid var(--border); border-radius: 6px; padding: 7px; background: var(--card); color: var(--foreground); }
 .bridge-tool-form > .notice { grid-column: 1 / -1; }
+.bridge-parameter-inputs, .bridge-credential-inputs { display: flex; flex-direction: column; gap: 12px; border: 0; margin: 0; padding: 10px 0 0; min-width: 0; }
+.bridge-parameter-inputs > legend, .bridge-credential-inputs > legend { padding: 0; font-size: 12px; font-weight: 600; }
+.bridge-parameter-row, .bridge-credential-row { display: grid; grid-template-columns: var(--bridge-test-label-width, 112px) minmax(0, 1fr); align-items: start; gap: 12px; min-width: 0; }
+.bridge-parameter-row > label, .bridge-credential-row > label { padding-top: 7px; font-size: 12px; line-height: 18px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.bridge-parameter-control { min-width: 0; }
+.bridge-parameter-control > input { height: 32px; padding: 5px 9px; font-size: 13px; border-radius: 5px; box-shadow: none; }
+.bridge-parameter-control select { width: 100%; height: 32px; min-width: 0; padding: 5px 9px; border: 1px solid var(--border); border-radius: 5px; background: var(--card); color: var(--foreground); font: inherit; font-size: 13px; }
+.bridge-parameter-control select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.bridge-parameter-control textarea { field-sizing: fixed; resize: vertical; min-height: 80px; max-height: 320px; padding: 8px 10px; overflow: auto; font-family: var(--font-code); font-size: 12px; line-height: 18px; border-radius: 5px; box-shadow: none; }
+.bridge-parameter-control .field-hint { margin: 5px 0 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.bridge-parameter-control [role="alert"], .bridge-parameter-inputs > [role="alert"] { color: var(--danger); }
+.bridge-credential-inputs > .field-hint { margin: 0; font-size: 11px; line-height: 1.6; }
+.bridge-credential-control { display: flex; align-items: center; min-width: 0; height: 32px; border: 1px solid var(--border); border-radius: 5px; background: var(--card); }
+.bridge-credential-control:focus-within { border-color: var(--ring); outline: 2px solid var(--primary-soft); }
+.bridge-credential-control > input { flex: 1; min-width: 0; height: 30px; padding: 5px 9px; font-size: 13px; border: 0; background: transparent; box-shadow: none; outline: none; }
+.bridge-credential-control > input:focus-visible { box-shadow: none; }
+.bridge-credential-control > button { width: 26px; height: 26px; margin-right: 2px; border-radius: 3px; color: var(--control-fg); }
+.bridge-credential-control.is-reference { background: var(--surface-2); }
+.bridge-credential-control > .bridge-credential-reference { color: var(--muted-foreground); font-family: var(--font-code); font-size: 12px; cursor: default; }
+.bridge-credential-inputs:disabled .bridge-credential-control { opacity: .6; }
+.bridge-credential-dialog select { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--foreground); font: inherit; }
+.bridge-credential-dialog { max-height: calc(100dvh - 32px); overflow-y: auto; }
 .bridge-form-hint, .bridge-json-section { grid-column: 1 / -1; min-width: 0; }
 .bridge-json-section { border-top: 1px solid var(--border); padding-top: 8px; }
 .bridge-json-section > summary { cursor: pointer; font-size: 12px; color: var(--muted-foreground); padding: 4px 0; }
@@ -808,18 +877,26 @@ summary { cursor: pointer; }
 .bridge-environment p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 11px; }
 .bridge-environment strong { overflow-wrap: anywhere; }
 .bridge-test { min-width: 0; }
-.bridge-test-input { display: flex; flex-direction: column; min-width: 0; gap: 9px; }
+.bridge-test-input { display: flex; flex-direction: column; min-width: 0; gap: 12px; container-type: inline-size; container-name: bridge-test-form; }
+.bridge-test-input > .bridge-parameter-inputs, .bridge-test-input > .bridge-credential-inputs { margin-top: 4px; }
+.bridge-test-input > .bridge-credential-inputs + .bridge-parameter-inputs { margin-top: 8px; }
 .bridge-test-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
 .bridge-test-heading h3 { margin: 0; font-size: 12px; font-weight: 600; }
 .bridge-test-heading > span { color: var(--muted-foreground); font-size: 11px; }
 .bridge-test-input > .field-hint { margin: 0; line-height: 1.6; }
 .bridge-test-input > .field { margin: 4px 0 0; font-size: 12px; }
 .bridge-test-input > select { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--card); color: var(--foreground); font: inherit; }
-.bridge-test-input > textarea { field-sizing: fixed; min-height: 140px; max-height: 360px; resize: vertical; overflow: auto; font-family: var(--font-code); font-size: 12px; line-height: 1.7; tab-size: 2; }
 .bridge-test-actions { flex-wrap: wrap; justify-content: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--border-soft); }
 .bridge-test-response { display: flex; flex-direction: column; min-width: 0; gap: 10px; }
 .bridge-test-result { margin: 0; min-height: 160px; max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-2); font-family: var(--font-code); font-size: 12px; line-height: 1.7; }
 .bridge-test-result.is-empty { color: var(--muted-foreground); }
+@container bridge-test-form (max-width: 420px) {
+  .bridge-parameter-row, .bridge-credential-row { --bridge-test-label-width: 80px; gap: 8px; }
+}
+@container bridge-test-form (max-width: 300px) {
+  .bridge-parameter-row, .bridge-credential-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .bridge-parameter-row > label, .bridge-credential-row > label { padding-top: 0; }
+}
 .bridge-prewrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .bridge-change { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .bridge-change h3 { padding: 10px 12px; margin: 0; font-size: 12px; background: var(--surface-2); }

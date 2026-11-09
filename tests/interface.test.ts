@@ -43,8 +43,6 @@ const { render, screen, fireEvent, cleanup, waitFor, act } = await import("@test
 const { ProviderPicker } = await import("../src/web/features/ProviderPicker.js");
 const { AgentModelConfigPicker } = await import("../src/web/features/AgentModelConfigPicker.js");
 const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
-const { AgentPromptPreview } = await import("../src/web/features/AgentPromptPreview.js");
-const { AgentModelConfigSettings } = await import("../src/web/features/AgentModelConfigSettings.js");
 const { WebBridgeSettings } = await import("../src/web/features/WebBridgeSettings.js");
 const { ModelManager } = await import("../src/web/features/ModelManager.js");
 const { DraftPage } = await import("../src/web/features/DraftPage.js");
@@ -332,6 +330,46 @@ const bridgeTestTool = (application: string, toolId = "query") => ({
   application, toolId, site: application, description: `${application} 查询`, parameters: { type: "object", properties: {} },
   path: "/api/query", method: "GET", fields: ["items"], risk: "read", approval: "none", timeoutMs: 1000, catalogVersion: "1", enabled: true,
 });
+test("Bridge application deletion confirms, preserves failures and selects the next application", async () => {
+  clearBridgePreferences(); localStorage.setItem("orchard.bridge.agentOpen", "false");
+  localStorage.setItem("orchard.bridge.crm.tool", "missing");
+  const originalFetch = globalThis.fetch;
+  let applications = ["crm", "orders"], deletes = 0, fail = true;
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (options?.method === "DELETE") {
+      deletes++;
+      if (fail) return Response.json({ message: "请先停止此应用的 Agent 生成任务" }, { status: 409 });
+      applications = applications.filter(id => !path.endsWith(`/${id}`));
+      return Response.json({ applicationId: path.split("/").at(-1), environments: 0, tools: 1 });
+    }
+    if (path.endsWith("/applications")) return Response.json({ items: applications.map(id => ({ id, name: id, enabled: true, environments: [] })) });
+    if (path.endsWith("/tools")) return Response.json({ items: applications.map(id => bridgeTestTool(id)) });
+    return Response.json({ items: [], conversations: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "删除应用 crm" }));
+    assert.ok(await screen.findByText(/0 个环境和 1 个工具定义，且无法撤销/));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    assert.equal(deletes, 0);
+    fireEvent.click(screen.getByRole("button", { name: "删除应用 crm" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除应用" }));
+    await waitFor(() => assert.equal(deletes, 1));
+    assert.ok(await screen.findByRole("dialog", { name: "删除应用" }));
+    assert.ok(document.querySelector('[aria-label="选择应用 crm"]'));
+    fail = false;
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "删除应用" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "删除应用" }));
+    await waitFor(() => assert.equal(screen.queryByRole("button", { name: "选择应用 crm" }), null));
+    assert.equal(screen.getByRole("button", { name: "选择应用 orders" }).getAttribute("aria-pressed"), "true");
+    assert.equal(localStorage.getItem("orchard.bridge.crm.tool"), "");
+    fireEvent.click(screen.getByRole("button", { name: "删除应用 orders" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除应用" }));
+    assert.ok(await screen.findByText("创建第一个网页应用"));
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
 test("Bridge workspace protects unsaved tools, keeps tests isolated by application and tolerates unavailable profiles", async () => {
   clearBridgePreferences();
   localStorage.setItem("orchard.bridge.agentOpen", "false");
@@ -370,6 +408,145 @@ test("Bridge workspace protects unsaved tools, keeps tests isolated by applicati
     assert.equal(screen.queryByText(/CRM_RESULT/), null);
     assert.equal(testCalls, 1);
     assert.equal(screen.queryByText("浏览器资料：状态不可用"), null);
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
+test("Bridge JSON saves fill missing identity and use the returned definition for forms and tests", async () => {
+  clearBridgePreferences(); localStorage.setItem("orchard.bridge.agentOpen", "false");
+  const originalFetch = globalThis.fetch;
+  let tools = [bridgeTestTool("crm")];
+  const writes: { url: string; method?: string; body: ReturnType<typeof bridgeTestTool> }[] = [];
+  let tested = "";
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (options?.method === "PATCH" || options?.method === "POST") {
+      if (path.endsWith("/test")) { tested = path; return Response.json({ items: ["NORMALIZED_RESULT"] }); }
+      const definition = { ...JSON.parse(String(options.body)), catalogVersion: "server-version" };
+      writes.push({ url: path, method: options.method, body: definition });
+      tools = [...tools.filter(tool => tool.toolId !== definition.toolId), definition];
+      return Response.json(definition);
+    }
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    return Response.json({ items: path.endsWith("/tools") ? tools : [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    const { application: _application, toolId: _toolId, ...content } = bridgeTestTool("crm");
+    fireEvent.change(screen.getByLabelText("工具 JSON 定义"), { target: { value: JSON.stringify(content) } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByText("工具定义已保存");
+    assert.equal(writes[0]!.method, "PATCH");
+    assert.ok(writes[0]!.url.endsWith("/crm/tools/query/definition"));
+    assert.equal(writes[0]!.body.application, "crm"); assert.equal(writes[0]!.body.toolId, "query");
+    assert.equal(JSON.parse((screen.getByLabelText("工具 JSON 定义") as HTMLTextAreaElement).value).catalogVersion, "server-version");
+    assert.equal((screen.getByRole("button", { name: "保存" }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(screen.getByRole("button", { name: "表单" }));
+    assert.equal((screen.getByLabelText("工具 ID") as HTMLInputElement).value, "query");
+    assert.equal((screen.getByLabelText("定义版本") as HTMLInputElement).value, "server-version");
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+    await screen.findByText(/NORMALIZED_RESULT/);
+    assert.ok(tested.endsWith("/crm/tools/query/test"));
+    fireEvent.click(screen.getByRole("button", { name: "工具列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建工具" }));
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("工具 JSON 定义"), { target: { value: JSON.stringify(content) } });
+    fireEvent.click(screen.getByRole("button", { name: "表单" }));
+    assert.equal((screen.getByLabelText("工具 ID") as HTMLInputElement).value, "");
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("工具 JSON 定义"), { target: { value: JSON.stringify({ ...content, toolId: "new_query" }) } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => assert.equal(writes.length, 2));
+    await screen.findByText("工具定义已保存");
+    assert.equal(writes[1]!.method, "POST"); assert.equal(writes[1]!.body.application, "crm");
+    assert.equal(writes[1]!.body.toolId, "new_query");
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
+test("Bridge JSON conflicts can be corrected or saved as a new tool without changing the original", async () => {
+  clearBridgePreferences(); localStorage.setItem("orchard.bridge.agentOpen", "false");
+  const originalFetch = globalThis.fetch, original = bridgeTestTool("crm");
+  const tools = [original];
+  let attempts = 0, tested = "";
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (options?.method === "POST") {
+      if (path.endsWith("/test")) { tested = path; return Response.json({ items: ["COPY_RESULT"] }); }
+      attempts++;
+      if (attempts === 1) return Response.json({ message: "暂时无法保存" }, { status: 500 });
+      const definition = JSON.parse(String(options.body)); tools.push(definition); return Response.json(definition);
+    }
+    assert.notEqual(options?.method, "PATCH");
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    return Response.json({ items: path.endsWith("/tools") ? tools : [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    fireEvent.change(screen.getByLabelText("工具 JSON 定义"), { target: { value: JSON.stringify({ ...original, application: "other", toolId: "copy_query", description: "复制后的修改" }) } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    assert.ok(screen.getByRole("alert").textContent?.includes('JSON 中的应用 ID 为 "other"，当前应用为 crm'));
+    fireEvent.click(screen.getByRole("button", { name: "使用当前应用 ID" }));
+    assert.equal(JSON.parse((screen.getByLabelText("工具 JSON 定义") as HTMLTextAreaElement).value).application, "crm");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    assert.ok(screen.getByRole("alert").textContent?.includes("当前工具 ID 为 query"));
+    assert.equal(attempts, 0);
+    fireEvent.click(screen.getByRole("button", { name: "另存为新工具" }));
+    assert.equal((screen.getByLabelText("新工具 ID") as HTMLInputElement).value, "copy_query");
+    fireEvent.change(screen.getByLabelText("新工具 ID"), { target: { value: "query" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建新工具" }));
+    assert.ok(screen.getAllByText("工具 ID 已存在，请使用其他 ID").length);
+    assert.equal(attempts, 0);
+    fireEvent.change(screen.getByLabelText("新工具 ID"), { target: { value: "copy_query" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建新工具" }));
+    await screen.findAllByText("暂时无法保存");
+    assert.ok(screen.getByRole("dialog", { name: "另存为新工具" }));
+    assert.ok((screen.getByLabelText("工具 JSON 定义") as HTMLTextAreaElement).value.includes("复制后的修改"));
+    fireEvent.click(screen.getByRole("button", { name: "创建新工具" }));
+    await screen.findByText("已另存为新工具");
+    assert.equal(screen.queryByRole("dialog"), null);
+    assert.deepEqual(tools[0], original); assert.equal(tools.length, 2);
+    assert.equal(tools[1]!.toolId, "copy_query"); assert.equal(tools[1]!.application, "crm");
+    assert.equal((screen.getByRole("button", { name: "保存" }) as HTMLButtonElement).disabled, true);
+    fireEvent.click(screen.getByRole("button", { name: "表单" }));
+    assert.equal((screen.getByLabelText("工具 ID") as HTMLInputElement).value, "copy_query");
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+    await screen.findByText(/COPY_RESULT/);
+    assert.ok(tested.endsWith("/crm/tools/copy_query/test"));
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
+test("Bridge JSON rejects invalid roots and keeps the draft after a failed save", async () => {
+  clearBridgePreferences(); localStorage.setItem("orchard.bridge.agentOpen", "false");
+  const originalFetch = globalThis.fetch;
+  let writes = 0;
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === "PATCH") { writes++; return Response.json({ message: "定义校验失败" }, { status: 400 }); }
+    if (String(url).endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    return Response.json({ items: String(url).endsWith("/tools") ? [bridgeTestTool("crm")] : [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.click(screen.getByRole("button", { name: "JSON" }));
+    for (const value of ["null", "[]", '"text"', "12"]) {
+      fireEvent.change(screen.getByLabelText("工具 JSON 定义"), { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: "保存" }));
+      assert.ok(screen.getByText("工具定义必须是 JSON 对象"));
+    }
+    assert.equal(writes, 0);
+    const value = JSON.stringify({ ...bridgeTestTool("crm"), description: "保留草稿" });
+    fireEvent.change(screen.getByLabelText("工具 JSON 定义"), { target: { value } });
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await screen.findByText("定义校验失败");
+    assert.equal(writes, 1);
+    assert.equal((screen.getByLabelText("工具 JSON 定义") as HTMLTextAreaElement).value, value);
+    fireEvent.click(screen.getByRole("button", { name: "工具列表" }));
+    assert.ok(screen.getByRole("dialog", { name: "有未保存的工具修改" }));
   } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
 });
 
@@ -935,7 +1112,8 @@ test("settings previews all three default Agent prompts read-only", async () => 
     { id: "script", name: "脚本", prompt: "script rules", schema: { type: "object" }, contextNote: "动态脚本上下文" },
   ] } : { items: [] });
   try {
-    render(createElement(AgentPromptPreview));
+    render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Agent 提示词预览" }));
     const workflow = await screen.findByLabelText("工作流默认提示词") as HTMLTextAreaElement;
     assert.equal(workflow.value, "workflow rules");
     assert.equal(workflow.readOnly, true);
@@ -947,17 +1125,68 @@ test("settings previews all three default Agent prompts read-only", async () => 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("settings only requests repository configuration and removes previous categories", async () => {
-  const originalFetch = globalThis.fetch, requests: string[] = [];
+test("settings restores all categories alongside repository configuration", async () => {
+  const originalFetch = globalThis.fetch;
   globalThis.fetch = async url => {
-    requests.push(String(url));
-    return Response.json(String(url).endsWith("/repository") ? { binding: null } : { ahead: 0, behind: 0, diverged: false, dirtyPaths: [] });
+    const path = String(url);
+    if (path.endsWith("/repository")) return Response.json({ binding: null });
+    if (path.endsWith("/status") && path.includes("config-git")) return Response.json({ ahead: 0, behind: 0, diverged: false, dirtyPaths: [] });
+    if (path.endsWith("/secrets/status")) return Response.json({ configured: false, generation: 0, activeKeyId: null, readOnly: false, keys: [], encryptedDictionaries: 0, missingKeyIds: [] });
+    return Response.json({ items: [] });
   };
   try {
     render(createElement(SettingsPage));
+    for (const name of ["常规", "Provider", "Agent 模型配置", "Agent 提示词预览", "Git 仓库配置", "加密字典密钥"]) assert.ok(screen.getByRole("button", { name }));
+    assert.ok(screen.getByRole("region", { name: "外观设置" }));
+    assert.ok(screen.getByRole("region", { name: "通知设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "Git 仓库配置" }));
     await screen.findByLabelText("仓库地址");
-    for (const name of ["Provider", "常规", "Agent 模型配置", "Agent 提示词预览", "加密字典密钥"]) assert.equal(screen.queryByRole("button", { name }), null);
-    assert.ok(requests.every(path => path.startsWith("/api/config-git/")));
+    assert.equal(screen.queryByLabelText("变更描述"), null);
+    fireEvent.click(screen.getByRole("button", { name: "加密字典密钥" }));
+    assert.ok(await screen.findByText("尚未配置密钥环"));
+    cleanup();
+    dom.window.history.replaceState({}, "", "/settings?section=dictionary-keys");
+    render(createElement(SettingsPage));
+    assert.equal(screen.getByRole("button", { name: "加密字典密钥" }).getAttribute("aria-current"), "page");
+    assert.ok(await screen.findByText("尚未配置密钥环"));
+    cleanup();
+    dom.window.history.replaceState({}, "", "/settings?section=config-git");
+    render(createElement(SettingsPage));
+    assert.equal(screen.getByRole("button", { name: "Git 仓库配置" }).getAttribute("aria-current"), "page");
+    assert.ok(await screen.findByLabelText("仓库地址"));
+  } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
+});
+
+test("settings connection form preserves separately managed model state", async () => {
+  const originalFetch = globalThis.fetch, requests: { url: string; body: unknown }[] = [];
+  let setting = provider({ enabled: false, models: [{ id: "disabled-model", name: "Disabled", source: "configured", enabled: false }] });
+  globalThis.fetch = async (url, options) => {
+    if (options?.method === "PATCH") {
+      const input = JSON.parse(String(options.body));
+      requests.push({ url: String(url), body: input });
+      setting = { ...setting, ...input };
+      return Response.json(setting);
+    }
+    return Response.json({ items: [setting] });
+  };
+  try {
+    render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    const checkbox = await screen.findByRole("checkbox", { name: "启用 Third Agent" });
+    fireEvent.click(checkbox);
+    await waitFor(() => assert.equal(requests.length, 1));
+    assert.deepEqual(requests[0]!.body, { enabled: true });
+    await waitFor(() => assert.equal((checkbox as HTMLInputElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "配置 Third Agent" }));
+    fireEvent.change(screen.getByLabelText("CLI 可执行文件"), { target: { value: "/usr/local/bin/updated" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存设置/ }));
+    await waitFor(() => assert.equal(requests.length, 2));
+    const body = requests[1]!.body as { enabled: boolean; config: { executable: string; transport: string } };
+    assert.equal(body.enabled, true); assert.equal(body.config.executable, "/usr/local/bin/updated");
+    assert.equal(body.config.transport, "native");
+    assert.equal(Object.hasOwn(body, "models"), false);
+    assert.equal(setting.models[0]!.enabled, false);
+    assert.ok(await screen.findByText("设置已保存"));
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -980,7 +1209,8 @@ test("model configuration settings create, revise, disable and inspect named con
     return Response.json({ items: configs });
   };
   try {
-    render(createElement(AgentModelConfigSettings, { providers: [availableProvider] }));
+    render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Agent 模型配置" }));
     await screen.findByText("还没有 Agent 模型配置");
     fireEvent.click(screen.getAllByRole("button", { name: "新增配置" })[0]!);
     fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "xxx 分析" } });
@@ -1352,7 +1582,7 @@ test("existing inline source views retain full-screen file switching and read-on
   assert.ok(screen.getByRole("textbox", { name: "代码：scripts/c.sh" }));
 });
 
-test("navigation supports keyboard access and settings defaults to repository configuration", async () => {
+test("navigation supports keyboard access and settings defaults to general", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({ items: [] });
   try {
@@ -1372,9 +1602,11 @@ test("navigation supports keyboard access and settings defaults to repository co
     assert.equal(document.activeElement?.getAttribute("aria-current"), "page");
     dom.window.history.replaceState({}, "", "/settings");
     view.rerender(createElement(App));
-    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Git 仓库配置");
-    assert.ok(screen.getByRole("region", { name: "Git 配置存储" }));
-    assert.equal(screen.queryByRole("button", { name: "Provider" }), null);
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置常规");
+    assert.equal(screen.getByRole("button", { name: "常规" }).getAttribute("aria-current"), "page");
+    assert.ok(screen.getByRole("region", { name: "外观设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Provider");
     fireEvent.click(screen.getByRole("button", { name: "配置同步" }));
     assert.ok(await screen.findByRole("dialog", { name: "配置同步" }));
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
@@ -1449,6 +1681,45 @@ test("run filters are reflected in requests, URLs and detail return links", asyn
     fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
     assert.equal(dom.window.location.search, "");
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
+});
+test("Provider toggle rolls back when an immediate save fails", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => options?.method === "PATCH"
+    ? Response.json({ message: "配置写入失败" }, { status: 500 })
+    : Response.json({ items: [provider({ enabled: false })] });
+  try {
+    render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    const checkbox = await screen.findByRole("checkbox", { name: "启用 Third Agent" });
+    fireEvent.click(checkbox);
+    assert.ok(await screen.findByText("配置写入失败"));
+    assert.equal((checkbox as HTMLInputElement).checked, false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+test("Provider model selection immediately saves only the default model", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: unknown[] = [];
+  let setting = provider({
+    models: [{ id: "first", name: "First model", source: "configured" }, { id: "second", name: "Second model", source: "configured" }],
+    defaultModel: "first",
+  });
+  globalThis.fetch = async (_url, options) => {
+    if (options?.method === "PATCH") {
+      const input = JSON.parse(String(options.body));
+      requests.push(input); setting = { ...setting, ...input };
+      return Response.json(setting);
+    }
+    return Response.json({ items: [setting] });
+  };
+  try {
+    render(createElement(SettingsPage));
+    fireEvent.click(screen.getByRole("button", { name: "Provider" }));
+    const select = await screen.findByRole("combobox", { name: "Third Agent 默认模型" });
+    fireEvent.keyDown(select, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "Second model" }));
+    await waitFor(() => assert.deepEqual(requests, [{ defaultModel: "second" }]));
+    assert.equal(screen.queryByLabelText("CLI 可执行文件"), null);
+  } finally { globalThis.fetch = originalFetch; }
 });
 test("theme selection persists across remounts and system changes update the resolved theme", () => {
   const originalMatchMedia = dom.window.matchMedia;
