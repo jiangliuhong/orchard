@@ -1,9 +1,12 @@
+import type { DictionaryBindings } from "./dictionaries.js";
+
 export type JsonSchema = boolean | Record<string, unknown>;
 export type Scalar = string | number | boolean | null;
 export type Binding =
   | { source: "literal"; value: unknown }
   | { source: "workflow"; pointer?: string }
   | { source: "node"; nodeId: string; pointer?: string }
+  | { source: "dictionary"; dictionaryId: string; key: string; pointer?: string }
   | { source: "object"; properties: Record<string, Binding> }
   | { source: "array"; items: Binding[] };
 export interface AgentChoice { providerId?: string; modelId?: string }
@@ -28,6 +31,7 @@ export interface WorkflowNode {
   outputSchema: JsonSchema;
   config: {
     script?: string;
+    dictionaryBindings?: DictionaryBindings;
     scriptId?: string;
     scriptVersionId?: string;
     resultMode?: "process" | "json";
@@ -62,6 +66,7 @@ export type ScriptStatus = "draft" | "published" | "archived";
 export interface ScriptVersion {
   id: string; scriptId: string; number: number; status: "draft" | "published"; revision: number;
   name?: string; description?: string; resultMode?: "process" | "json";
+  dictionaryBindings?: DictionaryBindings;
   metadataSnapshot?: boolean;
   entryFile: string; timeoutMs: number; inputSchema: JsonSchema; outputSchema: JsonSchema; sourceRef: string; contentHash: string;
   validation: { valid: boolean; diagnostics: string[] }; createdAt: number; updatedAt: number; publishedAt: number | null;
@@ -150,6 +155,8 @@ export interface Draft {
 export interface Run {
   id: string; workflowVersionId: string | null; draftId: string | null; draftRevision: number | null; snapshotPath: string | null;
   status: RunStatus; input: unknown; output?: unknown;
+  inputRedacted?: boolean; outputRedacted?: boolean; logsRedacted?: boolean;
+  dictionaryBindings?: { dictionaryId: string; versionId: string; kind: "plain" | "encrypted"; name: string; keys: string[] }[];
   activeNodeId: string | null; error?: Failure; createdAt: number; startedAt: number | null; endedAt: number | null;
 }
 export interface RunExecution { definition: Workflow; layout: Layout; artifactPath: string }
@@ -160,6 +167,7 @@ export interface RunSummary {
 }
 export interface NodeRun {
   id: string; runId: string; nodeId: string; type: WorkflowNode["type"]; status: NodeStatus;
+  inputRedacted?: boolean; outputRedacted?: boolean; logsRedacted?: boolean;
   input?: unknown; output?: unknown; route?: { edgeId: string; value: unknown; reason: string };
   skipReason?: string; error?: Failure; startedAt: number | null; endedAt: number | null;
 }

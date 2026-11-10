@@ -5,6 +5,8 @@ import type { JsonSchema } from "../domain/types.js";
 import type { CredentialResolver } from "./execution.js";
 import { validatePath } from "./request-path.js";
 import { CREDENTIAL_INPUTS_SCHEMA, resolveCredentialInputs, type CredentialBindings } from "./credential-inputs.js";
+import { credentialSchema, credentialProperties, credentialRequired } from "./credential-schema.js";
+import { assertSchema } from "../domain/validation.js";
 import { RESPONSE_POSTPROCESS_SCHEMA, type ResponsePostprocess } from "./postprocess.js";
 
 export interface BrowserExecution {
@@ -12,6 +14,7 @@ export interface BrowserExecution {
   transport: "browser";
   signing?: never;
   credentialInputs?: string[];
+  credentialSchema?: JsonSchema;
   preprocess: { runtime: "nodejs"; code: string; credentials?: Record<string, { dictionaryId: string; key: string }> };
   response: { mode: "fields" | "fullJson"; maxBytes: number };
   postprocess?: ResponsePostprocess;
@@ -20,6 +23,11 @@ export const BROWSER_EXECUTION_SCHEMA: JsonSchema = {
   type: "object", additionalProperties: false, required: ["version", "transport", "preprocess", "response"],
   properties: {
     version: { const: 1 }, transport: { const: "browser" }, credentialInputs: CREDENTIAL_INPUTS_SCHEMA,
+    credentialSchema: { type: "object", required: ["type", "properties", "additionalProperties"], properties: {
+      type: { const: "object" }, additionalProperties: { const: false },
+      properties: { type: "object", maxProperties: 20, propertyNames: { pattern: "^[A-Za-z][A-Za-z0-9_]{0,63}$" }, additionalProperties: { type: "object", required: ["type"], properties: { type: { const: "string" } } } },
+      required: CREDENTIAL_INPUTS_SCHEMA,
+    } },
     postprocess: RESPONSE_POSTPROCESS_SCHEMA,
     preprocess: { type: "object", additionalProperties: false, required: ["runtime", "code"], properties: {
       runtime: { const: "nodejs" }, code: { type: "string", minLength: 1, maxLength: 65536 },
@@ -35,7 +43,9 @@ export interface BrowserRequest { path: string; method: BridgeHttpMethod; header
 // Reviewed code only. Node permission mode denies filesystem/child-process access;
 // this is process isolation, not a sandbox for hostile code.
 export async function preprocessBrowser(execution: BrowserExecution, args: unknown, defaults: { path: string; method: string }, signal: AbortSignal, resolve?: CredentialResolver, bindings?: CredentialBindings) {
-  const credentials = resolveCredentialInputs(execution.credentialInputs ?? [], execution.preprocess.credentials ?? {}, bindings, resolve);
+  const credentials = resolveCredentialInputs(Object.keys(credentialProperties(execution)), execution.preprocess.credentials ?? {}, bindings, resolve, credentialRequired(execution));
+  try { assertSchema(credentials, credentialSchema(execution), "调用凭据"); }
+  catch { throw new AppError("INVALID_CREDENTIALS", "调用凭据不符合 credentialSchema，请检查必填项、长度和格式"); }
   const source = `import * as crypto from 'node:crypto';
 let input=''; for await (const chunk of process.stdin) input+=chunk;
 const {args,credentials,request}=JSON.parse(input);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { JSDOM } from "jsdom";
 
-const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/dictionaries/d1" });
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/dictionaries/d1", pretendToBeVisual: true });
 for (const key of ["window", "document", "Event", "CustomEvent", "HTMLElement", "HTMLInputElement", "HTMLFormElement", "DocumentFragment", "Node", "NodeFilter", "HTMLTextAreaElement", "Element", "MutationObserver", "getComputedStyle", "navigator"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
 const { render, screen, fireEvent, cleanup, waitFor } = await import("@testing-library/react");
 const { DictionaryPage } = await import("../src/web/features/DictionariesPage.js");

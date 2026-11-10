@@ -50,7 +50,8 @@ export function registerDictionaryRoutes(app: FastifyInstance, dictionaries: Dic
   app.addHook("preValidation", async request => {
     const allowed = request.routeOptions.url === "/api/dictionaries" && request.method === "GET"
       ? ["kind", "enabled", "readiness", "limit", "cursor"]
-      : request.routeOptions.url === "/api/dictionaries/:id/versions" ? ["limit", "cursor"] : [];
+      : request.routeOptions.url === "/api/dictionaries/:id/versions" ? ["limit", "cursor"]
+      : request.routeOptions.url === "/api/dictionaries/:id/references" ? ["view", "limit", "cursor"] : [];
     check(Object.keys(request.query as object).every(key => allowed.includes(key)), "INVALID_REQUEST", "不支持的查询参数", 400);
   });
   app.setErrorHandler((error, request, reply) => {
@@ -110,10 +111,9 @@ export function registerDictionaryRoutes(app: FastifyInstance, dictionaries: Dic
     check(detail, "NOT_FOUND", "修订不存在", 404);
     return detail;
   });
-  app.get<{ Params: { id: string } }>("/api/dictionaries/:id/references", async request => {
-    check(dictionaries.get(request.params.id), "NOT_FOUND", "字典不存在", 404);
-    // 引用扫描在任务 5 接入；当前显式报告扫描不完整，不声称没有引用。
-    return { items: [], complete: false, note: "引用扫描尚未接入，工作流与脚本引用不可见，移除键时需确认影响" };
+  app.get<{ Params: { id: string }; Querystring: { view?: "current" | "history" | "all"; limit?: string; cursor?: string } }>("/api/dictionaries/:id/references", async request => {
+    const { view, limit, cursor: page } = request.query;
+    return dictionaries.referenceList(request.params.id, { view, limit: limit === undefined ? undefined : cursor(limit), cursor: page });
   });
   app.post<{ Params: { id: string } }>("/api/dictionaries/:id/re-encryption-preview", async request => {
     const input = body<{ expectedRevision: number }>(request.body, { expectedRevision: { type: "integer", minimum: 1 } }, ["expectedRevision"]);

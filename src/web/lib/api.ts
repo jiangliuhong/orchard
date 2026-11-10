@@ -13,7 +13,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const body = await response.json();
   if (!response.ok) {
     if (response.status === 503 && ["MIGRATION_REQUIRED", "MIGRATION_IN_PROGRESS"].includes(body.code)) window.dispatchEvent(new Event("orchard:not-ready"));
-    throw Object.assign(new Error(body.message ?? "请求失败"), body);
+    throw Object.assign(new Error(body.message ?? "请求失败"), body, { httpStatus: response.status });
   }
   return body as T;
 }

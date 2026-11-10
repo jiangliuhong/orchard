@@ -40,6 +40,9 @@ test("HTTP Git workflow binds, commits, restores and delivers browser preference
   assert.equal(missingPreview.statusCode, 409);
   const committed = await request("/commit", { token: preview.token, theme: "dark", clientId: "browser", preferenceRevision: 0 });
   assert.equal(committed.pushed, true);
+  const source = await request("/remote-sync-source");
+  assert.equal(source.sourceSha, committed.sha); assert.equal(source.snapshotState, "valid");
+  assert.ok(source.supportedCategories.includes("dictionaries")); assert.equal(source.commit.subject,"First configuration"); assert.ok(source.bindingId); assert.ok(source.fetchedAt); assert.ok(source.commit.committedAt);
   const history = (await app.inject("/api/config-git/commits?source=remote")).json();
   assert.equal(history.items[0].sha, committed.sha);
   await request("/export", { theme: "light" });

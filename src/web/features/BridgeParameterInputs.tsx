@@ -9,9 +9,9 @@ type FieldSchema = Record<string, unknown> & {
   "x-ui"?: { widget?: "input" | "textarea"; rows?: number; placeholder?: string };
 };
 
-export function BridgeParameterInputs({ schema, value, disabled, onChange, onInvalidChange }: {
+export function BridgeParameterInputs({ schema, value, disabled, onChange, onInvalidChange, onFieldChange }: {
   schema: JsonSchema; value: string; disabled: boolean;
-  onChange: (value: string) => void; onInvalidChange: (invalid: boolean) => void;
+  onChange: (value: string) => void; onInvalidChange: (invalid: boolean) => void; onFieldChange?: (name: string) => void;
 }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
   const result = useMemo(() => {
@@ -57,7 +57,7 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
     return { fields, values, errors, error, invalid: !!error || Object.keys(errors).length > 0 };
   }, [schema, value, edits]);
   useEffect(() => { onInvalidChange(result.invalid); }, [result.invalid, onInvalidChange]);
-  const update = (name: string, text: string) => setEdits(current => ({ ...current, [name]: text }));
+  const update = (name: string, text: string) => { onFieldChange?.(name); setEdits(current => ({ ...current, [name]: text })); };
   useEffect(() => {
     if (!result.invalid) {
       const next = JSON.stringify(result.values);

@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { BridgeExecutionHistory } from "../web-bridge/history.js";
 import { NotificationFeed } from "./notifications.js";
 import { defaultAgentPromptPreviews } from "../authoring/prompt-preview.js";
 import staticPlugin from "@fastify/static";
@@ -23,7 +24,7 @@ import { codexNativeAdapter } from "../providers/codex-app-server.js";
 import { piNativeAdapter } from "../providers/pi-rpc.js";
 import { ScriptTestRunner } from "../runtime/script-tests.js";
 import { checkScriptSource } from "../runtime/script.js";
-import { encryptedDictionaryCredentials } from "../web-bridge/credentials.js";
+import { dictionaryCredentials } from "../web-bridge/credentials.js";
 import type { CredentialBindings } from "../web-bridge/credential-inputs.js";
 import { WebBridgeGateway } from "../web-bridge/gateway.js";
 import { WebBridgeClient } from "../web-bridge/client.js";
@@ -93,7 +94,9 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
         .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
         .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
       add("providers", registry, () => registry.closeVerifications());
-      const gateway = new WebBridgeGateway(new WebBridgeClient(opened.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(opened.root, coordinator)); add("bridge", gateway, () => gateway.close());
+      const gateway = new WebBridgeGateway(new WebBridgeClient(opened.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(opened.root, coordinator)); gateway.history = new BridgeExecutionHistory(opened.files);
+      for (const tool of gateway.tools()) gateway.history.restrict(tool);
+      add("bridge", gateway, () => gateway.close());
       add("apiAuth", new LocalApiAuth(opened.root));
       const service = new AuthoringService(opened, registry); add("authoring", service, () => service.close());
       const graph = new GraphRunner(opened, registry, gateway, false); add("runner", graph, () => graph.close());
@@ -107,7 +110,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       const keyring = new KeyringStore(resolveKeyringPath(opened.root));
       const secretsService = new SecretsService(opened, keyring, new CommandHmac(opened, opened.root, keyring));
       add("secrets", secretsService);
-      gateway.httpDependencies.resolveCredential = encryptedDictionaryCredentials(opened, secretsService);
+      gateway.httpDependencies.resolveCredential = dictionaryCredentials(opened, secretsService);
       add("dictionaries", new DictionaryService(opened, secretsService));
       const notifications = add("notifications", new NotificationFeed());
       const listener = (event: StreamEvent) => {
@@ -245,8 +248,11 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     }, ["requestId", "conversationId", "prompt"]);
     return bridgeAgent.start(request.params.applicationId, input);
   });
-  app.post<{ Params: { applicationId: string; turnId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns/:turnId/apply", async request =>
-    bridgeAgent.apply(request.params.applicationId, request.params.turnId));
+  app.post<{ Params: { applicationId: string; turnId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns/:turnId/apply", async request => {
+    const result = await bridgeAgent.apply(request.params.applicationId, request.params.turnId);
+    for (const tool of bridge.tools(request.params.applicationId)) bridge.history.restrict(tool);
+    return result;
+  });
   app.post<{ Params: { applicationId: string; turnId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns/:turnId/cancel", async request =>
     bridgeAgent.cancel(request.params.applicationId, request.params.turnId));
   app.post("/api/web-bridge/profiles/register", async request => {
@@ -289,7 +295,11 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.patch<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => bridge.saveEnvironment(request.params.applicationId, { ...(request.body as any), id: request.params.environmentId }));
   app.delete<{ Params: { applicationId: string; environmentId: string } }>("/api/web-bridge/applications/:applicationId/environments/:environmentId", async request => { bridge.deleteEnvironment(request.params.applicationId, request.params.environmentId); return { ok: true }; });
   app.patch<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { const body = request.body as { enabled?: boolean }; check(typeof body?.enabled === "boolean", "INVALID_REQUEST", "enabled 必须为布尔值"); bridge.setToolEnabled(request.params.applicationId, request.params.toolId, body.enabled); return { ok: true }; });
-  app.post<{ Params: { applicationId: string; toolId: string }; Querystring: { environmentId?: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body, { environmentId: request.query.environmentId }));
+  app.post<{ Params: { applicationId: string; toolId: string }; Querystring: { environmentId?: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body, { environmentId: request.query.environmentId, source: "test" }));
+  app.get<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/history", async (request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    return { items: bridge.history.list(request.params.applicationId, request.params.toolId, bridge.tools(request.params.applicationId).find(tool => tool.toolId === request.params.toolId)) };
+  });
   app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => {
     const input = normalizeToolIdentity(request.body, request.params.applicationId);
     validateToolId(input.toolId);
@@ -304,10 +314,10 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.delete<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId", async request => { bridge.deleteTool(request.params.applicationId, request.params.toolId); return { ok: true }; });
   app.post("/api/web-bridge/calls", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
-    const input = body<{ requestId?: string; application: string; tool: string; args: unknown; timeoutMs?: number; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings }>(request.body,
-      { credentialBindings: {}, approved: { type: "boolean" }, requestId: { type: "string" }, environmentId: { type: "string", minLength: 1 }, application: { type: "string", minLength: 1 }, tool: { type: "string", minLength: 1 }, args: {}, timeoutMs: { type: "integer", minimum: 1, maximum: 120000 } },
+    const input = body<{ requestId?: string; application: string; tool: string; args: unknown; timeoutMs?: number; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; source?: "call" | "test" }>(request.body,
+      { source: { enum: ["call", "test"] }, credentialBindings: {}, approved: { type: "boolean" }, requestId: { type: "string" }, environmentId: { type: "string", minLength: 1 }, application: { type: "string", minLength: 1 }, tool: { type: "string", minLength: 1 }, args: {}, timeoutMs: { type: "integer", minimum: 1, maximum: 120000 } },
       ["application", "tool", "args"]);
-    return bridge.call(input.application, input.tool, input.args, { requestId: input.requestId, timeoutMs: input.timeoutMs, environmentId: input.environmentId, approved: input.approved, credentialBindings: input.credentialBindings });
+    return bridge.call(input.application, input.tool, input.args, { requestId: input.requestId, timeoutMs: input.timeoutMs, environmentId: input.environmentId, approved: input.approved, credentialBindings: input.credentialBindings, source: input.source });
   });
   app.get("/api/providers", async () => ({ items: providers.views() }));
   app.get<{ Querystring: { enabled?: string } }>("/api/agent-model-configs", async request => {
@@ -351,6 +361,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   });
   app.post("/api/scripts", async request => scripts.create(request.body as ScriptDefinition & { requestId?: string }));
   app.get<{ Params: { id: string } }>("/api/scripts/:id", async request => scripts.detail(request.params.id));
+  app.delete<{ Params: { id: string } }>("/api/scripts/:id", async request => scripts.delete(request.params.id));
   app.patch<{ Params: { id: string } }>("/api/scripts/:id/draft", async request => {
     return scripts.update(request.params.id, request.body as ScriptDefinition & { expectedRevision: number; requestId?: string });
   });
@@ -410,7 +421,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.post<{ Params: { id: string } }>("/api/scripts/:id/tests", async request => {
     const input = body<{ scriptVersionId?: string; draftRevision?: number; input: unknown; requestId: string }>(request.body, { scriptVersionId: { type: "string" }, draftRevision: { type: "integer", minimum: 0 }, input: {}, requestId }, ["input", "requestId"]);
     check(Boolean(input.scriptVersionId) !== (input.draftRevision !== undefined), "INVALID_REQUEST", "必须指定已发布版本或草稿修订号");
-    const test = store.command(`script-test:${request.params.id}`, input.requestId, input, () => store.createScriptTest(request.params.id, input.scriptVersionId ?? null, input.draftRevision ?? null, input.input));
+    const test = store.createScriptTest(request.params.id, input.scriptVersionId ?? null, input.draftRevision ?? null, input.input, input.requestId, input);
     check(store.one("SELECT 1 FROM script_tests WHERE id=?", test.id), "TEST_EXPIRED", "测试记录已清理，请使用新的请求标识", 410);
     scriptTests.enqueue(test.id); return publicScriptTest(test);
   });

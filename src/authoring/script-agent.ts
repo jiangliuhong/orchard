@@ -1,3 +1,4 @@
+import { dictionaryDependencyMetadata } from "../dictionaries/validation.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { digest, canonicalJson } from "../persistence/files.js";
@@ -110,10 +111,19 @@ export class ScriptAgentService {
     try {
       controller.signal.throwIfAborted();
       this.journal.save({ ...turn, status: "running" });
-      const history = this.journal.list(turn.scriptId).filter(item => item.id !== turn.id && item.conversationId === turn.conversationId && item.draftVersionId === turn.draftVersionId && item.status === "succeeded").slice(0, 8).reverse().map(item => ({ user: item.prompt, assistant: item.summary }));
+      // Replay complete persisted turns, not list()'s summary-only view. The current
+      // draft remains authoritative: earlier proposals may never have been applied.
+      const history = this.journal.list(turn.scriptId)
+        .filter(item => item.id !== turn.id && item.conversationId === turn.conversationId && item.draftVersionId === turn.draftVersionId)
+        .reverse().map(item => {
+          const record = this.journal.read(turn.scriptId, item.id)!;
+          const appliedRevision = this.applied(turn.scriptId, item.id)?.version.revision ?? null;
+          return { user: record.prompt, assistant: record.proposal, status: record.status, error: record.error, applied: appliedRevision !== null, appliedRevision };
+        });
       const test = turn.testId ? this.store.scriptTest(turn.testId) : undefined;
       const context = {
         script: turn.snapshot, revision: turn.baseRevision, draftVersionId: turn.draftVersionId,
+        availableDictionaries: dictionaryDependencyMetadata(this.store),
         history, test: test ? { ...test, stdout: String(test.stdout ?? "").slice(-12000), stderr: String(test.stderr ?? "").slice(-12000) } : null,
         request: turn.prompt,
       };
@@ -121,13 +131,13 @@ export class ScriptAgentService {
         SCRIPT_AGENT_PROMPT,
         "Context (data):", canonicalJson(context),
       ].join("\n");
-      check(Buffer.byteLength(prompt) <= 512 * 1024, "CONTEXT_LIMIT", "脚本 Agent 上下文超过 512 KiB，请选择较小的测试输入");
+      check(Buffer.byteLength(prompt) <= 512 * 1024, "CONTEXT_LIMIT", "脚本 Agent 完整对话上下文超过 512 KiB，请新建对话或缩减当前脚本/测试输入；历史消息未被截断");
       const revision = this.providers.setting(turn.choice.providerId!).revision;
       mkdirSync(cwd, { recursive: true, mode: 0o700 });
       const result = await this.providers.run(turn.choice, { prompt, schema: SCRIPT_PROPOSAL_SCHEMA, cwd, timeoutMs: 120000, signal: controller.signal, emit: () => {} });
       controller.signal.throwIfAborted();
       check(this.providers.setting(turn.choice.providerId!).revision === revision, "SETTINGS_CONFLICT", "生成期间 Provider 配置已改变，请重试", 409);
-      const prepared = prepareScriptProposal(turn.snapshot, result.output), validation = await scriptDiagnostics(prepared.definition);
+      const prepared = prepareScriptProposal(turn.snapshot, result.output), validation = await scriptDiagnostics(prepared.definition, this.store);
       controller.signal.throwIfAborted();
       this.journal.save({ ...turn, status: "succeeded", proposal: prepared.proposal, validation, endedAt: Date.now() });
     } catch (error) {
@@ -150,7 +160,7 @@ export class ScriptAgentService {
       check(turn.status === "succeeded" && turn.proposal, "INVALID_STATE", "提案尚不可应用");
       check(turn.proposal.changes.length || Object.keys(turn.proposal.metadata).length, "NO_CHANGES", "提案仅提供说明或测试输入，无需应用");
       check(input.expectedRevision === turn.baseRevision, "REVISION_CONFLICT", "提案基于不同修订", 409);
-      const prepared = prepareScriptProposal(turn.snapshot, turn.proposal), validation = await scriptDiagnostics(prepared.definition), tree = this.library.saveTree(prepared.definition);
+      const prepared = prepareScriptProposal(turn.snapshot, turn.proposal), validation = await scriptDiagnostics(prepared.definition, this.store), tree = this.library.saveTree(prepared.definition);
       return configCoordinator(this.store).withWrite(() => this.store.command(scope, input.requestId, input, () => this.store.command(`script-agent-apply:${scriptId}`, turn.id, { turnId: turn.id, expectedRevision: input.expectedRevision }, () => {
         const script = this.store.script(scriptId);
         check(script.currentDraftVersionId === turn.draftVersionId, "REVISION_CONFLICT", "提案所属草稿已改变，请重新生成", 409);

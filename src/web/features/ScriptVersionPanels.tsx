@@ -18,8 +18,8 @@ export function ScriptDiff({ original, modified }: { original: SourceFiles; modi
     <Suspense fallback={<Loading />}><CodeDiffEditor path={path!} original={original[path!] ?? ""} modified={modified[path!] ?? ""} /></Suspense>
   </>}</div>;
 }
-export function versionFiles(version: { files: SourceFiles; name?: string; description?: string; entryFile: string; inputSchema: unknown; outputSchema: unknown; timeoutMs?: number; resultMode?: string }) {
-  return { ...version.files, "$metadata.json": pretty({ name: version.name, description: version.description, entryFile: version.entryFile, inputSchema: version.inputSchema, outputSchema: version.outputSchema, timeoutMs: version.timeoutMs, resultMode: version.resultMode }) };
+export function versionFiles(version: { files: SourceFiles; name?: string; description?: string; entryFile: string; inputSchema: unknown; outputSchema: unknown; timeoutMs?: number; resultMode?: string; dictionaryBindings?: ScriptVersion["dictionaryBindings"] }) {
+  return { ...version.files, "$metadata.json": pretty({ name: version.name, description: version.description, entryFile: version.entryFile, inputSchema: version.inputSchema, outputSchema: version.outputSchema, timeoutMs: version.timeoutMs, resultMode: version.resultMode, ...(version.dictionaryBindings ? { dictionaryBindings: version.dictionaryBindings } : {}) }) };
 }
 export function ScriptVersionCompare({ script, version }: { script: ScriptDetail; version: ScriptVersion & { files: SourceFiles } }) {
   const options = script.versions.filter(item => item.id !== version.id), [base, setBase] = useState(options.find(item => item.id === script.currentPublishedVersionId)?.id ?? options[0]?.id ?? "");

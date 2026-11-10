@@ -135,7 +135,7 @@ test("extension popup saves names and distinguishes offline saves from successfu
   await new Promise(resolve => setImmediate(resolve));
   const name = document.getElementById("profile-name") as HTMLInputElement;
   const save = document.getElementById("save") as HTMLButtonElement;
-  assert.equal(save.disabled, false);
+  assert.equal(save.disabled, true);
   assert.ok(name.value.startsWith("Chrome · "));
   const originalId = document.getElementById("profile-id")!.textContent;
   name.value = "工作浏览器";
@@ -144,7 +144,7 @@ test("extension popup saves names and distinguishes offline saves from successfu
   assert.equal(extension.stored.profileName, "工作浏览器");
   assert.equal(document.getElementById("profile-id")!.textContent, originalId);
   assert.equal(document.getElementById("status")!.dataset.state, "success");
-  assert.ok(document.getElementById("status")!.textContent!.includes("名称已保存"));
+  assert.ok(document.getElementById("profile-feedback")!.textContent!.includes("名称已保存"));
   assert.equal(extension.requests.at(-1)!.profile.name, "工作浏览器");
   extension.setAvailable(false);
   name.value = "离线资料";
@@ -152,7 +152,8 @@ test("extension popup saves names and distinguishes offline saves from successfu
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(extension.stored.profileName, "离线资料");
   assert.equal(document.getElementById("status")!.dataset.state, "error");
-  assert.ok(document.getElementById("status")!.textContent!.includes("名称已保存。尚未连接本机服务"));
+  assert.ok(document.getElementById("status")!.textContent!.includes("尚未连接本机服务"));
+  assert.ok(document.getElementById("profile-feedback")!.textContent!.includes("名称已保存"));
   extension.setAvailable(true);
   document.getElementById("reconnect")!.click();
   await new Promise(resolve => setImmediate(resolve));

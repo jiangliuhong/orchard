@@ -49,6 +49,29 @@ test('restore collects mappings, consumes persisted mappings, delivers same save
   await service.apply({ token: general.token, requestId: 'theme' });
   assert.equal(restore.pendingGeneral('browser')[0]?.theme, 'dark');
 });
+test('model-config-only changes remain actionable in the provider restore preview', async t => {
+  const { service, store, publish } = await setup(t), source = snapshot();
+  const ref = localReference('providers', 'pi-cli', 'executable');
+  source.providers.push({ id: 'pi-cli', enabled: true, config: { executable: ref, transport: 'native' }, defaultModel: 'model', models: [{ id: 'model', name: 'Model', source: 'configured', enabled: true, deleted: false }], agentModelConfigs: [{ id: 'analysis-config', name: 'Analysis', description: 'Original', modelId: 'model', enabled: true }] });
+  const initialSha = await publish(source);
+  const initial = await service.restorePreview({ source: { kind: 'git', sha: initialSha }, categories: ['providers'], mappings: { [ref.localRef]: '/local/bin/pi' } });
+  assert.deepEqual(initial.blockers, []);
+  await service.apply({ token: initial.token, requestId: 'initial-provider' });
+  const unchanged = await service.restorePreview({ source: { kind: 'git', sha: initialSha }, categories: ['providers'] });
+  assert.equal(unchanged.noChanges, true);
+  source.providers[0]!.agentModelConfigs![0]!.description = 'Updated';
+  const sha = await publish(source);
+  const preview = await service.restorePreview({ source: { kind: 'git', sha }, categories: ['providers'] });
+  assert.deepEqual(preview.blockers, []);
+  assert.equal(preview.noChanges, false);
+  const diff = preview.diffs.find(d => d.category === 'providers' && d.objectId === 'pi-cli')!;
+  assert.equal(diff.changeType, 'update');
+  assert.match(diff.detail!, /Agent/);
+  await service.apply({ token: preview.token, requestId: 'model-config-only' });
+  assert.equal(store.one("SELECT description FROM agent_model_configs WHERE id='analysis-config'")!.description, 'Updated');
+  const after = await service.restorePreview({ source: { kind: 'git', sha }, categories: ['providers'] });
+  assert.equal(after.noChanges, true);
+});
 test('commit preference and generation locks reject changed confirmations', async t => {
   const { service } = await setup(t), prefs = { theme: 'dark' as const, clientId: 'browser', preferenceRevision: 1 };
   const p = await service.commitPreview({ ...prefs, message: 'first' });
@@ -177,4 +200,26 @@ test('run owns local lock and records only sanitized operation failures', async 
   const bad = service.run('bad', { requestId: 'bad' }, () => { throw new AppError('INVALID_SOURCE', 'password=exception-marker', 422); });
   await service.close(); assert.equal(service.operations.get(one.operationId).phase, 'completed');
   assert.ok(!JSON.stringify(service.operations.get(bad.operationId)).includes('exception-marker'));
+});
+
+test('dictionary preview exposes plain key removal, hides encrypted envelopes, and refetch invalidates fixed-source plans', async t => {
+  const { service, restore, publish, store } = await setup(t);
+  const { randomUUID } = await import('node:crypto');
+  const { generateKeyMaterial, encryptValue } = await import('../src/secrets/aead.js');
+  const { KeyringStore, resolveKeyringPath } = await import('../src/secrets/keyring.js');
+  const id = randomUUID(), versionId = randomUUID(), encryptedId = randomUUID(), encryptedVersionId = randomUUID(), material = generateKeyMaterial(), keyId = randomUUID();
+  new KeyringStore(resolveKeyringPath(store.root)).save({formatVersion:1,generation:1,keys:[{keyId,algorithm:'aes-256-gcm',material:material.toString('base64'),createdAt:Date.now()}],operations:[]});
+  const s=snapshot();
+  const envelope=encryptValue(material,{keyId,dictionaryId:encryptedId,key:'credential'},'never-emit-this-value');
+  s.dictionaries=[{id,kind:'plain',currentVersionId:versionId,versions:[{id:versionId,dictionaryId:id,name:'Plain',description:'',kind:'plain',enabled:true,entries:{removeMe:{type:'number',value:42},keep:{type:'string',value:'old'}}}]},{id:encryptedId,kind:'encrypted',currentVersionId:encryptedVersionId,versions:[{id:encryptedVersionId,dictionaryId:encryptedId,name:'Credentials',description:'',enabled:true,kind:'encrypted',entries:{credential:{type:'string',encryptedValue:envelope}}}]}];
+  const sha=await publish(s,true);
+  const preview=await service.restorePreview({source:{kind:'git',sha},categories:['dictionaries']});
+  const text=JSON.stringify(preview); for(const secret of ['never-emit-this-value',envelope.ciphertext,envelope.nonce,envelope.tag]) assert.ok(!text.includes(secret));
+  assert.ok(text.includes('credential')); assert.ok(text.includes('removeMe')); assert.deepEqual(preview.blockers,[]);
+  await service.remoteSyncSource(); await assert.rejects(service.apply({token:preview.token,requestId:'stale-source'}),{code:'PREVIEW_EXPIRED'});
+  await service.apply({token:(await service.restorePreview({source:{kind:'git',sha},categories:['dictionaries']})).token,requestId:'apply-source'});
+  const recovery=restore.operations().find(o=>o.requestId==='apply-source')!; assert.equal(recovery.result!.sourceSha,sha);
+  const next=structuredClone(s); const d=next.dictionaries![0]!; d.currentVersionId=randomUUID(); d.versions=[{...d.versions[0]!,id:d.currentVersionId,entries:{keep:{type:'string',value:'new'}}}];
+  const nextSha=await publish(next,true); const changes=await service.restorePreview({source:{kind:'git',sha:nextSha},categories:['dictionaries']});
+  const plain=changes.diffs.find(d=>d.objectId===id)!; assert.ok(plain.before!.includes('removeMe')); assert.ok(!plain.after!.includes('removeMe')); assert.ok(plain.after!.includes('new'));
 });

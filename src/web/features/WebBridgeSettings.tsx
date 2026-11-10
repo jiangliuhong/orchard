@@ -7,19 +7,22 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { BridgeParameterInputs } from "./BridgeParameterInputs";
+import { BridgeExecutionHistory } from "./BridgeExecutionHistory";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
 import { Breadcrumbs, ErrorNotice, Loading } from "../components/common";
 import { BridgeAgentPanel, bridgePreference, saveBridgePreference, type BridgeTurnView } from "./BridgeAgentPanel";
 import { BridgeToolForm } from "./BridgeToolForm";
 import { BridgeCredentialInputs } from "./BridgeCredentialInputs";
 import type { CredentialBindings } from "../../web-bridge/credential-inputs";
+import { credentialProperties, credentialRequired, missingCredentials } from "../../web-bridge/credential-schema";
+import { historyValue, pointerPart, restoredCredentials, type HistorySources } from "../../web-bridge/history-policy";
 import { ToastNotice } from "../components/ToastNotice";
 
 interface Environment { id: string; origin: string; profileId?: string; extensionId?: string; enabled: boolean; bound: boolean; tabAvailable: boolean }
 interface Application { id: string; name: string; enabled: boolean; environments: Environment[] }
 interface BrowserProfile { id: string; name: string; extensionId: string; connected: boolean; lastSeen: number }
 interface ToolDraft { application: string; toolId?: string; value: string; original: string }
-interface TestState { environmentId?: string; args: string; output: string; error: string; busy: boolean }
+interface TestState { environmentId?: string; args: string; output: string; error: string; busy: boolean; historySources?: HistorySources; historyNotice?: string }
 const emptyTest = (): TestState => ({ args: "{}", output: "", error: "", busy: false });
 const BridgeDiff = lazy(() => import("./CodeEditor").then(module => ({ default: module.CodeDiffEditor })));
 const newTool = (application: string): WebBridgeTool => ({
@@ -64,7 +67,15 @@ export function WebBridgeSettings() {
   const testKey = draft ? `${draft.application}/${draft.toolId ?? "new"}` : "";
   const test = tests[testKey] ?? emptyTest();
   const persistedTool = selectedTools.find(tool => tool.toolId === draft?.toolId);
-  useEffect(() => { setCredentialBindings({}); }, [testKey, editorTab, tab, review?.id, selectedId]);
+  useEffect(() => { setCredentialBindings({}); }, [testKey, selectedId]);
+  useEffect(() => {
+    if (editorTab !== "test" || tab !== "tools" || review) setCredentialBindings(current => Object.fromEntries(Object.entries(current).filter(([, binding]) => binding.source === "dictionary")));
+  }, [editorTab, tab, review?.id]);
+  const missing = persistedTool?.execution?.transport === "browser" ? missingCredentials(persistedTool.execution, credentialBindings) : [];
+  const arrayPlaceholders = Object.entries(test.historySources ?? {}).filter(([path, source]) => {
+    if (source.source !== "omitted") return false;
+    try { return path !== "" && /\/\d+$/.test(path) && historyValue(JSON.parse(test.args), path) === null; } catch { return true; }
+  });
   const canTest = !!persistedTool && persistedTool.enabled;
   const requiresApproval = persistedTool && (persistedTool.risk !== "read" || persistedTool.approval !== "none");
   const refresh = () => { apps.reload(); tools.reload(); profiles.reload(); };
@@ -146,7 +157,7 @@ export function WebBridgeSettings() {
     return () => { clearInterval(interval); window.removeEventListener("focus", update); };
   }, []);
   const testTool = async (approved = false) => {
-    if (!draft?.toolId || dirty || !canTest || test.busy || testParametersInvalid) return;
+    if (!draft?.toolId || dirty || !canTest || test.busy || testParametersInvalid || missing.length || arrayPlaceholders.length) return;
     if (requiresApproval && !approved) {
       setDeletion({ execution: true, title: "确认执行工具", description: `工具 ${draft.toolId} 的风险类型为 ${persistedTool?.risk}，将真实调用业务接口。是否继续？`, action: () => testTool(true) });
       return;
@@ -156,12 +167,14 @@ export function WebBridgeSettings() {
     setTests(current => ({ ...current, [key]: { ...test, busy: true, error: "", output: "" } }));
     try {
       const query = test.environmentId ? `?environmentId=${encodeURIComponent(test.environmentId)}` : "";
+      const execution = persistedTool?.execution;
+      const callBindings = execution?.transport === "browser" ? Object.fromEntries(Object.entries(credentialBindings).filter(([name, binding]) => binding.source !== "inline" || binding.value !== "" || credentialRequired(execution).includes(name) || Object.hasOwn(execution.preprocess.credentials ?? {}, name))) : {};
       const output = requiresApproval || persistedTool?.execution?.transport === "browser"
-        ? await send("/web-bridge/calls", { application, tool: toolId, args: JSON.parse(test.args), environmentId: test.environmentId || undefined, approved, ...(persistedTool?.execution?.transport === "browser" ? { credentialBindings } : {}) })
+        ? await send("/web-bridge/calls", { application, tool: toolId, args: JSON.parse(test.args), environmentId: test.environmentId || undefined, approved, source: "test", ...(persistedTool?.execution?.transport === "browser" ? { credentialBindings: callBindings } : {}) })
         : await send(`/web-bridge/applications/${application}/tools/${toolId}/test${query}`, JSON.parse(test.args));
       setTests(current => ({ ...current, [key]: { ...current[key], busy: false, output: pretty(output) } }));
     } catch (error) { setTests(current => ({ ...current, [key]: { ...current[key], busy: false, error: (error as Error).message } })); }
-    finally { setCredentialBindings({}); }
+    finally { setCredentialBindings(current => Object.fromEntries(Object.entries(current).filter(([, binding]) => binding.source === "dictionary"))); }
   };
   const reviewTurn = (turn: BridgeTurnView) => guard(() => { setReview(turn); setTab("tools"); });
   const askDeletion = (title: string, description: string, action: () => Promise<void>) => guard(() => setDeletion({ title, description, action }));
@@ -220,13 +233,19 @@ export function WebBridgeSettings() {
                 setEditorError(""); setError("");
                 setSaveAsToolId(typeof draftDefinition?.toolId === "string" && draftDefinition.toolId !== draft.toolId ? draftDefinition.toolId : "");
               }}><Copy size={13} />另存为新工具</Button>}<Button size="sm" disabled={busy || !dirty} onClick={() => void saveTool()}><Save size={13} />{busy ? "保存中…" : "保存"}</Button></div>
-              <div className="bridge-tabs"><button className={editorTab === "definition" ? "active" : ""} onClick={() => setEditorTab("definition")}>工具定义</button><button disabled={formInvalid} className={editorTab === "test" ? "active" : ""} onClick={() => setEditorTab("test")}>测试</button></div>
+              <div className="bridge-tabs"><button className={editorTab === "definition" ? "active" : ""} onClick={() => setEditorTab("definition")}>工具定义</button><button disabled={formInvalid} className={editorTab === "test" ? "active" : ""} onClick={() => setEditorTab("test")}>测试</button><button disabled={!draft.toolId} className={editorTab === "history" ? "active" : ""} onClick={() => setEditorTab("history")}>执行历史</button></div>
               </header>
               <ErrorNotice message={editorError || (applicationConflict ? `JSON 中的应用 ID 为 ${JSON.stringify(draftDefinition!.application)}，当前应用为 ${draft.application}` : "")} />
               {applicationConflict && <Button className="self-start" size="sm" variant="outline" disabled={busy} onClick={() => {
                 setDraft({ ...draft, value: pretty({ ...draftDefinition, application: draft.application }) }); setEditorError("");
               }}>使用当前应用 ID</Button>}
-              {editorTab === "definition" ? <><div className="bridge-toolbar"><div className="actions"><Button size="sm" variant={editorMode === "form" ? "secondary" : "ghost"} disabled={busy} onClick={() => {
+              {editorTab === "history" && draft.toolId ? <BridgeExecutionHistory application={draft.application} toolId={draft.toolId} disabled={dirty || test.busy || busy} onReuse={record => {
+                setTests(current => ({ ...current, [testKey]: { ...emptyTest(), args: pretty(record.args ?? {}), environmentId: record.environmentId, historySources: record.argSources,
+                  historyNotice: record.legacy ? "旧历史未记录完整凭据来源，请重新选择字典或填写凭据。" : record.definitionChanged ? "工具定义已变化，将使用当前 Schema 校验和执行。" : "已载入历史参数和字典引用；未记录的手动值请重新填写。" } }));
+                const names = persistedTool?.execution?.transport === "browser" ? Object.keys(credentialProperties(persistedTool.execution)) : [];
+                setCredentialBindings(Object.fromEntries(Object.entries(restoredCredentials(record.credentialValues, record.credentialSources)).filter(([name]) => names.includes(name))));
+                setTestParametersInvalid(false); setEditorTab("test");
+              }} /> : editorTab === "definition" ? <><div className="bridge-toolbar"><div className="actions"><Button size="sm" variant={editorMode === "form" ? "secondary" : "ghost"} disabled={busy} onClick={() => {
                 try {
                   const definition = normalizeToolIdentity(JSON.parse(draft.value), draft.application, draft.toolId);
                   if (!Array.isArray(definition.fields) || !definition.parameters || typeof definition.parameters !== "object" || Array.isArray(definition.parameters)) throw new Error("请先补全 parameters 和 fields 字段");
@@ -238,11 +257,15 @@ export function WebBridgeSettings() {
                 <section className="bridge-test-input" aria-label="测试配置">
                 <div className="bridge-test-heading"><h3>请求配置</h3><span>使用已保存的工具定义</span></div>
                 {(dirty || !canTest) && <p className="field-hint">{dirty ? "请先保存工具定义，再执行测试。" : !persistedTool ? "请先保存新工具。" : !persistedTool.enabled ? "工具已停用，请先启用。" : "当前仅支持无需确认的只读工具测试。"}</p>}
-                {persistedTool?.execution && <><p className="field-hint">{persistedTool.execution.transport === "browser" ? "浏览器模式：使用绑定资料的已登录页签，可指定本次调用凭据。" : "本机 HTTP 模式：不复用浏览器 Cookie，不需要浏览器资料。凭据从加密字典解析。"}</p><label htmlFor="bridge-test-environment" className="field">运行环境</label><select id="bridge-test-environment" value={test.environmentId ?? ""} disabled={test.busy} onChange={event => setTests(current => ({ ...current, [testKey]: { ...test, environmentId: event.target.value, output: "", error: "" } }))}><option value="">自动选择（仅一个启用环境时）</option>{selected.environments.filter(environment => environment.enabled).map(environment => <option key={environment.id} value={environment.id}>{environment.origin}</option>)}</select></>}
+                {persistedTool?.execution && <><p className="field-hint">{persistedTool.execution.transport === "browser" ? "浏览器模式：使用绑定资料的已登录页签，可指定本次调用凭据。" : "本机 HTTP 模式：不复用浏览器 Cookie，不需要浏览器资料。凭据从普通或加密字典的字符串键解析，敏感凭据建议加密保存。"}</p><label htmlFor="bridge-test-environment" className="field">运行环境</label><select id="bridge-test-environment" value={test.environmentId ?? ""} disabled={test.busy} onChange={event => setTests(current => ({ ...current, [testKey]: { ...test, environmentId: event.target.value, output: "", error: "" } }))}><option value="">自动选择（仅一个启用环境时）</option>{selected.environments.filter(environment => environment.enabled).map(environment => <option key={environment.id} value={environment.id}>{environment.origin}</option>)}</select></>}
+                {test.historyNotice && <p className="field-hint" role="status">{test.historyNotice}</p>}
+                {Object.entries(test.historySources ?? {}).map(([path, source]) => source.source === "omitted" && <p className="field-hint" key={path}>参数 {path || "（根参数）"}：历史未记录原值，请按当前 Schema 补填（可选字段可留空）。</p>)}
+                {!!missing.length && <p className="field-hint" role="alert">请填写或选择调用凭据：{missing.join("、")}</p>}
+                {!!arrayPlaceholders.length && <p className="field-hint" role="alert">请编辑并补全历史中未记录的数组项。</p>}
                 {persistedTool?.execution?.transport === "browser" && <BridgeCredentialInputs execution={persistedTool.execution} value={credentialBindings} disabled={test.busy} onChange={setCredentialBindings} />}
-                {persistedTool && <BridgeParameterInputs key={`${testKey}/${JSON.stringify(persistedTool.parameters)}`} schema={persistedTool.parameters} value={test.args} disabled={test.busy} onInvalidChange={setTestParametersInvalid} onChange={args => setTests(current => ({ ...current, [testKey]: { ...test, args } }))} />}
+                {persistedTool && <BridgeParameterInputs key={`${testKey}/${JSON.stringify(persistedTool.parameters)}`} schema={persistedTool.parameters} value={test.args} disabled={test.busy} onInvalidChange={setTestParametersInvalid} onFieldChange={name => setTests(current => ({ ...current, [testKey]: { ...current[testKey], historySources: Object.fromEntries(Object.entries(current[testKey]?.historySources ?? {}).filter(([path]) => path !== `/${pointerPart(name)}` && !path.startsWith(`/${pointerPart(name)}/`) && path !== "")) } }))} onChange={args => setTests(current => ({ ...current, [testKey]: { ...current[testKey] ?? test, args } }))} />}
                 </section>
-                <div className="bridge-toolbar bridge-test-actions"><Button size="sm" disabled={dirty || !canTest || test.busy || busy || testParametersInvalid} onClick={() => void testTool()}><Check size={13} />{test.busy ? "执行中…" : requiresApproval ? "确认并执行" : "执行测试"}</Button>{(test.output || test.error) && <Button size="sm" variant="outline" onClick={() => setAgentOpen(true)}><MessageSquare size={13} />交给 Agent 分析</Button>}</div>
+                <div className="bridge-toolbar bridge-test-actions"><Button size="sm" disabled={dirty || !canTest || test.busy || busy || testParametersInvalid || !!missing.length || !!arrayPlaceholders.length} onClick={() => void testTool()}><Check size={13} />{test.busy ? "执行中…" : requiresApproval ? "确认并执行" : "执行测试"}</Button>{(test.output || test.error) && <Button size="sm" variant="outline" onClick={() => setAgentOpen(true)}><MessageSquare size={13} />交给 Agent 分析</Button>}</div>
                 <section className="bridge-test-response" aria-label="测试结果" aria-busy={test.busy}>
                   <div className="bridge-test-heading"><h3>响应结果</h3><span role="status">{test.busy ? "正在执行…" : test.error ? "执行失败" : test.output ? "执行完成" : "等待执行"}</span></div>
                   <ErrorNotice message={test.error} /><pre className={`bridge-test-result${test.output ? "" : " is-empty"}`}>{test.output || (test.busy ? "正在等待工具响应…" : "执行测试后，响应内容将在这里展示。")}</pre>

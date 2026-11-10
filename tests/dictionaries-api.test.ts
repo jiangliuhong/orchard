@@ -152,9 +152,9 @@ test("字典 HTTP：创建、列表、详情、更新、无变化保存与并发
     requestId: randomUUID(), name: "x", description: "", kind: "plain", enabled: true, operations: [], extra: 1,
   } });
   assert.equal(unknownField.statusCode, 400);
-  // 引用查询显式报告扫描不完整。
+  // 无引用且所有定义可读取时，引用扫描完整。
   const references = await app.inject({ url: `/api/dictionaries/${created.dictionaryId}/references`, headers: { host: HOST } });
-  assert.equal(references.json().complete, false);
+  assert.equal(references.json().complete, true);
 });
 
 test("字典 HTTP：移除被引用键返回 CONFIRMATION_REQUIRED 与影响详情", async (t: TestContext) => {

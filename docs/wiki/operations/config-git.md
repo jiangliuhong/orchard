@@ -1,23 +1,26 @@
 # 配置 Git 备份与恢复
 
-适用版本：0.1.0。最后更新：2026-11-06。实现及验收记录见 [配置 Git 存储](../../features/2026-11-06-config-git-storage/design.md)。
+适用范围：支持配置快照 v2 的 Orchard（兼容读取 v1）。最后更新：2026-11-10。实现及验证见 [远端配置同步](../../features/2026-11-10-remote-config-sync/implementation.md)。
 
 ## 前置条件
 
 在运行 Orchard 的主机安装 Git，准备 SSH 或 HTTPS 仓库访问凭据。SSH 必须预先确认主机密钥；HTTPS 使用主机上的凭据管理器。URL 不能携带口令。设置页面不会接收私钥或 token。首次绑定时填写分支、配置子目录和提交身份。
 
-Git 备份包含常规外观、Provider 定义、Web Bridge 定义、工作流和脚本及其固定版本依赖。运行记录、对话、认证信息、浏览器在线状态不导出。可执行文件路径和浏览器实例引用使用本机映射，跨设备恢复时需要提供目标值。
+Git 备份包含常规外观、Provider（含 Agent 模型配置）、Web Bridge、工作流、脚本及固定版本依赖、普通／加密字典。加密字典只导出密文，密钥必须通过独立安全渠道迁移；仓库不保存密钥材料。运行记录、对话、认证信息和浏览器在线状态不导出。可执行文件路径和浏览器实例引用使用本机映射，跨设备恢复时需要提供目标值。
 
 ## 设置页面操作
 
-进入“设置 → Git 配置”。检测仓库连接，选择或填写分支，创建托管副本。已有配置必须通过完整格式校验，才能恢复或覆盖。
+进入“设置 → Git 仓库配置”检测连接并创建托管副本；同步操作位于左下角“配置同步”。
 
-- **仅本地提交**：生成差异预览，查看全部分页并确认；普通保存不会自动提交。
-- **提交并推送**：预览前检查远端。推送失败时本地提交仍保留，修复认证或权限后重试推送。
-- **获取远端历史**：显式 fetch 后浏览固定提交。远端更新不会自动覆盖业务数据。
-- **从提交恢复**：选择完整 SHA、恢复类别、本机映射，重新生成最终预览并确认。目标独有对象保留；同一发布版本 ID 对应不同内容时阻止恢复。
-- **分叉重生成**：查看累计差异后明确确认，先备份本地历史，再基于远端生成当前配置快照。
-- **本地恢复点**：每次恢复前保存独立配置资料，可再次预览恢复。未完成操作引用的恢复点不能删除。
+- **备份到远端**：填写提交说明、生成提交预览、查看全部差异并确认，然后提交并推送。普通保存不会自动触发 Git。
+- **从远端同步**：点击“获取远端配置”，核对分支和固定 SHA；选择类别、预览差异、补齐本机映射并重新预览；加载全部差异后勾选确认，点击“应用到本机”。
+- **本地恢复点**：结果页的“查看同步前配置”或“查看恢复点”可进入同样的预览／确认流程；不是删除已导入版本的全量回滚。未完成操作引用的恢复点不能删除。
+
+同步保留本机独有对象；同 ID 字典使用远端完整键集，键的移除也会显示在差异中。同名不同 ID、字典类型冲突、不可变版本内容冲突会阻止相关应用。缺少解密密钥时先前往“设置 → 加密字典密钥”独立导入，不支持只导入不可用密文。
+
+同步不移动本地 HEAD、不丢弃未推送提交，也不提交或推送；分叉本身不会阻止读取远端快照。应用的是获取时展示的 SHA，不会悄悄切换到后来新增的远端提交。首次备份升级为 v2 时有明确提示，旧版程序不能读取新版快照，历史 v1 仍可恢复且不清空本机字典。
+
+补齐密钥、Provider 登录、运行时安装及浏览器接入后，恢复的工作流和脚本无需重新编辑字典依赖即可执行。同步本身不会自动执行任何任务。仅本地提交、完整历史和分叉重生成等高级操作可通过 CLI/API 使用。
 
 预览有效期为 30 分钟。配置、绑定、本地 HEAD 或预览约束改变后，应重新预览。恢复期间会阻止配置写入和新执行活动；仍有活动时立即返回忙碌状态。
 
@@ -33,7 +36,7 @@ orchard config-git operation --id <operation-id> --pretty
 orchard config-git commit --token <preview-token> --request-id <stable-request-id> --theme system
 orchard config-git fetch
 orchard config-git history --limit 20
-orchard config-git restore-preview --sha <full-sha> --categories general,providers,webBridge,scripts,workflows --mappings-json '{}'
+orchard config-git restore-preview --sha <full-sha> --categories general,providers,webBridge,scripts,workflows,dictionaries --mappings-json '{}'
 orchard config-git restore --token <preview-token> --request-id <stable-request-id>
 ```
 

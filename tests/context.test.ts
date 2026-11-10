@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AppError } from "../src/domain/errors.js";
 import {
-  AUTHORING_PROMPT_RULES, HISTORY_EXCERPT_LIMITS, PROMPT_BYTE_LIMIT,
-  buildAuthoringContext, composeAuthoringPrompt, historyExcerpt, truncateUtf8,
+  AUTHORING_PROMPT_RULES, PROMPT_BYTE_LIMIT,
+  buildAuthoringContext, composeAuthoringPrompt, historyExcerpt,
   type ContextHistoryMessage,
 } from "../src/authoring/context.js";
 import { applyAuthoringChanges, AUTHORING_SCHEMA } from "../src/authoring/service.js";
@@ -13,66 +13,30 @@ import { assertSchema } from "../src/domain/validation.js";
 const message = (sequence: number, role: string, text: string | unknown): ContextHistoryMessage =>
   ({ sequence, role, content: typeof text === "string" ? { text } : text });
 
-test("UTF-8 truncation lands on legal string boundaries without replacement characters", () => {
-  assert.equal(truncateUtf8("hello", 100), "hello");
-  assert.equal(truncateUtf8("hello", 3), "hel");
-  // 多字节 emoji（4 字节）在序列中间截断时整字符丢弃。
-  assert.equal(truncateUtf8("a🌍b", 2), "a");
-  assert.equal(truncateUtf8("a🌍b", 5), "a🌍");
-  // 中文（3 字节/字）边界。
-  assert.equal(truncateUtf8("你好世界", 7), "你好");
-  assert.equal(Buffer.from(truncateUtf8("你好世界", 7), "utf8").byteLength, 6);
-  // 绝不产生 U+FFFD 替换字符或拆开的代理对。
-  for (const size of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
-    const cut = truncateUtf8("ué🚀漢", size);
-    assert.ok(!cut.includes("\u{FFFD}"), `replacement char at size ${size}`);
-    // 结尾不是孤立高代理。
-    const last = cut.codePointAt(cut.length - 1);
-    assert.ok(last !== undefined && last >= 0x20, `bad tail at size ${size}`);
-  }
+test("rebuild history keeps all saved messages, full proposals and errors in sequence order", () => {
+  const proposal = { summary: "完整", changes: [{ operation: "update", path: "scripts/main.ts", content: "长".repeat(9000) }] };
+  const messages = [
+    ...Array.from({ length: 30 }, (_, index) => message(index + 1, "user", `m${index + 1}`)),
+    message(31, "assistant", { text: "完整", proposal }),
+    message(32, "error", { code: "FAILED", message: "failure detail" }),
+  ];
+  const history = historyExcerpt([...messages].reverse())!;
+  assert.equal(history.source, "explicit_rebuild");
+  assert.equal(history.truncated, false);
+  assert.deepEqual(history.messages, messages.map(({ role, content }) => ({ role, content })));
+  assert.equal(historyExcerpt([]), undefined);
+  assert.equal(historyExcerpt([message(1, "provider.event", "not a saved dialogue message")]), undefined);
 });
 
-test("history excerpts keep newest messages within budget and restore original order", () => {
-  // 全量装入：保持原顺序。
-  const excerpt = historyExcerpt([message(1, "user", "第一"), message(2, "assistant", "第二"), message(3, "user", "第三")])!;
-  assert.deepEqual(excerpt.messages.map(m => m.text), ["第一", "第二", "第三"]);
-  assert.equal(excerpt.truncated, false);
-  assert.equal(excerpt.source, "explicit_rebuild");
-
-  // 只摘取 user/assistant 的 text；error/诊断/无文本消息不复制。
-  const filtered = historyExcerpt([
-    message(1, "user", "keep me"),
-    message(2, "error", { code: "X", message: "诊断不复制" }),
-    message(3, "assistant", { text: "", files: ["a"] }),
-    message(4, "assistant", "kept"),
-  ])!;
-  assert.deepEqual(filtered.messages.map(m => m.text), ["keep me", "kept"]);
-
-  // 无可用文本 → undefined（envelope 不含 historyExcerpt）。
-  assert.equal(historyExcerpt([message(1, "error", "x")]), undefined);
-  assert.equal(historyExcerpt([]), undefined);
-
-  // 从最近向前取，超出条数丢弃更早消息并记录 truncated。
-  const many = Array.from({ length: 30 }, (_, index) => message(index + 1, "user", `m${index + 1}`));
-  const capped = historyExcerpt(many)!;
-  assert.equal(capped.messages.length, HISTORY_EXCERPT_LIMITS.maxMessages);
-  assert.equal(capped.messages[0]!.text, "m11"); // 恢复原顺序后从第 11 条开始
-  assert.equal(capped.messages.at(-1)!.text, "m30");
-  assert.equal(capped.truncated, true);
-
-  // 单条超过 8 KiB 时按边界截断该条。
-  const long = historyExcerpt([message(1, "user", "长".repeat(9000))])!;
-  assert.equal(long.messages.length, 1);
-  assert.ok(Buffer.byteLength(long.messages[0]!.text) <= HISTORY_EXCERPT_LIMITS.perMessageBytes);
-  assert.ok(long.messages[0]!.text.startsWith("长"));
-  assert.equal(long.truncated, true);
-
-  // 总预算 64 KiB：装满后停止并允许最后一条部分保留。
-  const big = historyExcerpt(Array.from({ length: 12 }, (_, index) => message(index + 1, "user", "x".repeat(7 * 1024))))!;
-  const total = big.messages.reduce((sum, entry) => sum + Buffer.byteLength(entry.text), 0);
-  assert.ok(total <= HISTORY_EXCERPT_LIMITS.totalBytes, `total ${total} exceeds budget`);
-  assert.equal(big.truncated, true);
-  assert.ok(big.messages.length >= 9);
+test("full rebuild history above the total prompt limit is rejected rather than truncated", () => {
+  const history = [message(1, "user", "x".repeat(PROMPT_BYTE_LIMIT))];
+  const context = buildAuthoringContext({
+    kind: "initial", draftId: "d", baseRevision: 0, files: { "workflow.json": "{}" },
+    providers: [], previousOutcome: null, history, historySource: "explicit_rebuild", userRequest: "continue",
+  });
+  assert.deepEqual(context.historyExcerpt!.messages[0]!.content, history[0]!.content);
+  assert.equal(context.historyExcerpt!.truncated, false);
+  assert.throws(() => composeAuthoringPrompt([], context), { code: "CONTEXT_LIMIT" });
 });
 
 test("envelope shapes distinguish initial, continuation and single contexts", () => {

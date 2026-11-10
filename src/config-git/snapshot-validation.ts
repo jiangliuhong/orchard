@@ -1,3 +1,5 @@
+import { validateDictionaries } from "./dictionaries.js";
+import { assertLegacyWorkflowDictionaries, normalizeDictionaryBindings, workflowDictionarySensitivity } from "../domain/dictionaries.js";
 import { check } from "../domain/errors.js";
 import { transformSync } from "esbuild";
 import { spawnSync } from "node:child_process";
@@ -26,7 +28,9 @@ export function normalizedSource(files: SourceFiles): SourceFiles {
   object(files); return Object.fromEntries(Object.keys(files).sort(compareCodePoints).map(path => [snapshotPath(path), normalizeSnapshotText(files[path]!)]));
 }
 export function normalizedScript(definition: ScriptDefinition): ScriptDefinition {
-  return { ...definition, timeoutMs: definition.timeoutMs ?? 300000, resultMode: definition.resultMode ?? (definition.runtime === "shell" ? "process" : "json"), files: normalizedSource(definition.files) };
+  const { dictionaryBindings, ...legacy } = definition;
+  const bindings = normalizeDictionaryBindings(dictionaryBindings);
+  return { ...legacy, ...(bindings ? { dictionaryBindings: bindings } : {}), timeoutMs: definition.timeoutMs ?? 300000, resultMode: definition.resultMode ?? (definition.runtime === "shell" ? "process" : "json"), files: normalizedSource(definition.files) };
 }
 export function portableScriptHash(versionId: string, definition: ScriptDefinition): string {
   return snapshotDigest(canonicalSnapshotJson({ versionId, definition: normalizedScript(definition) }));
@@ -41,8 +45,9 @@ function identity(value: unknown): asserts value is string { string(value); enco
 function nullableId(value: unknown) { if (value !== null) identity(value); }
 function ref(value: unknown, expected: { localRef: string }) { const r = object(value, ["localRef"]); check(r.localRef === expected.localRef, "INVALID_LOCAL_REF", "Local reference does not match its object and field"); }
 const scriptFields = ["id", "name", "description", "runtime", "entryFile", "inputSchema", "outputSchema", "files"];
-export function validatePortableScript(value: unknown, published: boolean): asserts value is ScriptDefinition {
-  const d = object(value, scriptFields, ["timeoutMs", "resultMode"]);
+export function validatePortableScript(value: unknown, published: boolean, v2 = false): asserts value is ScriptDefinition {
+  check(v2 || !value || typeof value !== "object" || !Object.hasOwn(value, "dictionaryBindings"), "FORMAT_UNSUPPORTED", "字典声明需要 Git 快照 v2", 422);
+  const d = object(value, scriptFields, ["timeoutMs", "resultMode", ...(v2 ? ["dictionaryBindings"] : [])]);
   identity(d.id); for (const k of ["name", "description", "entryFile"]) string(d[k]);
   check(d.runtime === "nodejs" || d.runtime === "shell", "INVALID_SNAPSHOT", "Invalid runtime");
   check(d.timeoutMs === undefined || Number.isInteger(d.timeoutMs) && Number(d.timeoutMs) >= 1000 && Number(d.timeoutMs) <= 300000, "INVALID_SNAPSHOT", "Invalid script timeout");
@@ -94,11 +99,13 @@ export function validatePortableBridge(value: unknown): asserts value is Portabl
 export function validatePortableSnapshot(value: unknown): asserts value is PortableSnapshot {
   // Reject accessors and non-JSON data before touching caller-owned fields.
   canonicalSnapshotJson(value);
-  const s = object(value, ["general", "providers", "webBridge", "scripts", "workflows"]);
+  const s = object(value, ["general", "providers", "webBridge", "scripts", "workflows"], ["dictionaries"]);
   const general = object(s.general, ["theme"]); check(["light", "dark", "system"].includes(String(general.theme)), "INVALID_SNAPSHOT", "Explicit theme is required");
   validatePortableBridge(s.webBridge);
   for (const k of ["providers", "scripts", "workflows"]) array(s[k]);
   const snapshot = value as PortableSnapshot;
+  const v2 = snapshot.dictionaries !== undefined;
+  if (v2) validateDictionaries(snapshot);
   const allIds = new Set<string>(), versions = new Set<string>();
   const claim = (id: string) => { identity(id); check(!allIds.has(id), "DUPLICATE_ID", "Object identity is shared by multiple objects"); allIds.add(id); };
   for (const p of snapshot.providers) {
@@ -122,18 +129,28 @@ export function validatePortableSnapshot(value: unknown): asserts value is Porta
     object(script, ["id", "name", "description", "runtime", "archived", "currentPublishedVersionId", "draft", "versions"]); claim(script.id); string(script.name); string(script.description); bool(script.archived); nullableId(script.currentPublishedVersionId);
     check(script.runtime === "nodejs" || script.runtime === "shell", "INVALID_SNAPSHOT", "Invalid runtime"); array(script.versions);
     for (const v of script.versions) {
-      object(v, ["id", "definition"]); identity(v.id); check(!versions.has(v.id), "DUPLICATE_ID", "Duplicate version identity"); versions.add(v.id); validatePortableScript(v.definition, true);
+      object(v, ["id", "definition"]); identity(v.id); check(!versions.has(v.id), "DUPLICATE_ID", "Duplicate version identity"); versions.add(v.id); validatePortableScript(v.definition, true, v2);
       check(v.definition.id === script.id && v.definition.runtime === script.runtime, "INVALID_SNAPSHOT", "Script version ownership mismatch");
     }
-    if (script.draft !== null) { validatePortableScript(script.draft, false); check(script.draft.id === script.id && script.draft.runtime === script.runtime, "INVALID_SNAPSHOT", "Script draft ownership mismatch"); }
+    if (script.draft !== null) { validatePortableScript(script.draft, false, v2); check(script.draft.id === script.id && script.draft.runtime === script.runtime, "INVALID_SNAPSHOT", "Script draft ownership mismatch"); }
     check(script.currentPublishedVersionId === null || script.versions.some(v => v.id === script.currentPublishedVersionId), "DEPENDENCY_MISSING", "Missing current script version");
   }
+  for (const d of snapshot.dictionaries ?? []) { claim(d.id); for (const v of d.versions) { check(!versions.has(v.id), "DUPLICATE_ID", "Duplicate version identity"); versions.add(v.id); } }
   for (const w of snapshot.workflows) {
     object(w, ["id", "name", "currentPublishedVersionId", "draft", "versions"]); claim(w.id); string(w.name); nullableId(w.currentPublishedVersionId); array(w.versions);
     const inspect = (files: SourceFiles, published: boolean) => {
       checkFiles(files); normalizedSource(files); check(workflowIdentity(files).id === w.id, "INVALID_SNAPSHOT", "Workflow identity mismatch");
       check(Object.hasOwn(files, "layout.json"), "INVALID_FILES", "Missing layout.json"); parseSnapshotJson(files["layout.json"]!);
-      if (published) { validateWorkflow(parseSnapshotJson(files["workflow.json"]!)); readLayout(files); validateSourceSyntax(files); }
+      if (!v2) assertLegacyWorkflowDictionaries(parseSnapshotJson(files["workflow.json"]!));
+      if (published) {
+        const workflow = validateWorkflow(parseSnapshotJson(files["workflow.json"]!));
+        workflowDictionarySensitivity(workflow, (id, versionId) => {
+          const definition = snapshot.scripts.find(s => s.id === id)?.versions.find(v => v.id === versionId)?.definition;
+          check(definition, "DEPENDENCY_MISSING", "缺少固定脚本版本", 422);
+          return definition!;
+        });
+        readLayout(files); validateSourceSyntax(files);
+      }
       const definition = object(parseSnapshotJson(files["workflow.json"]!));
       if (Array.isArray(definition.nodes)) for (const node of definition.nodes) {
         if (!node || typeof node !== "object" || !node.config || typeof node.config !== "object") continue;
@@ -161,7 +178,7 @@ export function validatePortableSnapshot(value: unknown): asserts value is Porta
   }
 }
 export function fixedDependencies(snapshot: PortableSnapshot, files: SourceFiles[]): SnapshotDependency[] {
-  const deps = new Map<string, SnapshotDependency>();
+  const deps = new Map<string, Extract<SnapshotDependency, { category: "scripts" }>>();
   for (const source of files) for (const dep of workflowDependencies(source)) {
     const version = snapshot.scripts.find(s => s.id === dep.id)!.versions.find(v => v.id === dep.versionId)!;
     deps.set(dep.versionId, { category: "scripts", ...dep, digest: portableScriptHash(dep.versionId, version.definition) });
