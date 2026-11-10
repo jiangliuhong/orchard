@@ -1,3 +1,6 @@
+import { gitProjects } from "../project-git/service.js";
+import { AppError } from "../domain/errors.js";
+import type { RunAgentBinding } from "../domain/types.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, readFileSync, lstatSync } from "node:fs";
@@ -41,6 +44,7 @@ export class GraphRunner {
         this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
         for (const node of version.definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
         this.providers.modelConfigs.saveBindings(id, bindings);
+        gitProjects(this.store).pin(id, version.definition);
         this.store.append("run", id, "run.queued", { versionId });
         return this.store.run(id);
       });
@@ -79,6 +83,7 @@ export class GraphRunner {
         this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
         for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
         this.providers.modelConfigs.saveBindings(id, bindings);
+        gitProjects(this.store).pin(id, definition);
         this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
         return this.store.run(id);
       });
@@ -112,7 +117,7 @@ export class GraphRunner {
       return this.store.run(id).status;
     });
     if (status === "cancel_requested" && this.current?.id === id) this.current.controller.abort();
-    if (status === "cancelled" && this.current?.id !== id) this.release(id);
+    if (status === "cancelled" && this.current?.id !== id) { this.release(id); gitProjects(this.store).forget(id); }
     return this.store.run(id);
   }
   wake() {
@@ -177,7 +182,7 @@ export class GraphRunner {
           const result = node.type === "web-bridge"
             ? await this.webBridgeCall(node, value, signal)
             : node.type === "agent"
-            ? await this.providers.run(agentBinding!, {
+            ? node.config.project ? await this.projectAgent(id, node, attemptId!, agentBinding!, value, signal, emit) : await this.providers.run(agentBinding!, {
               signal, cwd: this.store.root, prompt: `${node.config.prompt}\nNode input (data):\n${json(value)}`, schema: node.outputSchema, timeoutMs: node.config.timeoutMs,
               emit: event => emit(event.type, event.payload),
             }).then(result => ({ output: result.output, execution: { agentModelConfig: agentBinding, providerId: result.providerId, modelId: result.modelId, providerRevision: actualProviderRevision, modelSource: result.modelSource, usage: result.usage } }))
@@ -224,7 +229,48 @@ export class GraphRunner {
         this.skipRemaining(id, cancelled ? "run_terminated" : "upstream_failed");
         this.store.append("run", id, `run.${status}`, detail);
       });
+    } finally {
+      try { gitProjects(this.store).forget(id); } catch { /* Startup recovery retries stale admission cleanup. */ }
     }
+  }
+  private async projectAgent(runId: string, node: WorkflowNode, attemptId: string, binding: RunAgentBinding, input: unknown, signal: AbortSignal, emit: (type: string, payload: unknown) => void) {
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(new AppError("TIMEOUT", "项目准备与分析超时")), node.config.timeoutMs ?? 600000);
+    const combined = AbortSignal.any([signal, controller.signal]);
+    let prepared: Awaited<ReturnType<ReturnType<typeof gitProjects>["prepare"]>> | undefined;
+    let providerRevision: number | undefined;
+    try {
+      const pinned = gitProjects(this.store).pinned(runId, node.id);
+      prepared = await gitProjects(this.store).prepare(pinned, runId, node.id, attemptId, combined, (type, payload) => {
+        const metadata = payload as { sha?: string; durationMs?: number };
+        if (metadata.sha) this.store.exec("UPDATE node_attempts SET execution_json=? WHERE id=?", json({ config: node.config, agentModelConfig: binding, project: { projectId: pinned.project.id, projectName: pinned.project.name, revision: pinned.project.revision, branch: pinned.project.branch, sha: metadata.sha, preparationMs: metadata.durationMs ?? 0, toolPolicyVersion: pinned.project.acceptedRiskVersion, unexpanded: null } }), attemptId);
+        emit(type, payload);
+      });
+      const source = prepared.source;
+      // Persist provenance before the provider starts, including on later failure/cancellation.
+      const existing = this.store.attempts(runId).find(a => a.id === attemptId)?.execution ?? {};
+      this.store.exec("UPDATE node_attempts SET execution_json=? WHERE id=?", json({ ...(existing as object), project: source }), attemptId);
+      const result = await this.providers.run(binding, {
+        executionContext: "project", sessionDirectory: prepared.sessionDirectory,
+        cwd: prepared.workspace, signal: combined, timeoutMs: node.config.timeoutMs,
+        prompt: `Project: ${source.projectName}\nBranch: ${source.branch}\nCommit: ${source.sha}\nUnexpanded entries: ${json(source.unexpanded)}\nAnalyze the available source. Do not push. Cite verifiable file paths and line numbers. Return only final JSON matching the output schema.\n${node.config.prompt}\nNode input (data):\n${json(input)}`,
+        schema: node.outputSchema,
+        emit: event => {
+          // Raw tool/diagnostic streams can contain secrets or local paths. Keep final output and safe lifecycle only.
+          if (event.type === "provider.started") {
+            providerRevision = (event.payload as { revision: number }).revision;
+            emit(event.type, { providerId: binding.providerId, requestedModel: binding.modelId, revision: providerRevision, transport: "native" });
+          }
+          else if (event.type === "provider.usage" || event.type === "provider.tool_completed") emit(event.type, event.payload);
+        },
+      });
+      return { output: result.output, execution: { project: source, providerRevision, toolCallCount: result.toolCallCount, agentModelConfig: binding, providerId: result.providerId, modelId: result.modelId, modelSource: result.modelSource, usage: result.usage } };
+    } catch (error) {
+      if (controller.signal.aborted) throw new AppError("TIMEOUT", "项目准备与分析超时");
+      if (signal.aborted) throw new AppError("CANCELLED", "项目分析已取消");
+      // Provider errors can quote tool text, source or internal paths.
+      if (error instanceof AppError && /^(PROJECT_|SSH_|TIMEOUT|CANCELLED)/.test(error.code)) throw error;
+      throw new AppError(error instanceof AppError ? error.code : "PROJECT_ANALYSIS_FAILED", "项目分析失败，请检查 Provider 状态或输出 Schema");
+    } finally { clearTimeout(timer); await prepared?.cleanup(); }
   }
   private async webBridgeCall(node: WorkflowNode, input: unknown, signal: AbortSignal) {
     check(this.webBridge, "BROWSER_NOT_CONNECTED", "Web Bridge 未配置");

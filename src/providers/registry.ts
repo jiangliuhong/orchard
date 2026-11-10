@@ -12,7 +12,7 @@ import type { Store } from "../persistence/store.js";
 import { isModelEnabled, visibleModels } from "../domain/models.js";
 import { readCodexConfig, readCodexModels } from "./codex-config.js";
 import { DEFAULT_AGENT_LIMITS } from "./agent-limits.js";
-import type { NativeAdapter, SessionProvider } from "./session.js";
+import type { ExecutionContext, NativeAdapter, SessionProvider } from "./session.js";
 import { connectionFingerprint } from "./session.js";
 import type { SessionManager } from "./session-manager.js";
 
@@ -20,10 +20,14 @@ export type { BackendRef };
 
 export interface ProviderEvent { type: string; payload: unknown }
 export interface TurnRequest {
+  executionContext?: ExecutionContext;
+  /** 项目临时会话资料目录，不能放入源码快照。 */
+  sessionDirectory?: string;
   modelId: string; prompt: string; schema?: JsonSchema; signal: AbortSignal; cwd: string; timeoutMs?: number;
   emit: (event: ProviderEvent) => void;
 }
 export interface ProviderResult {
+  toolCallCount?: number;
   output: unknown; modelId: string; modelSource?: "reported" | "requested"; providerId: string;
   usage?: unknown; usageScope?: "turn" | "session"; backendTurnId?: string;
 }
@@ -285,11 +289,14 @@ export class ProviderRegistry {
     const sessionProvider = adapter.sessionProvider;
     transportOf(setting.config);
     check(sessionProvider, "PROTOCOL_UNSUPPORTED", "Provider 不支持原生会话协议");
-    const directory = mkdtempSync(join(request.cwd, ".agent-"));
+    const project = request.executionContext === "project";
+    const capabilities = adapter.capabilitiesFor?.(setting) ?? adapter.capabilities;
+    check(!project || capabilities.projectAnalysis === true, "PROJECT_CAPABILITY_UNSUPPORTED", "Provider 尚不支持项目分析");
+    const directory = project ? request.cwd : mkdtempSync(join(request.cwd, ".agent-"));
     try {
       const handle = await sessionProvider.openSession(setting, {
         key: `single:${randomUUID()}`, modelId: request.modelId, cwd: directory,
-        persistent: false, signal: request.signal,
+        persistent: false, signal: request.signal, executionContext: request.executionContext, sessionDirectory: request.sessionDirectory,
       });
       try {
         return await sessionProvider.sendTurn(handle, {
@@ -297,7 +304,8 @@ export class ProviderRegistry {
         });
       } finally { await sessionProvider.releaseSession(handle); }
     } finally {
-      rmSync(directory, { recursive: true, force: true });
+      // 项目快照由项目 lease 生命周期管理，Registry 不删除调用者目录。
+      if (!project) rmSync(directory, { recursive: true, force: true });
     }
   }
 }

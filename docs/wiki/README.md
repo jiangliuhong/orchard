@@ -8,6 +8,7 @@
 - [对话创作与发布](./product/authoring.md)
 - [脚本库、Agent 创作与版本复用](./product/script-library.md)
 - [Agent 模型配置与工作流引用](./product/agent-model-configs.md)
+- [Git 项目分析与存储空间](./product/git-project-analysis.md)
 
 ## 技术规范
 
@@ -34,6 +35,6 @@
 - [Agent 模型配置与工作流动态引用](../features/2026-11-07-agent-model-configs/design.md)
 - [字典、加密字典与 Git 同步方案（实施中，管理入口已实现）](../features/2026-11-09-dictionaries/design.md)
 
-- [Git 项目工作区、Agent 分析与设置存储空间查看（设计中，SSH 密钥接入）](../features/2026-11-10-git-project-agent/design.md)
+- [Git 项目工作区、Agent 分析与设置存储空间查看（已实现，验证记录见 feature）](../features/2026-11-10-git-project-agent/design.md)
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

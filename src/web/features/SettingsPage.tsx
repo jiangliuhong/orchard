@@ -15,6 +15,8 @@ import { ModelManager } from "./ModelManager";
 import { AgentModelConfigSettings } from "./AgentModelConfigSettings";
 import { ConfigGitSettings } from "./ConfigGitSettings";
 import { SecretKeySettings } from "./SecretKeySettings";
+import { GitProjectSettings } from "./GitProjectSettings";
+import { StorageSettings } from "./StorageSettings";
 import { AgentPromptPreview } from "./AgentPromptPreview";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
@@ -117,13 +119,13 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  type Section = "general" | "providers" | "agent-models" | "agent-prompts" | "config-git" | "dictionary-keys";
+  type Section = "general" | "providers" | "agent-models" | "agent-prompts" | "config-git" | "dictionary-keys" | "git-projects" | "storage";
   const [section, setSection] = useState<Section>(() => {
     const requested = new URLSearchParams(window.location.search).get("section");
-    return requested && ["general", "providers", "agent-models", "agent-prompts", "config-git", "dictionary-keys"].includes(requested) ? requested as Section : "general";
+    return requested && ["general", "providers", "agent-models", "agent-prompts", "config-git", "dictionary-keys", "git-projects", "storage"].includes(requested) ? requested as Section : "general";
   });
   return <>
-    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "agent-prompts": "Agent 提示词预览", "config-git": "Git 仓库配置", "dictionary-keys": "加密字典密钥" }[section] }]} /></div>
+    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "agent-prompts": "Agent 提示词预览", "config-git": "Git 仓库配置", "dictionary-keys": "加密字典密钥", "git-projects": "项目仓库", storage: "存储空间" }[section] }]} /></div>
     <div className="settings-layout">
       <aside className="settings-sidebar" aria-label="设置分类">
         <nav className="settings-sidebar-nav">
@@ -133,9 +135,13 @@ export function SettingsPage() {
           <button className={section === "agent-prompts" ? "active" : ""} aria-current={section === "agent-prompts" ? "page" : undefined} onClick={() => setSection("agent-prompts")}><Boxes size={16} />Agent 提示词预览</button>
           <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}><GitBranch size={16} />Git 仓库配置</button>
           <button className={section === "dictionary-keys" ? "active" : ""} aria-current={section === "dictionary-keys" ? "page" : undefined} onClick={() => setSection("dictionary-keys")}><KeyRound size={16} />加密字典密钥</button>
+          <button className={section === "git-projects" ? "active" : ""} aria-current={section === "git-projects" ? "page" : undefined} onClick={() => setSection("git-projects")}><GitBranch size={16} />项目仓库</button>
+          <button className={section === "storage" ? "active" : ""} aria-current={section === "storage" ? "page" : undefined} onClick={() => setSection("storage")}><Boxes size={16} />存储空间</button>
         </nav>
       </aside>
       <section className="settings-content">
+      {section === "git-projects" && <GitProjectSettings />}
+      {section === "storage" && <StorageSettings />}
       {section === "agent-prompts" && <AgentPromptPreview />}
       {section === "config-git" && <ConfigGitSettings />}
       {section === "dictionary-keys" && <SecretKeySettings />}

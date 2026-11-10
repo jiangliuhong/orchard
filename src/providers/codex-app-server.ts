@@ -44,6 +44,11 @@ function strictOutputSchema(schema: unknown): boolean {
   if (node.type === "array") return typeof node.items !== "undefined" && strictOutputSchema(node.items);
   return true;
 }
+const PROJECT_POLICY_ARGS: string[] = [
+  "-c", "mcp_servers={}", "-c", "notify=[]", "-c", 'web_search="disabled"',
+  ...DISABLED_FEATURES.filter(feature => feature !== "shell_tool" && feature !== "unified_exec")
+    .flatMap(feature => ["-c", `features.${feature}=false`]),
+];
 const TOOL_POLICY_ARGS: string[] = [
   "-c", "mcp_servers={}",
   "-c", "notify=[]",
@@ -66,7 +71,7 @@ const KNOWN_TOOL_REQUESTS = new Set([
 type CodexRecord = { id?: unknown; method?: unknown; params?: unknown; result?: unknown; error?: { message?: unknown } };
 type Notification = { method: string; params: Record<string, unknown> };
 
-interface ItemBuffer { deltas: string; final: string | null; order: number }
+interface ItemBuffer { deltas: string; final: string | null; order: number; phase?: string }
 
 interface TurnState {
   hostTurnId: string;
@@ -77,6 +82,7 @@ interface TurnState {
   buffered: Notification[];
   items: Map<string, ItemBuffer>;
   itemOrder: number;
+  toolItems: Set<string>;
   protocolBytes: number;
   textBytes: number;
   usageLast: unknown;
@@ -89,11 +95,13 @@ interface TurnState {
 }
 
 interface CodexSession {
+  project: boolean;
   conn: JsonlConnection;
   pending: PendingRequests;
   threadId: string;
   modelId: string;
   cwd: string;
+  sessionDirectory?: string;
   generation: number;
   /** SessionManager 登记键；null 表示匿名单次进程（容量由 slot 持有至 release）。 */
   managerKey: string | null;
@@ -112,6 +120,7 @@ function createTurn(hostTurnId: string, emit: (event: ProviderEvent) => void): T
   state.buffered = [];
   state.items = new Map();
   state.itemOrder = 0;
+  state.toolItems = new Set();
   state.protocolBytes = 0;
   state.textBytes = 0;
   state.usageLast = undefined;
@@ -146,8 +155,10 @@ export class CodexAppServerProvider implements SessionProvider {
     const pending = new PendingRequests(this.limits.requestAckTimeoutMs, this.limits.maxPendingRequestsPerConnection);
     const conn = JsonlConnection.start({
       executable: this.executable(setting),
-      args: ["app-server", ...TOOL_POLICY_ARGS],
+      args: ["app-server", ...(session.project ? PROJECT_POLICY_ARGS : TOOL_POLICY_ARGS)],
       cwd: session.cwd,
+      processDirectory: session.sessionDirectory,
+      env: session.sessionDirectory ? { TMPDIR: session.sessionDirectory, TMP: session.sessionDirectory, TEMP: session.sessionDirectory } : undefined,
       limits: this.limits,
       onRecord: record => this.routeRecord(session, record),
       onDiagnostic: text => this.captureDiagnostic(session, text),
@@ -170,6 +181,7 @@ export class CodexAppServerProvider implements SessionProvider {
   }
 
   async openSession(setting: ProviderSetting, request: SessionOpenRequest): Promise<ProviderSessionHandle> {
+    check(request.executionContext !== "project" || (!request.persistent && !request.resumeRef), "PROTOCOL_STATE_INVALID", "项目分析仅支持一次性会话");
     const managerKey = request.persistent ? request.key : null;
     // 复用既有空闲连接：同一逻辑会话、同代次、同模型、连接健康。
     if (managerKey !== null) {
@@ -190,6 +202,7 @@ export class CodexAppServerProvider implements SessionProvider {
     try {
       session = {
         conn: undefined!, pending: undefined!, threadId: "", modelId: request.modelId, cwd: request.cwd,
+        project: request.executionContext === "project", sessionDirectory: request.sessionDirectory,
         generation: slot.generation, managerKey, slot, slotFinished: false, broken: undefined, turn: null,
       };
       this.spawn(setting, session);
@@ -204,7 +217,7 @@ export class CodexAppServerProvider implements SessionProvider {
       } else {
         threadId = this.threadIdOf(await this.request(session, "thread/start", {
           model: request.modelId, cwd: request.cwd, ephemeral: !request.persistent,
-          sandbox: "read-only", approvalPolicy: "never",
+          sandbox: session.project ? "workspace-write" : "read-only", approvalPolicy: "never",
         }, "thread/start"), "thread/start");
       }
       session.threadId = threadId;
@@ -273,6 +286,12 @@ export class CodexAppServerProvider implements SessionProvider {
   private handleServerRequest(session: CodexSession, record: CodexRecord) {
     const method = String(record.method);
     const respond = (body: unknown) => { void session.conn.write(JSON.stringify(body)).catch(() => { /* 连接已断开 */ }); };
+    if (session.project && KNOWN_TOOL_REQUESTS.has(method)) {
+      // never 策略不自动批准提权；原生工具无需宿主工具桥。意外交互及时失败。
+      respond({ id: record.id, error: { code: -32000, message: "PROJECT_INTERACTION_UNSUPPORTED: unattended project analysis" } });
+      session.turn?.finish(new AppError("PROJECT_INTERACTION_UNSUPPORTED", "项目分析不支持交互审批或外部工具请求"));
+      return;
+    }
     if (KNOWN_TOOL_REQUESTS.has(method)) {
       respond({ id: record.id, error: { code: -32000, message: "TOOLS_DISABLED: orchard 以无工具模式运行" } });
       session.turn?.finish(new AppError("TOOLS_DISABLED", "Codex 请求了被禁用的工具或审批，本轮已终止"));
@@ -334,12 +353,18 @@ export class CodexAppServerProvider implements SessionProvider {
         return;
       }
       case "item/completed": {
-        const item = params.item as { id?: unknown; type?: unknown; text?: unknown } | undefined;
-        if (!item || item.type !== "agentMessage" || typeof item.id !== "string" || !item.id) return;
+        const item = params.item as { id?: unknown; type?: unknown; text?: unknown; phase?: unknown } | undefined;
+        if (!item || typeof item.id !== "string" || !item.id) return;
+        if (["commandExecution", "fileChange"].includes(String(item.type))) {
+          turn.toolItems.add(item.id);
+          turn.emit({ type: "provider.tool_completed", payload: { count: turn.toolItems.size } }); return;
+        }
+        if (item.type !== "agentMessage") return;
         let buffer = turn.items.get(item.id);
         if (!buffer) { buffer = { deltas: "", final: null, order: turn.itemOrder++ }; turn.items.set(item.id, buffer); }
         // completed item 的完整文本覆盖增量缓冲，不能再拼一次造成重复。
         if (typeof item.text === "string") buffer.final = item.text;
+        if (typeof item.phase === "string") buffer.phase = item.phase;
         return;
       }
       case "thread/tokenUsage/updated": {
@@ -356,14 +381,15 @@ export class CodexAppServerProvider implements SessionProvider {
         const status = backendTurn?.status;
         if (Array.isArray(backendTurn?.items)) {
           for (const raw of backendTurn.items) {
-            const item = raw as { id?: unknown; type?: unknown; text?: unknown };
+            const item = raw as { id?: unknown; type?: unknown; text?: unknown; phase?: unknown };
             if (!item || item.type !== "agentMessage" || typeof item.id !== "string" || !item.id) continue;
             let buffer = turn.items.get(item.id);
             if (!buffer) { buffer = { deltas: "", final: null, order: turn.itemOrder++ }; turn.items.set(item.id, buffer); }
             if (typeof item.text === "string") buffer.final = item.text;
+            if (typeof item.phase === "string") buffer.phase = item.phase;
           }
         }
-        if (status === "completed") { turn.finish(undefined, this.assembleFinalText(turn)); return; }
+        if (status === "completed") { turn.finish(undefined, this.assembleFinalText(turn, session.project)); return; }
         if (status === "failed") {
           const message = typeof backendTurn?.error === "string" ? backendTurn.error : String(backendTurn?.error?.message ?? "Codex 轮次失败");
           turn.finish(new AppError("PROVIDER_FAILED", message));
@@ -383,8 +409,15 @@ export class CodexAppServerProvider implements SessionProvider {
   }
 
   /** 从当前轮的最终 assistant 消息组装结果；不从推理摘要或 stderr 抽取 JSON。 */
-  private assembleFinalText(turn: TurnState): string {
-    return [...turn.items.values()].sort((a, b) => a.order - b.order).map(item => item.final ?? item.deltas).join("");
+  private assembleFinalText(turn: TurnState, project: boolean): string {
+    const items = [...turn.items.values()].sort((a, b) => a.order - b.order);
+    if (project) {
+      // 工具前的 commentary 不属于最终 JSON；旧协议无 phase 时取最后一条消息。
+      const final = items.filter(item => item.phase === "final_answer").at(-1)
+        ?? items.filter(item => item.phase !== "commentary").at(-1);
+      return final ? final.final ?? final.deltas : "";
+    }
+    return items.map(item => item.final ?? item.deltas).join("");
   }
 
   async sendTurn(handle: ProviderSessionHandle, request: SessionTurnRequest): Promise<ProviderResult> {
@@ -443,7 +476,7 @@ export class CodexAppServerProvider implements SessionProvider {
         assertSchema(output, request.schema, "Agent 输出");
       }
       return {
-        output, modelId: session.modelId, modelSource: "requested", providerId: "codex-cli",
+        output, modelId: session.modelId, modelSource: "requested", providerId: "codex-cli", toolCallCount: turn.toolItems.size,
         ...(backendTurnId ? { backendTurnId } : {}),
         ...(turn.usageSeen ? { usage: turn.usageLast, usageScope: "turn" as const } : {}),
       };
@@ -543,7 +576,7 @@ export function codexNativeAdapter(manager: SessionManager, limits: AgentLimits)
   const provider = new CodexAppServerProvider(manager, limits);
   return {
     sessionProvider: provider,
-    capabilities: (): ProviderCapabilities => ({ modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: true, textStream: true, sessions: "persistent" }),
+    capabilities: (): ProviderCapabilities => ({ modelCatalog: true, structuredOutput: "validated", tools: false, projectAnalysis: true, nativeResume: true, textStream: true, sessions: "persistent" }),
     probe: (setting, signal) => provider.probe(setting, signal),
   };
 }

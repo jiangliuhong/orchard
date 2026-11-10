@@ -6,9 +6,19 @@
 
 ## 能力与会话
 
-两个内建适配器都将凭据留在本机 CLI 内，工作台不保存 API key；均不授予流程创作或分析节点工具能力。Pi 明确使用 no-tools、no-extensions 和 no-mcp。Codex 沿用 CODEX_HOME 的认证与 config.toml，保留用户的模型路由、openai_base_url、model_provider / model_providers 和自定义模型目录，兼容 Magpie 接管。调用覆盖 mcp_servers 为空、notify 为空，使用 read-only 并关闭 shell / unified exec、插件、应用、hooks、子 Agent 和计算机/浏览器等工具特性。结构化输出由最终 JSON 解析与宿主 Schema 校验完成。
+两个内建适配器都将凭据留在本机 CLI 内，工作台不保存 API key；默认不授予流程创作或普通 Agent 节点工具能力。普通场景 Pi 明确使用 no-tools、no-extensions 和 no-mcp。Codex 沿用 CODEX_HOME 的认证与 config.toml，保留用户的模型路由、openai_base_url、model_provider / model_providers 和自定义模型目录，兼容 Magpie 接管。调用覆盖 mcp_servers 为空、notify 为空，使用 read-only 并关闭 shell / unified exec、插件、应用、hooks、子 Agent 和计算机/浏览器等工具特性。结构化输出由最终 JSON 解析与宿主 Schema 校验完成。
 
 Pi 和 Codex 均转发协议中的文本事件，支持原生会话恢复。多轮创作复用后端上下文；每次工作流节点执行和模型验证使用独立上下文，不隐式共享上一次 Agent 上下文。
+
+## 项目分析场景
+
+`projectAnalysis` 是独立场景能力，不改变普通场景的 `tools: false`。Registry 的缺省 `executionContext: "isolated"` 仍创建空临时目录；`"project"` 直接使用受租约管理的源码快照 cwd。项目调用仅允许一次性会话，不得恢复或复用普通场景连接；连接指纹包含执行场景。
+
+项目场景 Pi 去掉 no-tools、保留 no-extensions/no-mcp；Codex 开启原生 shell/unified exec，使用 workspace-write/never 和 ephemeral thread，不自动批准意外交互请求。原生工具无需宿主工具桥；审批、外部工具或用户输入请求明确失败。项目临时环境目录和进程持有者记录保存在实际数据目录内的独立会话目录，不混入源码。Orchard 不新增只读工具或文件系统沙箱，沿用 Provider 自身权限机制。
+
+项目运行不转发原始工具/诊断文本到运行事件，仅保留安全生命周期、工具完成计数和用量；最终业务输出仍可能包含 Agent 主动读取的敏感信息，不承诺自动过滤仓库秘密。Codex 项目输出优先取 final_answer，没有 phase 时取最后一条非 commentary 消息，不将工具前说明拼入 JSON。
+
+两个生产适配器均已实际完成双文件读取、工具调用与 JSON 输出验证；真实 SSH → 项目 Agent → 后续节点 → result 闭环也已通过，见 [实施记录](../../features/2026-11-10-git-project-agent/implementation.md)。使用说明见 [Git 项目分析](../product/git-project-analysis.md)。
 
 ## 原生协议
 

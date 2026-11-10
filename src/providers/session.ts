@@ -21,7 +21,12 @@ export interface ProviderSessionHandle {
   ref: BackendRef | null;
 }
 
+export type ExecutionContext = "isolated" | "project";
+
 export interface SessionOpenRequest {
+  /** 缺省沿用无工具策略；项目场景仅允许一次性会话。 */
+  executionContext?: ExecutionContext;
+  sessionDirectory?: string;
   /** 会话键（逻辑对话标识）；单次调用使用一次性匿名键。 */
   key: string;
   modelId: string;
@@ -61,7 +66,7 @@ export const TOOL_POLICY_VERSION = "codex-appserver-v1";
  * 连接指纹（设计文档 §17.1）：对白名单字段做 canonical JSON SHA-256。
  * 不散列或保存完整环境、config.toml 或认证文件。
  */
-export function connectionFingerprint(setting: ProviderSetting): string {
+export function connectionFingerprint(setting: ProviderSetting, executionContext: ExecutionContext = "isolated"): string {
   const executable = String(setting.config.executable ?? "");
   check(typeof executable === "string" && isAbsolute(executable), "INVALID_EXECUTABLE", "CLI 路径必须为绝对路径");
   check(setting.config.transport === undefined || setting.config.transport === "native", "PROTOCOL_UNSUPPORTED", "仅支持原生协议");
@@ -69,6 +74,6 @@ export function connectionFingerprint(setting: ProviderSetting): string {
   const homeSource = setting.id === "codex-cli"
     ? `codex-home:${codexHome()}`
     : `pi-config:default`;
-  const material = { providerId: setting.id, executable, transport, homeSource, toolPolicy: TOOL_POLICY_VERSION };
+  const material = { providerId: setting.id, executable, transport, homeSource, toolPolicy: TOOL_POLICY_VERSION, executionContext };
   return createHash("sha256").update(JSON.stringify(material)).digest("hex");
 }

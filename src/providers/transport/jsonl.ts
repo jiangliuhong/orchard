@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { AppError } from "../../domain/errors.js";
@@ -9,6 +11,8 @@ export interface JsonlOptions {
   cwd: string;
   /** 额外环境变量；继承宿主受控环境（含 CODEX_HOME 等本机配置）。 */
   env?: Record<string, string>;
+  /** Internal project lease directory for conservative orphan-process recovery. */
+  processDirectory?: string;
   limits: Pick<AgentLimits, "maxProtocolRecordBytes" | "maxBufferedWriteBytes" | "terminateGraceMs">;
   /** stdout 上每条完整协议记录（已解析的 JSON 值）。 */
   onRecord: (record: unknown) => void;
@@ -55,6 +59,10 @@ export class JsonlConnection {
       detached: process.platform !== "win32",
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (options.processDirectory) this.child.once("spawn", () => {
+      try { writeFileSync(join(options.processDirectory!, "process.json"), JSON.stringify({ pid: this.child.pid, ownerPid: process.pid, startedAt: Date.now() }), { flag: "wx", mode: 0o600 }); }
+      catch { this.fail(new AppError("PROJECT_IO_FAILED", "无法记录项目进程租约")); }
     });
     this.child.stdout!.on("data", (chunk: Buffer) => this.onStdout(chunk));
     this.child.stderr!.on("data", (chunk: Buffer) => {

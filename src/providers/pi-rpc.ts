@@ -44,6 +44,7 @@ interface TurnState {
   settled: boolean;
   interruptedByUs: boolean;
   timedOut: boolean;
+  toolCallCount: number;
   textBytes: number;
   protocolBytes: number;
   emit: (event: ProviderEvent) => void;
@@ -59,6 +60,7 @@ interface PiSession {
   sessionFile: string | null;
   modelId: string;
   cwd: string;
+  sessionDirectory?: string;
   sessionDir: string | null;
   generation: number;
   managerKey: string | null;
@@ -79,6 +81,7 @@ function createTurn(hostTurnId: string, promptId: string, emit: (event: Provider
   state.settled = false;
   state.interruptedByUs = false;
   state.timedOut = false;
+  state.toolCallCount = 0;
   state.textBytes = 0;
   state.protocolBytes = 0;
   state.emit = emit;
@@ -133,6 +136,8 @@ export class PiRpcProvider implements SessionProvider {
       executable: this.executable(setting),
       args,
       cwd: session.cwd,
+      processDirectory: session.sessionDirectory,
+      env: session.sessionDirectory ? { TMPDIR: session.sessionDirectory, TMP: session.sessionDirectory, TEMP: session.sessionDirectory } : undefined,
       limits: this.limits,
       onRecord: record => this.routeRecord(session, record),
       onDiagnostic: text => this.captureDiagnostic(session, text),
@@ -142,12 +147,13 @@ export class PiRpcProvider implements SessionProvider {
     session.pending = pending;
   }
 
-  private baseArgs(modelId: string): string[] {
-    // 继续关闭 tools、extensions 和 MCP；不引入 Pi SDK 依赖。
-    return ["--mode", "rpc", "--no-extensions", "--no-mcp", "--no-tools", "--thinking", "off", "--model", modelId];
+  private baseArgs(modelId: string, project: boolean): string[] {
+    // 仅项目场景开启原生工具，普通节点与创作会话保持原策略。
+    return ["--mode", "rpc", "--no-extensions", "--no-mcp", ...(!project ? ["--no-tools"] : []), "--thinking", "off", "--model", modelId];
   }
 
   async openSession(setting: ProviderSetting, request: SessionOpenRequest): Promise<ProviderSessionHandle> {
+    check(request.executionContext !== "project" || (!request.persistent && !request.resumeRef), "PROTOCOL_STATE_INVALID", "项目分析仅支持一次性会话");
     const managerKey = request.persistent ? request.key : null;
     // 复用既有空闲连接：同一逻辑会话、同代次、同模型、连接健康。
     if (managerKey !== null) {
@@ -166,7 +172,7 @@ export class PiRpcProvider implements SessionProvider {
     let session: PiSession | undefined;
     let registered = false;
     try {
-      const args = this.baseArgs(request.modelId);
+      const args = this.baseArgs(request.modelId, request.executionContext === "project");
       let sessionDir: string | null = null, sessionId: string = randomUUID(), resumeFile: string | undefined;
       if (request.persistent) {
         if (request.resumeRef?.kind === "pi") {
@@ -186,7 +192,7 @@ export class PiRpcProvider implements SessionProvider {
       }
       session = {
         conn: undefined!, pending: undefined!, sessionId, sessionFile: resumeFile ?? null,
-        modelId: request.modelId, cwd: request.cwd, sessionDir, generation: slot.generation,
+        modelId: request.modelId, cwd: request.cwd, sessionDirectory: request.sessionDirectory, sessionDir, generation: slot.generation,
         managerKey, slot, slotFinished: false, broken: undefined, turn: null, needsStateRefresh: true, handle: null,
       };
       this.spawn(setting, session, args);
@@ -293,6 +299,10 @@ export class PiRpcProvider implements SessionProvider {
       return;
     }
     switch (value.type) {
+      case "tool_execution_end":
+        turn.toolCallCount++;
+        turn.emit({ type: "provider.tool_completed", payload: { count: turn.toolCallCount } });
+        return;
       case "message_update": {
         const event = value.assistantMessageEvent as { type?: unknown; delta?: unknown } | undefined;
         if (event?.type !== "text_delta" || typeof event.delta !== "string" || !event.delta) return;
@@ -408,7 +418,7 @@ export class PiRpcProvider implements SessionProvider {
         output,
         modelId: last?.model ?? session.modelId,
         modelSource: last?.model ? "reported" : "requested",
-        providerId: "pi-cli",
+        providerId: "pi-cli", toolCallCount: turn.toolCallCount,
         backendTurnId: promptId,
         ...(last?.usage !== undefined ? { usage: last.usage, usageScope: "turn" as const } : {}),
       };
@@ -513,7 +523,7 @@ export function piNativeAdapter(manager: SessionManager, limits: AgentLimits): N
   const provider = new PiRpcProvider(manager, limits);
   return {
     sessionProvider: provider,
-    capabilities: (): ProviderCapabilities => ({ modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: true, textStream: true, sessions: "persistent" }),
+    capabilities: (): ProviderCapabilities => ({ modelCatalog: true, structuredOutput: "validated", tools: false, projectAnalysis: true, nativeResume: true, textStream: true, sessions: "persistent" }),
     probe: (setting, signal) => provider.probe(setting, signal),
   };
 }

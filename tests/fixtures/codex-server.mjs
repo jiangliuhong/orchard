@@ -31,6 +31,18 @@ function turnFlow(msg) {
   const reply = text.startsWith("RETURN:") ? text.slice(7) : JSON.stringify({ threadId: msg.params?.threadId, promptCount: prompts, echo: text.slice(0, 60) });
   switch (scenario) {
     case "no-turn-response": return;
+    case "project-final":
+    case "project-final-legacy": {
+      send({ id: msg.id, result: { turn: { id: TURN, status: "inProgress" } } });
+      const phases = scenario === "project-final";
+      const items = [
+        { id: "intro", type: "agentMessage", text: "I will inspect the files.", ...(phases ? { phase: "commentary" } : {}) },
+        { id: "answer", type: "agentMessage", text: reply, ...(phases ? { phase: "final_answer" } : {}) },
+      ];
+      for (const item of items) send({ method: "item/completed", params: { threadId: THREAD, turnId: TURN, item } });
+      turnCompleted("completed", { items });
+      return;
+    }
     case "notify-first":
       delta("m1", "early ");
       send({ id: msg.id, result: { turn: { id: TURN, status: "inProgress" } } });

@@ -32,6 +32,7 @@ export interface WorkflowNode {
     scriptVersionId?: string;
     resultMode?: "process" | "json";
     agentConfigId?: string;
+    project?: { projectId: string };
     prompt?: string;
     cases?: { label: string; value: Scalar }[];
     defaultLabel?: string;
@@ -79,6 +80,8 @@ export interface ProviderCapabilities {
   modelCatalog: boolean;
   structuredOutput: "native" | "validated";
   tools: boolean;
+  /** 指定源码目录的一次性工具分析；不改变普通场景的 tools 策略。 */
+  projectAnalysis?: boolean;
   nativeResume: boolean;
   textStream: boolean;
   /** 会话能力；旧 Provider 可缺省，由 registry 规范化为 "none"。 */

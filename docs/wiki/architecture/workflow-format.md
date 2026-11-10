@@ -11,7 +11,7 @@
 | 类型 | config | 输出 |
 | --- | --- | --- |
 | `code.nodejs` | `script`，可选 `timeoutMs` | 默认导出函数的 JSON 返回值 |
-| `agent` | `prompt`，可选 `agentConfigId` / `timeoutMs` | 经输出 Schema 校验的 JSON |
+| `agent` | `prompt`，可选 `agentConfigId` / `project: {projectId}` / `timeoutMs` | 经输出 Schema 校验的 JSON |
 | `shell` | `script`，可选 `resultMode` / `timeoutMs` | 默认 `{stdout,stderr,exitCode}`；`json` 模式读取结果文件 |
 | `script` | `scriptId`、`scriptVersionId`，可选 `timeoutMs` | 固定脚本版本的输出；运行时校验该版本 Schema |
 | `switch` | `cases: [{label,value}]`、`defaultLabel` | `{edgeId,value,reason}` |
@@ -53,6 +53,12 @@ Schema 使用严格 JSON Schema 校验。声明 required 字段时同时在 prop
 ```
 
 也可使用 `source: "object"` 组合不同节点及原始输入，或使用数组、常量、整个节点输出。引用节点必须在所有结束路径中可用；结果字段路径在运行时解析，缺失字段或最终 Schema 校验失败会使整次运行失败，即使此前所有节点已成功。编辑页的“最终输出”表单直接写入上述现有字段，不改变执行顺序或增加业务节点。
+
+## Agent 项目上下文
+
+Agent 节点可增加 `config.project: { "projectId": "local-project-id" }`。只接受稳定本机项目 ID，不接受输入动态覆盖远端、分支、凭据或 cwd；嵌套未知字段会被拒绝。没有 project 时完全保持普通节点行为。
+
+发布、入队时检查启用项目、风险确认及 Provider 项目分析能力。入队保存内部项目配置快照，准备阶段 fetch 并固定 SHA；输出仍只由 outputSchema 决定，不强制注入 SHA。分支/SHA/未展开项等来源保存在 attempt execution.project 中。项目节点默认准备与分析合计超时 10 分钟，可使用 timeoutMs 设置时限。源码快照可写，不是安全沙箱，详见 [Git 项目分析与存储空间](../product/git-project-analysis.md)。
 
 ## Node.js
 

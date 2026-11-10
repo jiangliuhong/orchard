@@ -49,7 +49,7 @@ const validateShape = ajv.compile({
 const timeout = { type: "integer", minimum: 1, maximum: 1800000 };
 function validateConfig(node: WorkflowNode) {
   const properties = node.type === "agent"
-    ? { agentConfigId: { type: "string", minLength: 1, maxLength: 200 }, prompt: { type: "string", minLength: 1, maxLength: 100000 }, timeoutMs: timeout }
+    ? { project: { type: "object", required: ["projectId"], properties: { projectId: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,199}$" } }, additionalProperties: false }, agentConfigId: { type: "string", minLength: 1, maxLength: 200 }, prompt: { type: "string", minLength: 1, maxLength: 100000 }, timeoutMs: timeout }
     : node.type === "switch"
       ? { cases: { type: "array", maxItems: 100, items: { type: "object", required: ["label", "value"], properties: { label: { type: "string", minLength: 1 }, value: { type: ["string", "number", "boolean", "null"] } }, additionalProperties: false } }, defaultLabel: { type: "string", minLength: 1 } }
       : node.type === "script"

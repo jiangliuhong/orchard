@@ -1,4 +1,7 @@
 import Fastify from "fastify";
+import { gitProjects, type GitProjects } from "../project-git/service.js";
+import { registerProjectRoutes } from "../project-git/routes.js";
+import { StorageUsageService } from "../storage/usage.js";
 import { NotificationFeed } from "./notifications.js";
 import { defaultAgentPromptPreviews } from "../authoring/prompt-preview.js";
 import staticPlugin from "@fastify/static";
@@ -93,6 +96,8 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
         .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
         .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
       add("providers", registry, () => registry.closeVerifications());
+      const projects = gitProjects(opened); await projects.recover(); add("projects", projects, () => projects.close());
+      const storage = new StorageUsageService(opened); add("storage", storage, () => storage.close());
       const gateway = new WebBridgeGateway(new WebBridgeClient(opened.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(opened.root, coordinator)); add("bridge", gateway, () => gateway.close());
       add("apiAuth", new LocalApiAuth(opened.root));
       const service = new AuthoringService(opened, registry); add("authoring", service, () => service.close());
@@ -192,6 +197,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     check(services.configGit, "SERVICE_NOT_READY", "配置服务尚未就绪", 503);
     return services.configGit as ConfigGitService;
   });
+  registerProjectRoutes(app, () => services.projects as GitProjects, () => services.storage as StorageUsageService);
   if (!bootstrap) app.get("/api/health", async () => ({ ok: true, ready: true, application: "orchard-workbench", schemaVersion: SCHEMA_VERSION, activeModelVerifications: providers.activeVerificationCount }));
   const messageAgentView = () => {
     const setting = (services.configGit as ConfigGitService).messageAgent();

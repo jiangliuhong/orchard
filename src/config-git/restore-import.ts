@@ -12,6 +12,7 @@ import type { PortableSnapshot, PortableBridge, PortableProvider, PortableScript
 import type { RestorePreview, RestorePreviewOptions } from "./restore.js";
 import { persistArtifact, readOptional } from "./restore-files.js";
 import { localReference, compareCodePoints } from "./snapshot-primitives.js";
+import { gitProjects } from "../project-git/service.js";
 import { portableScriptHash, portableWorkflowHash, normalizedScript, workflowDependencies, workflowIdentity, validatePortableScript } from "./snapshot-validation.js";
 
 type Row = Record<string, any>;
@@ -50,7 +51,7 @@ export function databaseFingerprint(store: Store) {
   return digest(canonicalJson({ rows, artifacts, scriptArtifacts }));
 }
 export function targetFingerprint(store: Store) {
-  return digest(canonicalJson({ database: databaseFingerprint(store), bridge: readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json") }));
+  return digest(canonicalJson({ database: databaseFingerprint(store), bridge: readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
 }
 /** Independent source copies live inside the recovery point JSON, never just artifact paths. */
 export function captureSnapshot(store: Store, theme: SnapshotTheme) {
@@ -187,6 +188,12 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     const raw = JSON.parse(files["workflow.json"]!) as { nodes?: { type?: string; config?: { script?: unknown } }[] };
     if (Array.isArray(raw.nodes)) for (const node of raw.nodes) if ((node?.type === "code.nodejs" || node?.type === "shell") && typeof node.config?.script === "string") check(Object.hasOwn(files, node.config.script), "INVALID_FILES", `缺少工作流源码: ${node.config.script}`);
     for (const dependency of workflowDependencies(files)) scriptDefinition(dependency.id, dependency.versionId);
+    // Even incomplete drafts must not import dangling local project references.
+    const projectNodes = (Array.isArray(raw.nodes) ? raw.nodes : []) as { type?: string; config?: { project?: { projectId?: string } } }[];
+    for (const node of projectNodes) if (node?.type === "agent" && node.config?.project) {
+      check(typeof node.config.project.projectId === "string", "DEPENDENCY_MISSING", "项目依赖无效");
+      gitProjects(store).binding(node.config.project.projectId);
+    }
     if (!strict) return;
     const workflow = readDefinition(files);
     for (const node of workflow.nodes) {

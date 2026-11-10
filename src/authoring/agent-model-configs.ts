@@ -1,3 +1,4 @@
+import { gitProjects } from "../project-git/service.js";
 import { randomUUID } from "node:crypto";
 import { configCoordinator } from "../config-git/coordinator.js";
 import type { AgentModelConfig, AgentModelConfigView, RunAgentBinding, Workflow } from "../domain/types.js";
@@ -103,6 +104,7 @@ export class AgentModelConfigs {
       .filter(row => enabled === undefined || !!row.enabled === enabled).map(row => this.view(row.id)) };
   }
   resolveWorkflow(workflow: Workflow): RunAgentBinding[] {
+    gitProjects(this.store).assertWorkflow(workflow);
     const configs = new Map<string, { config: AgentModelConfig; providerRevision: number }>();
     return workflow.nodes.filter(node => node.type === "agent").map(node => {
       const id = node.config.agentConfigId ?? workflow.defaults?.agent?.agentConfigId;
@@ -113,6 +115,10 @@ export class AgentModelConfigs {
         check(config.enabled, "AGENT_CONFIG_DISABLED", `Agent 模型配置已禁用: ${config.name}`);
         const setting = this.validateChoice(config);
         resolved = { config, providerRevision: setting.revision }; configs.set(id, resolved);
+      }
+      if (node.config.project) {
+        const adapter = this.providers.adapter(resolved.config.providerId), setting = this.providers.setting(resolved.config.providerId);
+        check((adapter.capabilitiesFor?.(setting) ?? adapter.capabilities).projectAnalysis, "PROJECT_CAPABILITY_UNSUPPORTED", `${node.name} 的 Provider 不支持项目分析`);
       }
       return { nodeId: node.id, configId: id, configRevision: resolved.config.revision, name: resolved.config.name, providerId: resolved.config.providerId, modelId: resolved.config.modelId, providerRevision: resolved.providerRevision };
     });
