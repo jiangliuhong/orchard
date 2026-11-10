@@ -34,4 +34,6 @@
 - [Agent 模型配置与工作流动态引用](../features/2026-11-07-agent-model-configs/design.md)
 - [字典、加密字典与 Git 同步方案（实施中，管理入口已实现）](../features/2026-11-09-dictionaries/design.md)
 
+- [Git 项目工作区、Agent 分析与设置存储空间查看（设计中，SSH 密钥接入）](../features/2026-11-10-git-project-agent/design.md)
+
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。
