@@ -1,3 +1,4 @@
+import { isRedacted } from "./DictionaryEditors";
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Download, Maximize2, Minimize2 } from "lucide-react";
 import type { RunStatus } from "../../domain/types.js";
@@ -11,7 +12,7 @@ function artifactReference(value: unknown): { id: string; byteSize: number } | u
   const artifact = value.artifact;
   if (artifact && typeof artifact === "object" && "id" in artifact && typeof artifact.id === "string" && "byteSize" in artifact && typeof artifact.byteSize === "number") return { id: artifact.id, byteSize: artifact.byteSize };
 }
-export function FinalResult({ runId, status, value }: { runId: string; status: RunStatus; value: unknown }) {
+export function FinalResult({ runId, status, value, redacted = false }: { runId: string; status: RunStatus; value: unknown; redacted?: boolean }) {
   const [format, setFormat] = useState("preview"), [fullscreen, setFullscreen] = useState(false), [copied, setCopied] = useState(false);
   const [loaded, setLoaded] = useState<{ runId: string; value: unknown }>(), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const controller = useRef<AbortController | undefined>(undefined), copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -19,9 +20,10 @@ export function FinalResult({ runId, status, value }: { runId: string; status: R
     setLoaded(undefined); setError(""); setCopied(false); setFormat("preview"); setBusy(false);
     return () => { controller.current?.abort(); clearTimeout(copyTimer.current); };
   }, [runId]);
+  redacted = redacted || isRedacted(value);
   const result = loaded?.runId === runId ? loaded.value : value;
   const artifact = loaded?.runId === runId ? undefined : artifactReference(value);
-  const ready = status === "succeeded", text = typeof result === "string" && format === "preview" ? result : JSON.stringify(result, null, 2) ?? "null";
+  const ready = !redacted && status === "succeeded", text = typeof result === "string" && format === "preview" ? result : JSON.stringify(result, null, 2) ?? "null";
   const load = async () => {
     if (!artifact) return;
     const abort = new AbortController(); controller.current = abort; setBusy(true); setError("");
@@ -43,7 +45,7 @@ export function FinalResult({ runId, status, value }: { runId: string; status: R
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = `workflow-result-${runId}.${plainText ? "txt" : "json"}`;
     anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 0);
   };
-  const content = !ready ? <div className="result-empty">{["queued", "running", "cancel_requested"].includes(status) ? "工作流尚未完成，完成后将在此显示最终结果。" : "此次运行未成功完成，没有最终结果。可到执行详情查看节点输出和错误。"}</div>
+  const content = redacted ? <p className="notice" role="status">涉及加密字典的敏感执行范围，最终结果已隐藏。</p> : !ready ? <div className="result-empty">{["queued", "running", "cancel_requested"].includes(status) ? "工作流尚未完成，完成后将在此显示最终结果。" : "此次运行未成功完成，没有最终结果。可到执行详情查看节点输出和错误。"}</div>
     : artifact ? <div className="result-empty"><p>结果较大（{(artifact.byteSize / 1024).toFixed(1)} KiB），加载后可预览、复制或下载。</p><Button variant="outline" disabled={busy} onClick={() => void load()}>{busy ? "正在加载…" : "加载完整结果"}</Button></div>
     : <pre className={`final-result-content ${typeof result === "string" && format === "preview" ? "is-text" : "is-json"}`}>{text === "" ? "（空字符串）" : text}</pre>;
   const actions = <><Button variant="outline" disabled={!ready || !!artifact} onClick={() => void copy()}>{copied ? <Check size={14} /> : <Copy size={14} />}{copied ? "已复制" : "复制"}</Button><Button variant="outline" disabled={!ready || !!artifact} onClick={download}><Download size={14} />下载</Button></>;

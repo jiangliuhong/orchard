@@ -27,6 +27,7 @@ export function registerConfigGitRoutes(app: FastifyInstance, get: () => ConfigG
   });
   post("/bind", { remoteUrl: string, branch: string, configDir: string, identity: { type: "object", properties: { name: string, email: string }, required: ["name", "email"], additionalProperties: false } }, ["remoteUrl", "branch"], (s, v) => s.coordinator.withActivity("git-bind", () => s.repository.bind(v)));
   post("/unbind", {}, [], s => s.coordinator.withActivity("git-unbind", () => s.repository.unbind()));
+  post("/remote-sync-source", {}, ["requestId"], s => s.remoteSyncSource());
   post("/fetch", {}, [], s => s.coordinator.withActivity("git-fetch", () => s.repository.fetch()));
   post("/push", {}, [], s => s.coordinator.withActivity("git-push", () => s.repository.push()));
   app.post(`${root}/export`, async request => {
@@ -40,7 +41,7 @@ export function registerConfigGitRoutes(app: FastifyInstance, get: () => ConfigG
     check(!query.source || ["local", "remote"].includes(query.source), "INVALID_PAGE", "历史来源无效");
     return get().history({ ...query, cursor: query.cursor ?? query.offset, limit: query.limit === undefined ? undefined : Number(query.limit) });
   });
-  post("/restore-preview", { ...preference, categories: { type: "array", minItems: 1, uniqueItems: true, items: { enum: ["general", "providers", "webBridge", "scripts", "workflows"] } }, mappings: { type: "object", additionalProperties: { type: "string", minLength: 1, maxLength: 4096 } }, source: { oneOf: [{ type: "object", properties: { kind: { const: "git" }, sha: { type: "string", pattern: "^[a-f0-9]{40}$" } }, required: ["kind", "sha"], additionalProperties: false }, { type: "object", properties: { kind: { const: "recovery-point" }, id: string }, required: ["kind", "id"], additionalProperties: false }] } }, ["source"], (s, v) => s.restorePreview(v as RestorePreviewOptions & { source: NonNullable<RestorePreviewOptions["source"]> }));
+  post("/restore-preview", { ...preference, categories: { type: "array", minItems: 1, uniqueItems: true, items: { enum: ["general", "providers", "webBridge", "scripts", "workflows", "dictionaries"] } }, mappings: { type: "object", additionalProperties: { type: "string", minLength: 1, maxLength: 4096 } }, source: { oneOf: [{ type: "object", properties: { kind: { const: "git" }, sha: { type: "string", pattern: "^[a-f0-9]{40}$" } }, required: ["kind", "sha"], additionalProperties: false }, { type: "object", properties: { kind: { const: "recovery-point" }, id: string }, required: ["kind", "id"], additionalProperties: false }] } }, ["source"], (s, v) => s.restorePreview(v as RestorePreviewOptions & { source: NonNullable<RestorePreviewOptions["source"]> }));
   post("/restore", { token: string }, ["token", "requestId"], (s, v) => s.apply(v));
   app.get<{ Params: { token: string }; Querystring: { cursor?: string } }>(`${root}/previews/:token/diffs`, async request => get().previewPage(request.params.token, request.query.cursor));
   app.get(`${root}/recovery-points`, async () => get().recoveryPoints());

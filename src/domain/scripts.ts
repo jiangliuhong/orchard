@@ -1,3 +1,4 @@
+import { normalizeDictionaryBindings, type DictionaryBindings } from "./dictionaries.js";
 import { AppError, check } from "./errors.js";
 import { assertSchema } from "./validation.js";
 import type { JsonSchema, SourceFiles } from "./types.js";
@@ -15,6 +16,7 @@ export interface ScriptDefinition {
   timeoutMs?: number;
   resultMode?: "process" | "json";
   files: SourceFiles;
+  dictionaryBindings?: DictionaryBindings;
 }
 
 const MAX_FILES = 100;
@@ -59,7 +61,9 @@ export function validateScript(value: unknown): ScriptDefinition {
       if (!(error instanceof AppError && error.code === "SCHEMA_MISMATCH")) throw error;
     }
   }
+  const dictionaryBindings = normalizeDictionaryBindings(script.dictionaryBindings);
   return {
+    ...(dictionaryBindings ? { dictionaryBindings } : {}),
     id: script.id, name: script.name, description: script.description, runtime: script.runtime,
     entryFile: script.entryFile, inputSchema: script.inputSchema!, outputSchema: script.outputSchema!,
     files: script.files as SourceFiles, ...(script.timeoutMs === undefined ? {} : { timeoutMs: script.timeoutMs }),

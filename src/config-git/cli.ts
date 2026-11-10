@@ -132,7 +132,7 @@ export async function runConfigGitCli(args: string[], context: Context) {
     history: ["cursor", "limit", "start-sha"], commits: ["cursor", "limit", "start-sha"], operation: ["id"],
     export: ["theme"], "commit-preview": ["message", "push", "regenerate", "theme"],
     commit: ["token", "request-id", "theme"], confirm: ["token", "request-id", "theme"],
-    fetch: ["request-id"], push: ["request-id"], unbind: ["request-id"], recover: ["id", "request-id"],
+    "remote-sync-source": ["request-id"], fetch: ["request-id"], push: ["request-id"], unbind: ["request-id"], recover: ["id", "request-id"],
     "remote-check": ["remote-url"], bind: ["remote-url", "branch", "config-dir", "name", "email", "request-id"],
     "restore-preview": ["sha", "recovery-point", "categories", "mappings-json"], restore: ["token", "request-id"],
   };
@@ -176,14 +176,14 @@ export async function runConfigGitCli(args: string[], context: Context) {
   if (command === "unbind") return post(command, { requestId: requestId() });
   if (command === "recover") return post(`operations/${encodeURIComponent(option("--id", true)!)}/recover`, { requestId: requestId() });
   if (command === "export") return post("export", { theme });
-  if (command === "fetch" || command === "push") return post(command, { requestId: requestId() });
+  if (command === "remote-sync-source" || command === "fetch" || command === "push") return post(command, { requestId: requestId() });
   if (command === "commit-preview") return post(command, { message: option("--message", true), push: args.includes("--push"), regenerate: args.includes("--regenerate"), theme });
   if (command === "commit" || command === "confirm" || command === "restore") return post(command === "confirm" ? "commit" : command, { token: option("--token", true), requestId: requestId(), ...(command === "restore" ? {} : { theme }) });
   if (command === "restore-preview") {
     const sha = option("--sha"), recoveryPoint = option("--recovery-point");
     if (Boolean(sha) === Boolean(recoveryPoint)) fail("Specify exactly one of --sha and --recovery-point");
     const categories = option("--categories", true)!.split(",");
-    if (!categories.length || categories.some(c => !["general", "providers", "webBridge", "workflows", "scripts"].includes(c)) || new Set(categories).size !== categories.length) fail("Invalid restore categories");
+    if (!categories.length || categories.some(c => !["general", "providers", "webBridge", "workflows", "scripts", "dictionaries"].includes(c)) || new Set(categories).size !== categories.length) fail("Invalid restore categories");
     let mappings: unknown;
     try { mappings = JSON.parse(option("--mappings-json") ?? "{}"); } catch { fail("Invalid mappings JSON"); }
     if (!mappings || typeof mappings !== "object" || Array.isArray(mappings) || Object.values(mappings).some(v => typeof v !== "string")) fail("Mappings must be a JSON object of strings");

@@ -1,3 +1,4 @@
+import { BridgeExecutionHistory } from "./history.js";
 import { BrowserChannel, preprocessBrowser } from "./browser-execution.js";
 import type { CredentialBindings } from "./credential-inputs.js";
 import { executeHttpTool, type HttpDependencies } from "./execution.js";
@@ -12,6 +13,7 @@ export interface WebBridgeStatus { enabled: boolean; connected: boolean; catalog
 export interface WebBridgeProfile { id: string; name: string; extensionId: string; connected: boolean; lastSeen: number }
 export class WebBridgeGateway {
   readonly browserChannel = new BrowserChannel();
+  history = new BridgeExecutionHistory();
   private closed = false;
   readonly httpDependencies: HttpDependencies = {};
   private httpCalls = new Set<AbortController>();
@@ -19,6 +21,7 @@ export class WebBridgeGateway {
   constructor(readonly client: WebBridgeClient, readonly config?: WebBridgeConfig, readonly coordinator = config?.coordinator ?? new ConfigWriteCoordinator()) {}
   reloadAfterRestore() {
     this.config?.reloadAfterRestore();
+    for (const tool of this.tools()) this.history.restrict(tool);
     this.browserChannel.close();
     this.profiles.clear();
     this.client.close();
@@ -37,7 +40,7 @@ export class WebBridgeGateway {
   tools(application?: string): WebBridgeTool[] { return this.config?.tools(application) ?? listTools(application); }
   saveApplication(application: { id: string; name: string; enabled?: boolean }) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); return this.config.saveApplication(application); }
   deleteApplication(id: string) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); return this.config.deleteApplication(id); }
-  saveTool(tool: Parameters<WebBridgeConfig["saveTool"]>[0]) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); return this.config.saveTool(tool); }
+  saveTool(tool: Parameters<WebBridgeConfig["saveTool"]>[0]) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); const saved = this.config.saveTool(tool); this.history.restrict(saved); return saved; }
   deleteTool(application: string, toolId: string) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); check(this.tools(application).some(item => item.toolId === toolId), "UNKNOWN_TOOL", "工具不存在"); this.config.deleteTool(application, toolId); }
   saveEnvironment(application: string, environment: Parameters<WebBridgeConfig["saveEnvironment"]>[1]) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); return this.config.saveEnvironment(application, environment); }
   deleteEnvironment(application: string, id: string) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); this.config.deleteEnvironment(application, id); }
@@ -60,7 +63,33 @@ export class WebBridgeGateway {
     });
   }
   profilesList() { return [...this.profiles.values()].map(profile => ({ ...profile, connected: Date.now() - profile.lastSeen < 150000 })).sort((a, b) => b.lastSeen - a.lastSeen); }
-  async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings } = {}) {
+  async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; source?: "call" | "test" } = {}) {
+    const startedAt = Date.now();
+    const capturedArgs = JSON.parse(JSON.stringify(args ?? null));
+    const capturedTool = structuredClone(this.tools(application).find(item => item.toolId === toolId));
+    const capturedBindings = structuredClone(options.credentialBindings);
+    const environments = this.config?.environments(application).filter(item => item.enabled) ?? [];
+    const environmentId = options.environmentId ?? (environments.length === 1 ? environments[0].id : undefined);
+    let status: "succeeded" | "failed" = "failed", errorCode: string | undefined;
+    try {
+      const result = await this.execute(application, toolId, args, options);
+      status = "succeeded";
+      return result;
+    } catch (error) {
+      errorCode = error instanceof AppError ? error.code : "EXECUTION_FAILED";
+      throw error;
+    } finally {
+      try {
+        this.history.add({ application, toolId, args: capturedArgs, source: options.source ?? "call", startedAt, durationMs: Date.now() - startedAt, status, environmentId, errorCode }, { tool: capturedTool, bindings: capturedBindings });
+        const currentTool = this.tools(application).find(item => item.toolId === toolId);
+        if (currentTool) this.history.restrict(currentTool);
+      } catch {
+        // Never turn a completed business action into a failure that encourages duplicate execution.
+        console.warn("Web Bridge 执行历史保存失败，请检查本地存储空间与权限");
+      }
+    }
+  }
+  private async execute(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings }) {
     return this.coordinator.withActivity("WebBridgeGateway.call", async () => {
       const tool = this.tools(application).find(item => item.toolId === toolId);
       check(tool, "UNKNOWN_TOOL", `未知浏览器工具: ${application}/${toolId}`);

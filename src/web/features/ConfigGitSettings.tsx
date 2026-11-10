@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { RemoteConfigSync } from "./RemoteConfigSync";
 import { ToastNotice } from "../components/ToastNotice";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { api, pretty, requestId, send, useResource } from "../lib/api";
@@ -25,8 +26,8 @@ import { ErrorNotice, Loading } from "../components/common";
  * Parent mounts ConfigGitGeneralDelivery globally inside ThemeProvider.
  */
 export const API_NOTES = "Raw repository responses are adapted locally; general delivery uses authoritative ThemeProvider state.";
-export type Category = "general" | "providers" | "webBridge" | "workflows" | "scripts";
-const categories: Record<Category, string> = { general: "常规", providers: "Provider", webBridge: "Web Bridge", workflows: "工作流", scripts: "脚本" };
+export type Category = "general" | "providers" | "webBridge" | "workflows" | "scripts" | "dictionaries";
+export const categories: Record<Category, string> = { general: "常规", providers: "Provider", webBridge: "Web Bridge", workflows: "工作流", scripts: "脚本", dictionaries: "字典" };
 export interface Binding { id: string; remoteUrl: string; branch: string; configDir: string; remote?: string; snapshotState?: "empty" | "missing" | "valid" | "invalid" | "unsupported" }
 export interface RemoteCheck { branches: string[]; defaultBranch?: string; identity?: { name?: string; email?: string } }
 export interface RepositoryStatus { localSha?: string; remoteSha?: string; ahead: number; behind: number; diverged: boolean; dirtyPaths: string[]; pendingCommits?: string[]; operationId?: string; remoteObservedAt?: string; message?: string }
@@ -44,7 +45,7 @@ const errorText = (e: unknown) => e instanceof Error ? `${"code" in e ? `${Strin
 
 type RawFileDiff = { path: string; before: string | null; after: string | null };
 function fileDiff(diff: RawFileDiff): Diff {
-  const category: Category = diff.path.includes("providers/") ? "providers" : diff.path.includes("web-bridge") ? "webBridge" : diff.path.startsWith("workflows/") ? "workflows" : diff.path.startsWith("scripts/") ? "scripts" : "general";
+  const category: Category = diff.path.startsWith("dictionaries/") ? "dictionaries" : diff.path.includes("providers/") ? "providers" : diff.path.includes("web-bridge") ? "webBridge" : diff.path.startsWith("workflows/") ? "workflows" : diff.path.startsWith("scripts/") ? "scripts" : "general";
   return { ...diff, category, changeType: diff.before === null ? "add" : diff.after === null ? "delete" : "update" };
 }
 export function adaptPreview(value: unknown): Preview {
@@ -139,6 +140,7 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [operation, setOperation] = useState<Operation>();
   const [preview, setPreview] = useState<Preview>();
+  const [direction, setDirection] = useState(() => localStorage.getItem("orchard-config-git-remote-operation") ? "remote" : "backup");
   const [message, setMessage] = useState("备份配置");
   const messageAgent = useResource<MessageAgentSetting>(`${root}/message-agent`);
   const [confirmed, setConfirmed] = useState(false);
@@ -181,6 +183,7 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
       const accepted = response as Accepted;
       operationHandler.current = done;
       localStorage.setItem("orchard-config-git-operation", accepted.operationId);
+      localStorage.setItem("orchard-config-git-operation-kind", path);
       setOperation({ operationId: accepted.operationId, phase: "accepted" });
     } else done(response);
   };
@@ -201,7 +204,13 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
         if (next.phase === "completed") {
           localStorage.removeItem("orchard-config-git-operation");
           const handler = operationHandler.current; operationHandler.current = undefined;
-          if (handler) handler(next.result); else report(next.result);
+          if (handler) handler(next.result); else {
+            const kind = localStorage.getItem("orchard-config-git-operation-kind");
+            if (kind === "/commit-preview") showPreview(next.result);
+            else if (kind === "/remote/check") setChecked(next.result as RemoteCheck);
+            else report(next.result);
+          }
+          localStorage.removeItem("orchard-config-git-operation-kind");
           return;
         }
         if (next.phase === "interrupted") {
@@ -225,21 +234,17 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
     return { theme, clientId, preferenceRevision };
   };
   const showPreview = (value: unknown) => { setPreview(adaptPreview(value)); setConfirmed(false); };
-  const previewInitialized = useRef(false);
   const createPreview = () => run(async () => {
     setPreview(undefined);
     await mutate("/commit-preview", { message: message.trim(), push: true, ...general() }, showPreview);
   });
-  useEffect(() => {
-    if (sync && binding && !previewInitialized.current && !operation && !inFlight.current) {
-      previewInitialized.current = true;
-      if (binding.snapshotState !== "invalid" && binding.snapshotState !== "unsupported") void createPreview();
-    }
-  }, [sync, binding?.id]);
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
   const cannotConfirm = !preview || !confirmed || !!preview.nextCursor || preview.noChanges || preview.blockers.length > 0 || preview.diffs.some(d => d.blockingReason) || preview.expiresAt <= Date.now();
   const snapshotBlocked = binding?.snapshotState === "invalid" || binding?.snapshotState === "unsupported";
   return <section className={`config-git-settings${sync ? " config-git-sync" : ""}`} aria-label="Git 配置存储" aria-busy={locked}>
+    {sync && <div className="actions" role="group" aria-label="同步方向"><Button variant={direction === "backup" ? "secondary" : "ghost"} aria-pressed={direction === "backup"} onClick={() => { if ((direction !== "remote" && !preview) || window.confirm("放弃当前预览和映射输入？已受理操作会继续执行。")) { invalidate(); setDirection("backup"); } }}>备份到远端</Button><Button variant={direction === "remote" ? "secondary" : "ghost"} aria-pressed={direction === "remote"} onClick={() => { if (!preview || window.confirm("放弃当前备份预览？")) { invalidate(); setDirection("remote"); } }}>从远端同步</Button></div>}
+    {sync && <RemoteConfigSync visible={direction === "remote"} binding={binding} status={status} onApplied={reload} onLeave={() => setDirection("backup")} />}
+    <div hidden={sync && direction !== "backup"} className="config-git-backup">
     <div className="settings-section-heading"><span className="field-hint">{sync ? "本地变更" : "管理配置备份仓库及描述生成方式"}</span><Button variant="outline" size={sync ? "icon-sm" : "sm"} aria-label="刷新状态" title="刷新状态" disabled={busy} onClick={() => void run(reload)}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />{!sync && "刷新状态"}</Button></div>
     <div className="config-git-body"><ErrorNotice message={error || messageAgent.error} /><ToastNotice message={notice} onDismiss={() => setNotice("")} />
       {operation && <div role="status" className="config-git-operation"><p>{activeOperation ? "正在处理配置，请稍候…" : operation.phase === "completed" ? "操作已完成" : operation.phase === "recovery_required" ? "操作需要恢复" : "操作已结束"}</p><details><summary>操作详情</summary><code>{operation.operationId} · {operation.phase}</code></details>{operation.phase === "interrupted" && <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await reload(); })}>核对仓库状态</Button>}{operation.phase === "recovery_required" && <Button disabled={busy} onClick={() => void run(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}))}>重试恢复未完成阶段</Button>}</div>}
@@ -289,6 +294,7 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
       {preview && !preview.noChanges && <label className="config-git-confirm"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整变更，确认备份到远端仓库。</label>}
       <div className="config-git-commit-actions"><span className="field-hint">提交并推送到远端</span><div className="actions"><Button size="sm" variant="outline" disabled={locked || !message.trim() || snapshotBlocked} onClick={() => void createPreview()}>生成提交预览</Button><Button size="sm" aria-label="进行备份（commit + push）" disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate("/commit", { token: preview!.token, ...general() }))}>提交并推送</Button></div></div>
     </fieldset></section>}
+    </div>
     <Dialog open={!!confirmation} onOpenChange={open => { if (!open && !locked) setConfirmation(undefined); }}><DialogContent><DialogHeader><DialogTitle>{confirmation?.title}</DialogTitle><DialogDescription>{confirmation?.description}</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={locked} onClick={() => setConfirmation(undefined)}>取消</Button><Button variant="destructive" disabled={locked} onClick={() => void run(async () => { await confirmation?.action(); setConfirmation(undefined); })}>确认</Button></DialogFooter></DialogContent></Dialog>
   </section>;
 }

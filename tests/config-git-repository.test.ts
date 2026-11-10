@@ -148,7 +148,7 @@ test('invalid existing directory blocks binding; newer format binds read-only',a
   const f=await fixture(t),a=f.service('a');await bind(a);await commit(a,'initial',true);
   const ab=(await a.getBinding())!;await writeFile(join(ab.repositoryPath,'orchard-config/manifest.json'),'{broken');git(ab.repositoryPath,'add','.');git(ab.repositoryPath,'commit','-m','invalid');git(ab.repositoryPath,'push',f.remote,'main');
   const b=f.service('b');await assert.rejects(bind(b));assert.equal(await b.getBinding(),null);
-  await writeFile(join(ab.repositoryPath,'orchard-config/manifest.json'),'{"formatVersion":2}');git(ab.repositoryPath,'add','.');git(ab.repositoryPath,'commit','-m','future');git(ab.repositoryPath,'push',f.remote,'main');
+  await writeFile(join(ab.repositoryPath,'orchard-config/manifest.json'),'{"formatVersion":3}');git(ab.repositoryPath,'add','.');git(ab.repositoryPath,'commit','-m','future');git(ab.repositoryPath,'push',f.remote,'main');
   const c=f.service('c');assert.equal((await bind(c)).snapshotState,'unsupported');await assert.rejects(commit(c,'overwrite'),{code:'FORMAT_UNSUPPORTED'});
 });
 test('interrupted ref move recovers raw files and refuses external edits',async t=>{

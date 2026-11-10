@@ -1,3 +1,4 @@
+import { validateWorkflowDictionaries, dictionaryDependencyMetadata } from "../dictionaries/validation.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
@@ -118,6 +119,19 @@ export class AuthoringService {
       }));
     });
   }
+  private rebuildHistory(draftId: string, sourceId: string): ContextHistoryMessage[] {
+    const seen = new Set<string>(), history: ContextHistoryMessage[] = [];
+    let id: string | null = sourceId;
+    while (id !== null) {
+      check(!seen.has(id), "CONVERSATION_CONFLICT", "对话重建链存在循环", 409);
+      seen.add(id);
+      const conversation = this.store.conversation(id);
+      check(conversation?.draftId === draftId, "CONVERSATION_CONFLICT", "重建源对话不属于当前草稿", 409);
+      history.push(...this.store.messages(draftId, id).map(({ sequence, role, content }) => ({ sequence, role, content })));
+      id = conversation.rebuildFromId;
+    }
+    return history.sort((left, right) => left.sequence - right.sequence);
+  }
   snapshot(id: string) {
     const draft = this.store.draft(id), tree = this.store.files.readTree(draft.artifactPath), conversations = this.conversations.list(id);
     return { ...draft, files: tree.files, messages: this.store.messages(id), turns: this.store.turns(id), conversations: conversations.items, currentConversation: conversations.currentId };
@@ -165,11 +179,11 @@ export class AuthoringService {
       } : null;
       const rebuilding = conversation.mode === "multi" && conversation.rebuildFromId !== null && conversation.backendRef === null;
       const history: ContextHistoryMessage[] | undefined = rebuilding
-        ? this.store.messages(id, conversation.rebuildFromId!).map(message => ({ sequence: message.sequence, role: message.role, content: message.content }))
+        ? this.rebuildHistory(id, conversation.rebuildFromId!)
         : undefined;
       const context = buildAuthoringContext({
         kind: conversation.backendRef === null ? "initial" : "continuation", draftId: id, baseRevision: input.expectedRevision,
-        files: snapshot.files, providers: this.providers.views(), modelConfigs: this.providers.modelConfigs.list(true).items, previousOutcome,
+        files: snapshot.files, availableDictionaries: dictionaryDependencyMetadata(this.store), providers: this.providers.views(), modelConfigs: this.providers.modelConfigs.list(true).items, previousOutcome,
         history, historySource: rebuilding ? "explicit_rebuild" : undefined, userRequest: input.prompt,
       });
       const prompt = composeAuthoringPrompt(this.providers.views(), context);
@@ -251,7 +265,7 @@ export class AuthoringService {
           check(this.store.turn(turnId).status === "running", "TURN_CANCELLED", "本轮已取消");
           this.ensureEditable(turn.draftId, turn.baseRevision, true);
           if (response.changes.length) this.store.exec("UPDATE drafts SET artifact_path=?,validation_json=?,revision=revision+1,updated_at=? WHERE id=?", tree.path, json(validation), Date.now(), turn.draftId);
-          this.store.message(turn.draftId, turnId, "assistant", { text: response.summary, files: response.changes.map(c => c.path), validation, providerId: result.providerId, modelId: result.modelId }, turn.conversationId ?? null);
+          this.store.message(turn.draftId, turnId, "assistant", { text: response.summary, proposal: response, files: response.changes.map(c => c.path), validation, providerId: result.providerId, modelId: result.modelId }, turn.conversationId ?? null);
           this.store.transitionTurn(turnId, ["running"], { status: "succeeded", submissionState: "settled", end: true });
           this.store.append("authoring_turn", turnId, "turn.succeeded", { summary: response.summary, validation });
         }));
@@ -297,6 +311,7 @@ export class AuthoringService {
         const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
         const compiled = await compileScripts(files, definition), layout = readLayout(files);
         this.store.assertWorkflowScriptContracts(definition);
+        validateWorkflowDictionaries(this.store, definition);
         const tree = configCoordinator(this.store).withWrite(() => this.store.files.saveTree(files, compiled));
         return configCoordinator(this.store).withWrite(() => this.store.command(scope, requestId, input, () => {
           const current = this.store.draft(id);
@@ -335,7 +350,9 @@ async function validateAuthoringFiles(store: Store, files: SourceFiles) {
   const validation = await validateFiles(files);
   if (!validation.valid) return validation;
   try {
-    const diagnostics = store.assertWorkflowScriptContracts(readDefinition(files));
+    const definition = readDefinition(files);
+    const diagnostics = store.assertWorkflowScriptContracts(definition);
+    validateWorkflowDictionaries(store, definition);
     return { valid: true, diagnostics: diagnostics.filter(item => item.status === "unknown").map(item => `${item.nodeId} ${item.contract}无法静态判定，实际运行时继续校验`) };
   } catch (error) { return { valid: false, diagnostics: [error instanceof Error ? error.message : "脚本契约校验失败"] }; }
 }

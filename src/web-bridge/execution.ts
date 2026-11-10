@@ -1,3 +1,4 @@
+import { credentialSchema, credentialProperties, credentialRequired } from "./credential-schema.js";
 import { allowsRequestBody, type BridgeHttpMethod } from "./http-methods.js";
 import { BROWSER_EXECUTION_SCHEMA, type BrowserExecution } from "./browser-execution.js";
 import { validatePath } from "./request-path.js";
@@ -59,7 +60,13 @@ export type BridgeExecution = BridgeHttpExecution | BrowserExecution;
 const forbiddenHeaders = new Set(["host", "cookie", "origin", "referer", "content-type", "content-length", "connection", "transfer-encoding", "upgrade", "proxy-authorization"]);
 export function validateHttpDefinition(path: string, method: string, execution: BridgeExecution, parameters: JsonSchema) {
   validatePath(path, execution.transport === "localHttp");
-  if (execution.transport === "browser") return;
+  if (execution.transport === "browser") {
+    const schema = credentialSchema(execution);
+    assertSchema({}, { type: "object", properties: { credentials: schema } }, "凭据 Schema");
+    const names = Object.keys(credentialProperties(execution));
+    check([...credentialRequired(execution), ...(execution.credentialInputs ?? []), ...Object.keys(execution.preprocess.credentials ?? {})].every(name => names.includes(name)), "INVALID_CREDENTIALS", "凭据声明、必填项和默认引用必须在 credentialSchema.properties 中定义");
+    return;
+  }
   const properties = typeof parameters === "object" ? parameters.properties as Record<string, unknown> | undefined : undefined;
   for (const match of path.matchAll(/\{([^}]+)\}/g)) check(properties && Object.hasOwn(properties, match[1]), "INVALID_PATH", "路径占位符必须声明为参数");
   if (execution.body) {

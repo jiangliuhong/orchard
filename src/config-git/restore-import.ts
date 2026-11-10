@@ -1,3 +1,5 @@
+import { exportDictionaries, prepareDictionaries, importDictionaries, dictionaryChanged, dictionaryFingerprint, validateDictionaries, validateDictionaryPointers, requirements, authenticateDictionary } from "./dictionaries.js";
+import { workflowDictionarySensitivity } from "../domain/dictionaries.js";
 import { randomUUID } from "node:crypto";
 import { check } from "../domain/errors.js";
 import type { Store } from "../persistence/store.js";
@@ -20,11 +22,13 @@ type Validation = { valid: boolean; diagnostics: string[] };
 interface ScriptImport { value: PortableScript; versions: { id: string; definition: ScriptDefinition; path: string; hash: string }[]; draft?: { id: string; definition: ScriptDefinition; path: string; hash: string; validation: Validation; changed: boolean; existing: boolean } }
 interface WorkflowImport { value: PortableWorkflow; versions: { id: string; files: SourceFiles; path: string; hash: string; definition: Workflow }[]; draft?: { id: string; path: string; hash: string; validation: Validation; changed: boolean; existing: boolean } }
 export interface PreparedImport {
+  effective?: PortableSnapshot;
+  dictionaries: NonNullable<PortableSnapshot["dictionaries"]>;
   categories: SnapshotCategory[]; changes: RestorePreview["changes"]; files: Record<string, string>;
   scripts: ScriptImport[]; workflows: WorkflowImport[]; providers: { value: Row; changed: boolean }[];
   agentModelConfigs: { value: NonNullable<PortableProvider["agentModelConfigs"]>[number] & { providerId: string }; changed: boolean }[];
 }
-const categories: SnapshotCategory[] = ["general", "providers", "webBridge", "scripts", "workflows"];
+const categories: SnapshotCategory[] = ["general", "providers", "webBridge", "scripts", "workflows", "dictionaries"];
 const ordered = <T extends { id: string }>(items: T[]) => [...items].sort((a, b) => compareCodePoints(a.id, b.id));
 const equal = (a: unknown, b: unknown) => canonicalJson(a) === canonicalJson(b);
 function rawBridge(store: Store): Row { return JSON.parse(readOptional(store, "config/web-bridge.json") ?? '{"schemaVersion":1,"applications":{},"environments":{},"tools":{},"enabledTools":{}}'); }
@@ -44,14 +48,14 @@ export function assertIdle(store: Store) {
   check(!store.one("SELECT id FROM drafts WHERE status='publishing' LIMIT 1"), "CONFIG_BUSY", "工作流正在发布", 409);
 }
 export function databaseFingerprint(store: Store) {
-  const rows = Object.fromEntries(["workflows", "workflow_versions", "drafts", "scripts", "script_versions", "provider_settings", "agent_model_configs"].map(table => [table, store.all<Row>(`SELECT * FROM ${table} ORDER BY id`)]));
+  const rows = Object.fromEntries(["workflows", "workflow_versions", "drafts", "scripts", "script_versions", "provider_settings", "agent_model_configs", "dictionaries", "dictionary_versions"].map(table => [table, store.all<Row>(`SELECT * FROM ${table} ORDER BY id`)]));
   rows.agent_model_config_revisions = store.all<Row>("SELECT * FROM agent_model_config_revisions ORDER BY config_id,revision");
   const artifacts = [...rows.workflow_versions!, ...rows.drafts!].map(row => ({ path: row.artifact_path, content: store.files.readTree(row.artifact_path) }));
   const scriptArtifacts = rows.script_versions!.map(row => ({ path: row.source_ref, content: store.files.readScriptTree(row.source_ref) }));
   return digest(canonicalJson({ rows, artifacts, scriptArtifacts }));
 }
 export function targetFingerprint(store: Store) {
-  return digest(canonicalJson({ database: databaseFingerprint(store), bridge: readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
+  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
 }
 /** Independent source copies live inside the recovery point JSON, never just artifact paths. */
 export function captureSnapshot(store: Store, theme: SnapshotTheme) {
@@ -77,24 +81,26 @@ export function captureSnapshot(store: Store, theme: SnapshotTheme) {
     check(!workflow.draft, "IDENTITY_CONFLICT", `多个草稿声明同一工作流: ${identity.id}`, 409);
     workflow.draft = { files, baseVersionId: row.base_version_id }; workflows.set(identity.id, workflow);
   }
-  return { snapshot: { general: { theme }, providers, webBridge, scripts, workflows: [...workflows.values()] } satisfies PortableSnapshot, mappings };
+  return { snapshot: { dictionaries: exportDictionaries(store), general: { theme }, providers, webBridge, scripts, workflows: [...workflows.values()] } satisfies PortableSnapshot, mappings };
 }
 function scriptDefinitionUnchecked(store: Store, scriptId: string, versionId: string): ScriptDefinition {
   const script = store.script(scriptId), version = store.scriptVersion(versionId), tree = store.files.readScriptTree(version.sourceRef);
-  return { id: scriptId, name: tree.definition?.name ?? script.name, description: tree.definition?.description ?? script.description, runtime: script.runtime, entryFile: version.entryFile, timeoutMs: version.timeoutMs, inputSchema: version.inputSchema, outputSchema: version.outputSchema, resultMode: tree.definition?.resultMode ?? (script.runtime === "shell" ? "process" : "json"), files: tree.files };
+  return { id: scriptId, name: tree.definition?.name ?? script.name, description: tree.definition?.description ?? script.description, runtime: script.runtime, entryFile: version.entryFile, timeoutMs: version.timeoutMs, inputSchema: version.inputSchema, outputSchema: version.outputSchema, resultMode: tree.definition?.resultMode ?? (script.runtime === "shell" ? "process" : "json"), ...(tree.definition?.dictionaryBindings ? { dictionaryBindings: tree.definition.dictionaryBindings } : {}), files: tree.files };
 }
 function assertVersionIdentity(store: Store, id: string, kind: "script" | "workflow", owner: string) {
+  check(!store.one("SELECT id FROM dictionary_versions WHERE id=?", id), "VERSION_ID_CONFLICT", "版本 ID 与字典版本碰撞", 409);
   check(!store.one("SELECT id FROM drafts WHERE id=?", id), "VERSION_ID_CONFLICT", `版本 ID 与草稿碰撞: ${id}`, 409);
   const script = store.one<Row>("SELECT * FROM script_versions WHERE id=?", id), workflow = store.one<Row>("SELECT * FROM workflow_versions WHERE id=?", id);
   check(!(kind === "script" ? workflow || script && (script.script_id !== owner || script.status !== "published") : script || workflow && workflow.workflow_id !== owner), "VERSION_ID_CONFLICT", `版本 ID 归属或类型冲突: ${id}`, 409);
 }
 export async function prepareImport(store: Store, snapshot: PortableSnapshot, options: RestorePreviewOptions): Promise<PreparedImport> {
-  const selected = new Set(options.categories ?? categories);
+  if (snapshot.dictionaries !== undefined) validateDictionaries(snapshot);
+  const selected = new Set(options.categories ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined));
   check(selected.size > 0 && [...selected].every(item => categories.includes(item)), "INVALID_CATEGORY", "恢复类别无效");
   check(["light", "dark", "system"].includes(snapshot.general.theme), "INVALID_THEME", "外观值无效");
-  const mappings = options.mappings ?? {}, result: PreparedImport = { categories: [], changes: [], files: {}, scripts: [], workflows: [], providers: [], agentModelConfigs: [] };
+  const mappings = options.mappings ?? {}, result: PreparedImport = { dictionaries: [], categories: [], changes: [], files: {}, scripts: [], workflows: [], providers: [], agentModelConfigs: [] };
   const identities = new Set<string>(), versions = new Set<string>();
-  for (const object of [...snapshot.scripts, ...snapshot.workflows]) {
+  for (const object of [...snapshot.scripts, ...snapshot.workflows, ...(snapshot.dictionaries ?? [])]) {
     check(!identities.has(object.id), "IDENTITY_CONFLICT", `重复对象身份: ${object.id}`, 409); identities.add(object.id);
     for (const version of object.versions) { check(!versions.has(version.id), "VERSION_ID_CONFLICT", `重复版本身份: ${version.id}`, 409); versions.add(version.id); }
   }
@@ -109,13 +115,33 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
       }
     }
   }
+  if (selected.has("dictionaries")) check(snapshot.dictionaries !== undefined, "INVALID_CATEGORY", "此快照未提供字典类别", 422);
+  for (const category of ["scripts", "workflows"] as const) if (selected.has(category)) for (const obj of snapshot[category]) {
+    for (const r of requirements(snapshot, obj)) {
+      const local = exportDictionaries(store).find(d => d.id === r.dictionaryId);
+      const incoming = snapshot.dictionaries?.find(d => d.id === r.dictionaryId);
+      if (!selected.has("dictionaries") && !local) { check(incoming, "DEPENDENCY_MISSING", "字典依赖缺失", 422); selected.add("dictionaries"); }
+    }
+  }
+  if (selected.has("dictionaries")) { result.dictionaries = snapshot.dictionaries ?? []; prepareDictionaries(store, result.dictionaries); }
+  for (const category of ["scripts", "workflows"] as const) if (selected.has(category)) for (const obj of snapshot[category]) for (const r of requirements(snapshot, obj)) {
+    const d = (selected.has("dictionaries") ? result.dictionaries.find(d => d.id === r.dictionaryId) : undefined) ?? exportDictionaries(store).find(d => d.id === r.dictionaryId);
+    const v = d?.versions.find(v => v.id === d.currentVersionId);
+    check(d && v?.enabled && v.kind === r.kind && r.keys.every(k => Object.hasOwn(v.entries, k)), "DEPENDENCY_MISSING", "字典依赖不可用", 422);
+    authenticateDictionary(store, d);
+  }
+  if (selected.has("workflows")) {
+    const available = new Map(exportDictionaries(store).map(d => [d.id,d])); result.dictionaries.forEach(d => available.set(d.id,d));
+    snapshot.workflows.forEach(w => validateDictionaryPointers(snapshot, w, [...available.values()]));
+  }
   result.categories = categories.filter(item => selected.has(item));
   const change = (category: SnapshotCategory, objectId: string, exists: boolean, changed: boolean, detail?: string) => result.changes.push({ category, objectId, changeType: !exists ? "add" : changed ? "update" : "same", ...(detail ? { detail } : {}) });
+  for (const d of result.dictionaries) change("dictionaries", d.id, !!store.one("SELECT id FROM dictionaries WHERE id=?", d.id), dictionaryChanged(store, d));
   if (selected.has("providers")) for (const provider of snapshot.providers) {
     check(provider.id === "pi-cli" || provider.id === "codex-cli", "UNKNOWN_PROVIDER", `不支持的 Provider: ${provider.id}`, 422);
     check(Object.keys(provider.config).every(key => ["executable", "transport"].includes(key)), "INVALID_PROVIDER_CONFIG", "Provider 配置含未知字段");
     check(provider.config.transport === "legacy" || provider.config.transport === "native", "INVALID_PROVIDER_CONFIG", "Provider transport 无效");
-    check(!store.one("SELECT id FROM scripts WHERE id=?", provider.id) && !store.one("SELECT id FROM workflows WHERE id=?", provider.id) && !draftRows(store, provider.id).length, "IDENTITY_CONFLICT", `对象类型冲突: ${provider.id}`, 409);
+    check(!store.one("SELECT id FROM dictionaries WHERE id=?", provider.id) && !store.one("SELECT id FROM scripts WHERE id=?", provider.id) && !store.one("SELECT id FROM workflows WHERE id=?", provider.id) && !draftRows(store, provider.id).length, "IDENTITY_CONFLICT", `对象类型冲突: ${provider.id}`, 409);
     const previous = store.provider(provider.id), executable = localValue(provider.config.executable, previous?.config.executable, mappings);
     const models = new Map((previous?.models ?? []).map(model => [model.id, model]));
     for (const model of provider.models) models.set(model.id, model);
@@ -154,7 +180,7 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
   }
   if (Object.keys(mappings).length) result.files["config-git/local-mappings.json"] = JSON.stringify({ ...JSON.parse(readOptional(store, "config-git/local-mappings.json") ?? "{}"), ...mappings });
   if (selected.has("scripts")) for (const script of ordered(snapshot.scripts)) {
-    check(!store.one("SELECT id FROM workflows WHERE id=?", script.id) && !store.provider(script.id) && !draftRows(store, script.id).length, "IDENTITY_CONFLICT", `对象类型冲突: ${script.id}`, 409);
+    check(!store.one("SELECT id FROM dictionaries WHERE id=?", script.id) && !store.one("SELECT id FROM workflows WHERE id=?", script.id) && !store.provider(script.id) && !draftRows(store, script.id).length, "IDENTITY_CONFLICT", `对象类型冲突: ${script.id}`, 409);
     const previous = store.one<Row>("SELECT * FROM scripts WHERE id=?", script.id);
     check(!previous || previous.runtime === script.runtime, "IDENTITY_CONFLICT", `脚本运行时不可变: ${script.id}`, 409);
     const item: ScriptImport = { value: script, versions: [] };
@@ -168,7 +194,7 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     }
     if (script.currentPublishedVersionId) check(script.versions.some(version => version.id === script.currentPublishedVersionId) || store.one("SELECT id FROM script_versions WHERE id=? AND script_id=? AND status='published'", script.currentPublishedVersionId, script.id), "DEPENDENCY_MISSING", `脚本发布指针无效: ${script.id}`);
     if (script.draft) {
-      validatePortableScript(script.draft, false); check(script.draft.id === script.id && script.draft.runtime === script.runtime, "IDENTITY_CONFLICT", "脚本草稿身份冲突");
+      validatePortableScript(script.draft, false, snapshot.dictionaries !== undefined); check(script.draft.id === script.id && script.draft.runtime === script.runtime, "IDENTITY_CONFLICT", "脚本草稿身份冲突");
       const definition = normalizedScript(script.draft), { files, ...metadata } = definition, tree = persistArtifact(store, store.files.saveScriptTree(files, metadata));
       let validation: Validation;
       try { validateScript(definition); await checkScriptSource(definition); validation = { valid: true, diagnostics: [] }; } catch (error) { validation = { valid: false, diagnostics: [error instanceof Error ? error.message : "草稿待修复"] }; }
@@ -196,6 +222,8 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     }
     if (!strict) return;
     const workflow = readDefinition(files);
+    // Structural security applies to every published version, including retained history.
+    workflowDictionarySensitivity(workflow, scriptDefinition);
     for (const node of workflow.nodes) {
       if (node.type === "script") {
         const definition = scriptDefinition(node.config.scriptId!, node.config.scriptVersionId!);
@@ -217,7 +245,7 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     }
   };
   if (selected.has("workflows")) for (const workflow of ordered(snapshot.workflows)) {
-    check(!store.one("SELECT id FROM scripts WHERE id=?", workflow.id) && !store.provider(workflow.id), "IDENTITY_CONFLICT", `对象类型冲突: ${workflow.id}`, 409);
+    check(!store.one("SELECT id FROM dictionaries WHERE id=?", workflow.id) && !store.one("SELECT id FROM scripts WHERE id=?", workflow.id) && !store.provider(workflow.id), "IDENTITY_CONFLICT", `对象类型冲突: ${workflow.id}`, 409);
     check(workflow.draft || workflow.versions.length || workflow.currentPublishedVersionId || store.one("SELECT id FROM workflows WHERE id=?", workflow.id), "INVALID_SNAPSHOT", `工作流没有可恢复定义: ${workflow.id}`);
     const previous = store.one<Row>("SELECT * FROM workflows WHERE id=?", workflow.id), drafts = draftRows(store, workflow.id);
     check(drafts.length <= 1, "IDENTITY_CONFLICT", `多个目标草稿声明同一工作流: ${workflow.id}`, 409);
@@ -240,11 +268,35 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     change("workflows", workflow.id, !!previous || drafts.length > 0, !previous && !drafts.length || item.versions.length > 0 || !!item.draft?.changed || !!previous && previous.name !== workflow.name || !!workflow.currentPublishedVersionId && previous?.current_version_id !== workflow.currentPublishedVersionId, `${workflow.draft ? "覆盖草稿" : "保留目标草稿"}；${workflow.currentPublishedVersionId ? "应用发布指针" : "保留目标发布指针"}`);
   }
   if (selected.has("general")) { const raw = readOptional(store, "config-git/general.json"); change("general", "general", !!raw, !raw || JSON.parse(raw).theme !== snapshot.general.theme); }
+  const effective: PortableSnapshot = structuredClone(captureSnapshot(store, snapshot.general.theme).snapshot);
+  if (selected.has("general")) effective.general = snapshot.general;
+  for (const c of ["scripts", "workflows", "dictionaries"] as const) if (selected.has(c)) {
+    const merged = new Map<string, any>((effective[c] ?? []).map(v => [v.id, v]));
+    for (const incoming of snapshot[c] ?? []) {
+      const old = merged.get(incoming.id);
+      if (c === "dictionaries") merged.set(incoming.id, incoming);
+      else { const value = incoming as PortableScript | PortableWorkflow; const versions = new Map((old?.versions ?? []).map((v: any) => [v.id, v])); value.versions.forEach(v => versions.set(v.id, v)); merged.set(incoming.id, { ...value, versions: [...versions.values()], draft: value.draft ?? old?.draft ?? null, currentPublishedVersionId: value.currentPublishedVersionId ?? old?.currentPublishedVersionId ?? null }); }
+    }
+    (effective[c] as unknown[]) = [...merged.values()];
+  }
+  if (selected.has("providers")) for (const p of snapshot.providers) {
+    const old = effective.providers.find(v => v.id === p.id), item = result.providers.find(v => v.value.id === p.id)!;
+    const configs = new Map((old?.agentModelConfigs ?? []).map(v => [v.id,v])); (p.agentModelConfigs ?? []).forEach(v => configs.set(v.id,v));
+    const next = { ...p, config: { ...p.config, transport: "native" as const }, models: item.value.models, agentModelConfigs: [...configs.values()] };
+    effective.providers = [...effective.providers.filter(v => v.id !== p.id), next];
+  }
+  if (selected.has("webBridge")) {
+    const old = effective.webBridge, incoming = snapshot.webBridge;
+    old.applications = { ...old.applications, ...incoming.applications }; old.tools = { ...old.tools, ...incoming.tools }; old.enabledTools = { ...old.enabledTools, ...incoming.enabledTools };
+    for (const [app, envs] of Object.entries(incoming.environments)) { const list = new Map((old.environments[app] ?? []).map(v => [v.id,v])); envs.forEach(v => list.set(v.id, { ...list.get(v.id), ...v })); old.environments[app] = [...list.values()]; }
+  }
+  result.effective = effective;
   return result;
 }
 
 /** Synchronous, called only inside the enclosing Store.command transaction. */
 export function importDefinitions(store: Store, plan: PreparedImport) {
+  importDictionaries(store, plan.dictionaries);
   const now = Date.now();
   for (const { value, changed } of plan.providers) if (changed) {
     const previous = store.provider(value.id);

@@ -1,3 +1,5 @@
+import { workflowDictionaryRequirements, workflowDictionarySensitivity } from "../domain/dictionaries.js";
+import { DictionaryExecution, REDACTED, isRedacted, safeExecutionFailure, scriptDictionaryRequirements } from "../dictionaries/execution.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { randomUUID } from "node:crypto";
@@ -237,9 +239,18 @@ export class Store {
       runtime: script.runtime, entryFile: version.entryFile, timeoutMs: version.timeoutMs,
       inputSchema: version.inputSchema, outputSchema: version.outputSchema, files: tree.files,
       resultMode: tree.definition?.resultMode ?? (script.runtime === "shell" ? "process" : "json"),
+      ...(tree.definition?.dictionaryBindings ? { dictionaryBindings: tree.definition.dictionaryBindings } : {}),
     });
   }
-  assertWorkflowScripts(definition: Workflow, allowArchived = false) { for (const node of definition.nodes) if (node.type === "script") { const script = this.script(node.config.scriptId!); check(script.currentPublishedVersionId && (script.status !== "archived" || allowArchived), "SCRIPT_NOT_PUBLISHED", "工作流只能引用已发布脚本"); const version = this.scriptVersion(node.config.scriptVersionId!); check(version.scriptId === script.id && version.status === "published", "SCRIPT_VERSION_INVALID", "脚本版本无效或未发布"); } }
+  assertWorkflowScripts(definition: Workflow, allowArchived = false) {
+    for (const node of definition.nodes) if (node.type === "script") {
+      const script = this.script(node.config.scriptId!);
+      check(script.currentPublishedVersionId && (script.status !== "archived" || allowArchived), "SCRIPT_NOT_PUBLISHED", "工作流只能引用已发布脚本");
+      const version = this.scriptVersion(node.config.scriptVersionId!);
+      check(version.scriptId === script.id && version.status === "published", "SCRIPT_VERSION_INVALID", "脚本版本无效或未发布");
+    }
+    workflowDictionarySensitivity(definition, (id, versionId) => this.scriptDefinition(id, versionId));
+  }
   workflowScriptContracts(definition: Workflow) {
     this.assertWorkflowScripts(definition);
     const diagnostics: { nodeId: string; contract: string; status: "compatible" | "incompatible" | "unknown" }[] = [];
@@ -300,33 +311,76 @@ export class Store {
   trackScriptTestActivity(id: string) {
     if (!this.scriptTestActivities.has(id)) this.scriptTestActivities.set(id, configCoordinator(this).beginActivity(`script-test:${id}`));
   }
-  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown) {
-    const release = configCoordinator(this).beginActivity("script-test:accept");
-    try {
-    const test = this.transaction(() => {
-      const script = this.script(scriptId); check(script.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
-      if (versionId) {
-        const version = this.scriptVersion(versionId); check(version.scriptId === scriptId && version.status === "published", "INVALID_STATE", "只能测试已发布版本");
-      } else check(script.currentDraftVersionId !== null && this.scriptVersion(script.currentDraftVersionId).revision === draftRevision, "REVISION_CONFLICT", "脚本草稿已更新，请刷新后重试");
-      const snapshot = this.scriptDefinition(scriptId, versionId ?? script.currentDraftVersionId!);
-      const inputRef = json({ ...JSON.parse(this.reference(input)), scriptSnapshot: this.reference(snapshot) });
-      const id = randomUUID(), now = Date.now();
-      this.exec("INSERT INTO script_tests(id,script_id,script_version_id,draft_revision,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, scriptId, versionId, draftRevision, inputRef, now);
-      return this.scriptTest(id);
+  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown, requestId?: string, commandInput?: unknown) {
+    return configCoordinator(this).withActivity("script-test:accept", () => {
+      const scope = `script-test:${scriptId}`, request = commandInput ?? { versionId, draftRevision, input };
+      const replay = () => this.command<{ id: string }>(scope, requestId!, request, () => { throw new Error("unreachable"); });
+      if (requestId && this.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
+        const prior = configCoordinator(this).withAdmission(replay);
+        const test = this.scriptTest(prior.id);
+        if (["queued", "running"].includes(test.status)) this.trackScriptTestActivity(test.id);
+        return test;
+      }
+      const script = this.script(scriptId);
+      check(script.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
+      const selected = versionId ?? script.currentDraftVersionId;
+      check(selected, "NOT_FOUND", "脚本版本不存在");
+      const version = this.scriptVersion(selected);
+      check(version.scriptId === scriptId && (versionId ? version.status === "published" : version.status === "draft" && version.revision === draftRevision), "REVISION_CONFLICT", "脚本版本或草稿修订已变化", 409);
+      const snapshot = this.scriptDefinition(scriptId, selected);
+      const preparedInput = this.prepareReference(input), preparedSnapshot = this.prepareReference(snapshot);
+      const dependencies = new DictionaryExecution(this), requirements = scriptDictionaryRequirements(snapshot.dictionaryBindings);
+      return configCoordinator(this).withAdmission(() => {
+        const create = () => {
+          const current = this.scriptVersion(selected), currentScript = this.script(scriptId);
+          check(currentScript.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
+          check(current.contentHash === version.contentHash && (versionId ? current.status === "published" : currentScript.currentDraftVersionId === selected && current.revision === draftRevision), "REVISION_CONFLICT", "脚本定义在准备期间变化", 409);
+          const admission = dependencies.validate(requirements);
+          const inputRef = json({ ...JSON.parse(this.attachPreparedReference(preparedInput)), scriptSnapshot: this.attachPreparedReference(preparedSnapshot) });
+          const id = randomUUID(), now = Date.now();
+          this.exec("INSERT INTO script_tests(id,script_id,script_version_id,draft_revision,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, scriptId, versionId, draftRevision, inputRef, now);
+          dependencies.save("test", id, admission.bindings);
+          dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
+          return { id };
+        };
+        const result = requestId ? this.command(scope, requestId, request, create) : this.transaction(create);
+        const test = this.scriptTest(result.id);
+        if (["queued", "running"].includes(test.status)) this.trackScriptTestActivity(test.id);
+        return test;
+      });
     });
-    this.scriptTestActivities.set(test.id, release);
-    return test;
-    } catch (error) { release(); throw error; }
   }
   scriptTestSnapshot(id: string): ScriptDefinition | undefined {
     const row = this.one("SELECT input_ref FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在");
     const reference = parsed<{ scriptSnapshot?: string }>(row.input_ref);
     return reference.scriptSnapshot ? validateScript(this.dereference(reference.scriptSnapshot)) : undefined;
   }
-  scriptTest(id: string) { const row = this.one("SELECT * FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在"); return { id: String(row.id), scriptId: String(row.script_id), scriptVersionId: row.script_version_id as string | null, draftRevision: row.draft_revision as number | null, status: String(row.status), input: this.dereference(row.input_ref), output: row.output_ref ? this.dereference(row.output_ref) : undefined, error: row.error_json ? parsed(row.error_json) : undefined, stdout: row.stdout_ref ? this.dereference(row.stdout_ref) : undefined, stderr: row.stderr_ref ? this.dereference(row.stderr_ref) : undefined, exitCode: row.exit_code as number | null, durationMs: row.duration_ms as number | null, createdAt: Number(row.created_at), startedAt: row.started_at as number | null, endedAt: row.ended_at as number | null }; }
+  scriptTestInput(id: string): unknown {
+    const row = this.one("SELECT input_ref FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在");
+    return this.dereference(row.input_ref);
+  }
+  scriptTestSensitive(id: string): boolean {
+    if (this.one("SELECT 1 FROM script_test_dictionary_bindings b JOIN dictionary_versions v ON v.id=b.dictionary_version_id WHERE b.test_id=? AND v.kind='encrypted'", id)) return true;
+    try { return Object.values(this.scriptTestSnapshot(id)?.dictionaryBindings ?? {}).some(binding => binding.kind === "encrypted"); }
+    catch { return true; } // Broken immutable metadata must not downgrade the disclosure policy.
+  }
+  scriptTest(id: string) {
+    const row = this.one("SELECT * FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在");
+    const sensitive = this.scriptTestSensitive(id);
+    return { id: String(row.id), scriptId: String(row.script_id), scriptVersionId: row.script_version_id as string | null, draftRevision: row.draft_revision as number | null, status: String(row.status),
+      input: sensitive ? REDACTED : this.dereference(row.input_ref), output: row.output_ref ? sensitive ? REDACTED : this.dereference(row.output_ref) : undefined,
+      error: row.error_json ? parsed(row.error_json) : undefined, stdout: row.stdout_ref ? sensitive ? REDACTED : this.dereference(row.stdout_ref) : undefined, stderr: row.stderr_ref ? sensitive ? REDACTED : this.dereference(row.stderr_ref) : undefined,
+      inputRedacted: sensitive, outputRedacted: sensitive, logsRedacted: sensitive, dictionaryBindings: new DictionaryExecution(this).metadata("test", id),
+      exitCode: row.exit_code as number | null, durationMs: row.duration_ms as number | null, createdAt: Number(row.created_at), startedAt: row.started_at as number | null, endedAt: row.ended_at as number | null };
+  }
   scriptTests(scriptId: string) { this.script(scriptId); return this.all<{ id: string }>("SELECT id FROM script_tests WHERE script_id=? ORDER BY created_at DESC", scriptId).map(row => this.scriptTest(row.id)); }
   setScriptTestRunning(id: string) { this.trackScriptTestActivity(id); this.exec("UPDATE script_tests SET status='running',started_at=? WHERE id=? AND status='queued'", Date.now(), id); }
-  finishScriptTest(id: string, result: { status: "succeeded" | "failed" | "cancelled"; output?: unknown; error?: unknown; stdout: string; stderr: string; exitCode?: number | null; durationMs?: number }) { this.transaction(() => { const now = Date.now(); this.exec("UPDATE script_tests SET status=?,output_ref=?,error_json=?,stdout_ref=?,stderr_ref=?,exit_code=?,duration_ms=?,ended_at=? WHERE id=? AND status='running'", result.status, result.output === undefined ? null : this.reference(result.output), result.error === undefined ? null : json(result.error), this.reference(result.stdout), this.reference(result.stderr), result.exitCode ?? null, result.durationMs ?? null, now, id); });
+  finishScriptTest(id: string, result: { status: "succeeded" | "failed" | "cancelled"; output?: unknown; error?: unknown; stdout: string; stderr: string; exitCode?: number | null; durationMs?: number }) {
+    const sensitive = this.scriptTestSensitive(id);
+    const output = result.output === undefined ? undefined : sensitive ? REDACTED : result.output;
+    const stdout = sensitive ? REDACTED : result.stdout, stderr = sensitive ? REDACTED : result.stderr;
+    const detail = result.error === undefined ? undefined : sensitive ? safeExecutionFailure(result.error instanceof AppError ? result.error : new AppError(String((result.error as { code?: string }).code ?? "EXECUTION_FAILED"), ""), true) : result.error;
+    this.transaction(() => { const now = Date.now(); this.exec("UPDATE script_tests SET status=?,output_ref=?,error_json=?,stdout_ref=?,stderr_ref=?,exit_code=?,duration_ms=?,ended_at=? WHERE id=? AND status='running'", result.status, output === undefined ? null : this.reference(output), detail === undefined ? null : json(detail), this.reference(stdout), this.reference(stderr), result.exitCode ?? null, result.durationMs ?? null, now, id); });
     const test = this.scriptTest(id);
     if (!["queued", "running"].includes(test.status)) { this.scriptTestActivities.get(id)?.(); this.scriptTestActivities.delete(id); }
     return test;
@@ -628,7 +682,8 @@ export class Store {
   }
   run(id: string): Run {
     const r = this.one("SELECT * FROM runs WHERE id=?", id); check(r, "NOT_FOUND", "运行不存在");
-    return { id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
+    const output = this.dereference(r.output_ref), dictionaryBindings = new DictionaryExecution(this).metadata("run", id);
+    return { ...(isRedacted(output) ? { outputRedacted: true } : {}), ...(dictionaryBindings.length ? { dictionaryBindings, logsRedacted: dictionaryBindings.some(b => b.kind === "encrypted") } : {}), id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input: this.dereference(r.input_ref), output, activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
   }
   runs() { return this.all<{ id: string }>("SELECT id FROM runs ORDER BY created_at DESC LIMIT 200").map(r => this.run(r.id)); }
   runSummaries(filters: { workflowId?: string; draftId?: string; type?: string; status?: string } = {}) {
@@ -672,10 +727,11 @@ export class Store {
     return this.all("SELECT * FROM node_runs WHERE run_id=? ORDER BY rowid", runId).map(r => ({
       id: String(r.id), runId, nodeId: String(r.node_id), type: r.type as NodeRun["type"], status: r.status as NodeRun["status"],
       input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), route: parsed(r.route_json),
+      ...(isRedacted(this.dereference(r.input_ref)) ? { inputRedacted: true, logsRedacted: true } : {}), ...(isRedacted(this.dereference(r.output_ref)) ? { outputRedacted: true, logsRedacted: true } : {}),
       skipReason: r.skip_reason as string | undefined, error: parsed(r.error_json), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null,
     }));
   }
-  attempts(runId: string) { return this.all("SELECT a.* FROM node_attempts a JOIN node_runs n ON n.id=a.node_run_id WHERE n.run_id=? ORDER BY a.started_at", runId).map(r => ({ id: r.id, nodeRunId: r.node_run_id, status: r.status, execution: parsed(r.execution_json), input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), error: parsed(r.error_json), startedAt: r.started_at, endedAt: r.ended_at })); }
+  attempts(runId: string) { return this.all("SELECT a.* FROM node_attempts a JOIN node_runs n ON n.id=a.node_run_id WHERE n.run_id=? ORDER BY a.started_at", runId).map(r => ({ id: r.id, nodeRunId: r.node_run_id, status: r.status, execution: parsed(r.execution_json), ...(isRedacted(this.dereference(r.input_ref)) ? { inputRedacted: true, logsRedacted: true } : {}), ...(isRedacted(this.dereference(r.output_ref)) ? { outputRedacted: true } : {}), input: this.dereference(r.input_ref), output: this.dereference(r.output_ref), error: parsed(r.error_json), startedAt: r.started_at, endedAt: r.ended_at })); }
   private recover() {
     this.transaction(() => {
       this.exec("UPDATE drafts SET status='draft' WHERE status='publishing'");

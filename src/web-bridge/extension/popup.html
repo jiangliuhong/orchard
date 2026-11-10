@@ -8,19 +8,45 @@
     <script src="popup.js" defer></script>
   </head>
   <body>
-    <header><span class="eyebrow">ORCHARD</span><h1>浏览器资料</h1><p>为当前 Chrome 资料命名，方便在工作台选择和绑定。</p></header>
-    <form id="profile-form">
-      <label for="profile-name">资料名称</label>
-      <input id="profile-name" name="name" maxlength="100" placeholder="例如：工作 Chrome、测试账号" required disabled />
-      <p class="hint">名称保存在当前浏览器资料中，重启后仍然保留。</p>
-      <button id="save" type="submit" disabled>保存并连接</button>
-    </form>
-    <p id="status" role="status" aria-live="polite">正在连接本机服务…</p>
-    <dl><dt>资料 ID</dt><dd id="profile-id">—</dd><dt>插件 ID</dt><dd id="extension-id">—</dd><dt>已连接服务</dt><dd id="servers">—</dd></dl>
-    <button id="reconnect" type="button" class="secondary" disabled>重新连接</button>
-    <button id="grant-site" type="button" class="secondary">授权当前站点桥接</button>
-    <p class="hint">先在业务页签完成网关登录，再授权站点；桥接不会绕过登录或跨域发送凭据。</p>
-    <p class="hint">自动重连已开启：关闭弹窗后仍会每 30 秒尝试连接，服务恢复后自动重新注册。</p>
-    <p class="hint">保存后，在工作台「设置 → Web Bridge」点击“刷新浏览器资料”查看新名称。</p>
+    <section id="home-view" aria-label="主页">
+      <header><h1>Orchard Web Bridge</h1><button id="connection-link" class="text-button" aria-label="查看连接详情"><span id="connection-state" data-state="loading">连接中…</span><span aria-hidden="true"> ›</span></button></header>
+      <main>
+        <form id="profile-form">
+          <label for="profile-name">浏览器资料</label>
+          <div class="input-row"><input id="profile-name" name="name" maxlength="100" placeholder="例如：工作 Chrome" required disabled /><button id="save" type="submit" disabled>保存</button></div>
+          <p id="profile-feedback" class="feedback" role="status" aria-live="polite"></p>
+        </form>
+        <section class="site-section" aria-labelledby="current-site-label">
+          <h2 id="current-site-label">当前站点</h2>
+          <p id="current-site" class="domain">正在读取…</p>
+          <div class="site-actions"><span id="site-state" class="muted"></span><button id="grant-site" class="secondary" disabled>授权此站点</button></div>
+          <p id="site-feedback" class="feedback" role="status" aria-live="polite"></p>
+        </section>
+      </main>
+      <button id="sites-link" class="navigation-row"><span>已授权站点</span><span><span id="sites-count">—</span> <span aria-hidden="true">›</span></span></button>
+    </section>
+    <section id="connection-view" aria-labelledby="connection-title" hidden>
+      <header><button class="text-button back" aria-label="返回主页">‹ 返回</button><h1 id="connection-title" tabindex="-1">连接详情</h1></header>
+      <main>
+        <p id="status" role="status" aria-live="polite">正在连接本机服务…</p>
+        <p class="hint">自动重连已开启，每 30 秒尝试连接。</p>
+        <dl>
+          <dt>本机服务</dt><dd id="servers">—</dd>
+          <dt>浏览器资料 ID</dt><dd class="copy-row"><span id="profile-id">—</span><button class="text-button copy" data-target="profile-id" aria-label="复制浏览器资料 ID">复制</button></dd>
+          <dt>插件 ID</dt><dd class="copy-row"><span id="extension-id">—</span><button class="text-button copy" data-target="extension-id" aria-label="复制插件 ID">复制</button></dd>
+        </dl>
+        <p id="connection-feedback" class="feedback" role="status" aria-live="polite"></p>
+      </main>
+      <footer><button id="reconnect" class="secondary" disabled>重新连接</button></footer>
+    </section>
+    <section id="sites-view" aria-labelledby="sites-title" hidden>
+      <header><button class="text-button back" aria-label="返回主页">‹ 返回</button><h1 id="sites-title" tabindex="-1">已授权站点</h1></header>
+      <main class="sites-main">
+        <p id="sites-summary" class="muted">正在读取…</p>
+        <ul id="sites-list" aria-label="已授权站点列表"></ul>
+        <p id="sites-feedback" class="feedback" role="status" aria-live="polite"></p>
+      </main>
+      <footer class="hint">授权仅允许桥接访问，不代表已登录。请先在业务页签完成网关登录。</footer>
+    </section>
   </body>
 </html>

@@ -59,6 +59,8 @@ export function schemaSubset(source: JsonSchema, target: JsonSchema, depth = 0):
 
 export function bindingSchema(binding: Binding, workflow: Workflow): JsonSchema {
   if (binding.source === "literal") return { enum: [binding.value] };
+  // Definitions do not pin dictionary values; without a fixed context compatibility is unknown.
+  if (binding.source === "dictionary") return true;
   if (binding.source === "object") return { type: "object", properties: Object.fromEntries(Object.entries(binding.properties).map(([key, value]) => [key, bindingSchema(value, workflow)])), required: Object.keys(binding.properties), additionalProperties: false };
   if (binding.source === "array") return { type: "array", minItems: binding.items.length, maxItems: binding.items.length };
   let schema = binding.source === "workflow" ? workflow.inputSchema : workflow.nodes.find(node => node.id === binding.nodeId)?.outputSchema ?? true;

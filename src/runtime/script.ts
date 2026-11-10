@@ -1,3 +1,6 @@
+import { normalizeDictionaryBindings, type DictionaryBindings } from "../domain/dictionaries.js";
+import { safeExecutionFailure, type DictionaryContext } from "../dictionaries/execution.js";
+import { CONTEXT_SOURCE, writeDictionaryContext } from "./dictionary-context.js";
 import { mkdirSync, writeFileSync, readFileSync, lstatSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,13 +41,26 @@ export class ScriptExecutionError extends AppError {
 export interface ScriptExecutionOptions {
   runtime: ScriptRuntime; entryFile: string; files: SourceFiles; input: unknown; cwd: string;
   timeoutMs?: number; signal?: AbortSignal; maxBytes?: number; resultMode?: "process" | "json";
+  dictionaryBindings?: DictionaryBindings;
+  dictionaryContext?: DictionaryContext;
+  sensitive?: boolean;
+  compiledSource?: string;
+  onLog?: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 export async function executeScript(options: ScriptExecutionOptions): Promise<ScriptExecution> {
-  const compiled = await checkScriptSource(options);
-  const directory = join(options.cwd, `script-test-${randomUUID()}`);
+  const declarations = normalizeDictionaryBindings(options.dictionaryBindings);
+  check(!declarations || options.dictionaryContext, "DICTIONARY_ACCESS_DENIED", "字典依赖缺少固定版本上下文", 422);
+  const sensitive = options.sensitive === true || Object.values(declarations ?? {}).some(d => d.kind === "encrypted");
+  const compiled = options.compiledSource === undefined ? await checkScriptSource(options) : { entry: options.compiledSource };
+  const directory = join(options.cwd, `script-attempt-${randomUUID()}`);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
-  try { return await executeInDirectory(options, compiled, directory); }
-  finally { rmSync(directory, { recursive: true, force: true }); }
+  try { return await executeInDirectory({ ...options, sensitive }, compiled, directory); }
+  catch (error) {
+    if (!sensitive) throw error;
+    const detail = safeExecutionFailure(error, true);
+    const execution = error instanceof ScriptExecutionError ? { ...error.execution, stdout: "", stderr: "" } : { stdout: "", stderr: "", exitCode: null, durationMs: 0 };
+    throw new ScriptExecutionError(new AppError(detail.code, detail.message), execution);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 async function executeInDirectory(options: ScriptExecutionOptions, compiled: Record<string, string>, directory: string): Promise<ScriptExecution> {
   for (const [name, source] of Object.entries(options.files)) {
@@ -52,10 +68,11 @@ async function executeInDirectory(options: ScriptExecutionOptions, compiled: Rec
     writeFileSync(target, source, { mode: 0o600 });
   }
   const resultFile = join(directory, "result.json");
+  const contextEnv = writeDictionaryContext(directory, options.dictionaryContext ?? { dictionaries: {}, secrets: {} });
   let executable: string, args: string[];
   if (options.runtime === "nodejs") {
     const moduleFile = join(directory, "bundle.mjs"); writeFileSync(moduleFile, compiled.entry, { mode: 0o600 });
-    const wrapper = `import {writeFileSync} from 'node:fs'; let text=''; for await (const chunk of process.stdin) text+=chunk; const module=await import(${json(pathToFileURL(moduleFile).href)}); if(typeof module.default!=='function') throw new Error('Node.js script must export default function'); const result=await module.default(JSON.parse(text)); writeFileSync(process.env.ORCHARD_RESULT_FILE, JSON.stringify(result ?? null));`;
+    const wrapper = `import {writeFileSync,readFileSync} from 'node:fs'; ${CONTEXT_SOURCE} let text=''; for await (const chunk of process.stdin) text+=chunk; const ctx=dictionaryContext(JSON.parse(readFileSync(process.env.ORCHARD_DICTIONARY_FILE,'utf8'))); const module=await import(${json(pathToFileURL(moduleFile).href)}); if(typeof module.default!=='function') throw new Error('Node.js script must export default function'); const result=await module.default(JSON.parse(text),ctx); writeFileSync(process.env.ORCHARD_RESULT_FILE, JSON.stringify(result ?? null),{mode:0o600});`;
     const wrapperFile = join(directory, "entry.mjs"); writeFileSync(wrapperFile, wrapper, { mode: 0o600 });
     executable = process.execPath; args = [wrapperFile];
   } else {
@@ -64,7 +81,7 @@ async function executeInDirectory(options: ScriptExecutionOptions, compiled: Rec
   const started = Date.now();
   let stdout = "", stderr = "", processResult: Awaited<ReturnType<typeof executeProcess>>;
   try {
-    processResult = await executeProcess({ executable, args, cwd: directory, input: json(options.input), signal: options.signal, timeoutMs: options.timeoutMs, maxBytes: options.maxBytes ?? 8 * 1024 * 1024, inheritEnv: false, env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: directory, TMPDIR: directory, ORCHARD_RESULT_FILE: resultFile }, onLog(stream, chunk) { if (stream === "stdout") stdout += chunk; else stderr += chunk; } });
+    processResult = await executeProcess({ executable: "/bin/bash", args: ["--noprofile", "--norc", "-c", 'ulimit -c 0; exec "$@"', "orchard-execution", executable, ...args], cwd: directory, input: json(options.input), signal: options.signal, timeoutMs: options.timeoutMs, maxBytes: options.maxBytes ?? 8 * 1024 * 1024, inheritEnv: false, env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8", HOME: directory, TMPDIR: directory, ORCHARD_RESULT_FILE: resultFile, ...contextEnv }, onLog(stream, chunk) { if (!options.sensitive) { if (stream === "stdout") stdout += chunk; else stderr += chunk; options.onLog?.(stream, chunk); } } });
   } catch (error) {
     throw new ScriptExecutionError(error, { stdout: stdout.replaceAll(directory, "[script]"), stderr: stderr.replaceAll(directory, "[script]"), exitCode: null, durationMs: Date.now() - started });
   }
@@ -77,5 +94,5 @@ async function executeInDirectory(options: ScriptExecutionOptions, compiled: Rec
     check(!info!.isSymbolicLink() && info!.isFile() && info!.size <= (options.maxBytes ?? 8 * 1024 * 1024), "OUTPUT_LIMIT", "脚本结果文件无效或超限");
     try { output = JSON.parse(readFileSync(resultFile, "utf8")); } catch { check(false, "INVALID_SCRIPT_OUTPUT", "脚本未生成合法 JSON 结果文件"); }
   } } catch (error) { throw new ScriptExecutionError(error, processResult); }
-  return { output, stdout: processResult.stdout, stderr: processResult.stderr, exitCode: processResult.exitCode, durationMs: processResult.durationMs };
+  return { output, stdout: options.sensitive ? "" : processResult.stdout, stderr: options.sensitive ? "" : processResult.stderr, exitCode: processResult.exitCode, durationMs: processResult.durationMs };
 }

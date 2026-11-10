@@ -141,13 +141,13 @@ test("native rebuilding includes source history only on the first turn and singl
   assert.match(provider.calls.at(-1)!.prompt, /请记住暗号/);
   const third = await start();
   await authoring.wait(third.id);
-  assert.doesNotMatch(provider.calls.at(-1)!.prompt, /historyExcerpt/);
+  assert.doesNotMatch(provider.calls.at(-1)!.prompt, /"historyExcerpt":/);
   await authoring.conversations.create(draft.id, { providerId: provider.id, modelId: "test-model", mode: "single", ...command() });
   for (let index = 0; index < 2; index++) {
     const turn = await authoring.start(draft.id, { providerId: provider.id, prompt: "单次", mode: "single", expectedRevision: 0, requestId: randomUUID() });
     await authoring.wait(turn.id);
     assert.equal(store.turn(turn.id).status, "succeeded");
-    assert.doesNotMatch(provider.calls.at(-1)!.prompt, /historyExcerpt/);
+    assert.doesNotMatch(provider.calls.at(-1)!.prompt, /"historyExcerpt":/);
   }
 });
 

@@ -1,4 +1,5 @@
 import Ajv from "ajv";
+import { dictionaryBindingsSchema, dictionaryIdSchema, dictionaryKeySchema, normalizeDictionaryBindings } from "./dictionaries.js";
 import { check, AppError } from "./errors.js";
 import type { Binding, JsonSchema, Workflow, WorkflowNode } from "./types.js";
 
@@ -19,6 +20,10 @@ ajv.addKeyword({
     return () => true;
   },
 });
+ajv.addKeyword({
+  keyword: "x-history", schemaType: "object", valid: true,
+  metaSchema: { type: "object", required: ["record"], additionalProperties: false, properties: { record: { type: "boolean" } } },
+});
 const schemaValue = { anyOf: [{ type: "boolean" }, { type: "object" }] };
 const bindingSchema = {
   $id: "binding",
@@ -26,6 +31,7 @@ const bindingSchema = {
     { type: "object", required: ["source", "value"], properties: { source: { const: "literal" }, value: {} }, additionalProperties: false },
     { type: "object", required: ["source"], properties: { source: { const: "workflow" }, pointer: { type: "string" } }, additionalProperties: false },
     { type: "object", required: ["source", "nodeId"], properties: { source: { const: "node" }, nodeId: { type: "string" }, pointer: { type: "string" } }, additionalProperties: false },
+    { type: "object", required: ["source", "dictionaryId", "key"], properties: { source: { const: "dictionary" }, dictionaryId: dictionaryIdSchema, key: dictionaryKeySchema, pointer: { type: "string" } }, additionalProperties: false },
     { type: "object", required: ["source", "properties"], properties: { source: { const: "object" }, properties: { type: "object", additionalProperties: { $ref: "binding" } } }, additionalProperties: false },
     { type: "object", required: ["source", "items"], properties: { source: { const: "array" }, items: { type: "array", items: { $ref: "binding" } } }, additionalProperties: false },
   ],
@@ -56,9 +62,10 @@ function validateConfig(node: WorkflowNode) {
         ? { scriptId: { type: "string", pattern: "^[a-z][a-z0-9-]{0,99}$" }, scriptVersionId: { type: "string", minLength: 1 }, timeoutMs: { type: "integer", minimum: 1000, maximum: 300000 } }
         : node.type === "web-bridge"
           ? { environmentId: { type: "string", minLength: 1, maxLength: 100 }, application: { type: "string", pattern: "^[a-z][a-z0-9-]{0,49}$" }, tool: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,99}$" }, timeoutMs: timeout, resultMode: { enum: ["result", "envelope"] } }
-          : { script: { type: "string", pattern: "^scripts/" }, timeoutMs: timeout, ...(node.type === "shell" ? { resultMode: { enum: ["process", "json"] } } : {}) };
+          : { script: { type: "string", pattern: "^scripts/" }, dictionaryBindings: dictionaryBindingsSchema, timeoutMs: timeout, ...(node.type === "shell" ? { resultMode: { enum: ["process", "json"] } } : {}) };
   const required = node.type === "agent" ? ["prompt"] : node.type === "switch" ? ["cases", "defaultLabel"] : node.type === "script" ? ["scriptId", "scriptVersionId"] : node.type === "web-bridge" ? ["application", "tool"] : ["script"];
   assertSchema(node.config, { type: "object", required, properties, additionalProperties: false }, `${node.id} 配置`);
+  normalizeDictionaryBindings(node.config.dictionaryBindings);
 }
 export function assertSchema(value: unknown, schema: JsonSchema, context = "值") {
   let validate;
@@ -84,13 +91,18 @@ export function walkBindings(binding: Binding, visit: (binding: Binding) => void
   if (binding.source === "object") Object.values(binding.properties).forEach(b => walkBindings(b, visit));
   if (binding.source === "array") binding.items.forEach(b => walkBindings(b, visit));
 }
-export function resolveBinding(binding: Binding, input: unknown, outputs: Map<string, unknown>): unknown {
+export type DictionaryBindingResolver = (dictionaryId: string, key: string) => unknown;
+export function resolveBinding(binding: Binding, input: unknown, outputs: Map<string, unknown>, dictionaries?: DictionaryBindingResolver): unknown {
   switch (binding.source) {
     case "literal": return binding.value;
     case "workflow": return pointer(input, binding.pointer);
     case "node": check(outputs.has(binding.nodeId), "MISSING_INPUT", `节点 ${binding.nodeId} 尚无结果`); return pointer(outputs.get(binding.nodeId), binding.pointer);
-    case "object": return Object.fromEntries(Object.entries(binding.properties).map(([key, b]) => [key, resolveBinding(b, input, outputs)]));
-    case "array": return binding.items.map(b => resolveBinding(b, input, outputs));
+    case "dictionary": {
+      check(dictionaries, "DICTIONARY_ACCESS_DENIED", "字典绑定缺少固定版本上下文", 422);
+      return structuredClone(pointer(dictionaries(binding.dictionaryId, binding.key), binding.pointer));
+    }
+    case "object": return Object.fromEntries(Object.entries(binding.properties).map(([key, b]) => [key, resolveBinding(b, input, outputs, dictionaries)]));
+    case "array": return binding.items.map(b => resolveBinding(b, input, outputs, dictionaries));
   }
 }
 export function validateWorkflow(value: unknown): Workflow {
@@ -122,7 +134,7 @@ export function validateWorkflow(value: unknown): Workflow {
   const endDominators = intersect(exits.map(n => dominators.get(n.id)!));
   const checkBinding = (binding: Binding, allowed: Set<string>) => walkBindings(binding, b => {
     if (b.source === "node") check(allowed.has(b.nodeId), "INVALID_BINDING", `节点 ${b.nodeId} 并非所有路径必经的前置节点`);
-    if ((b.source === "node" || b.source === "workflow") && b.pointer) check(b.pointer.startsWith("/") && !/~(?![01])/.test(b.pointer), "INVALID_BINDING", "JSON Pointer 无效");
+    if ((b.source === "node" || b.source === "workflow" || b.source === "dictionary") && b.pointer) check(b.pointer.startsWith("/") && !/~(?![01])/.test(b.pointer), "INVALID_BINDING", "JSON Pointer 无效");
   });
   for (const node of graph.nodes) {
     validateConfig(node);

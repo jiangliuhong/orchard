@@ -1,3 +1,5 @@
+import { DictionaryExecution, safeExecutionFailure, scriptDictionaryRequirements } from "../dictionaries/execution.js";
+import { prepareScriptRuntime } from "./dictionary-context.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import { Store } from "../persistence/store.js";
 import { failure, check } from "../domain/errors.js";
@@ -13,6 +15,7 @@ export class ScriptTestRunner {
   }
   start() {
     configCoordinator(this.store).assertAvailable();
+    prepareScriptRuntime(this.store);
     if (!this.enabled) {
       for (const test of this.store.all<{ id: string }>("SELECT id FROM script_tests WHERE status='running'")) {
         this.store.finishScriptTest(test.id, { status: "failed", error: { code: "INTERRUPTED", message: "服务重启，测试已中断，请重新测试" }, stdout: "", stderr: "" });
@@ -51,6 +54,7 @@ export class ScriptTestRunner {
   async close() { this.closed = true; if (this.active) { this.active.controller.abort(); await this.active.job; } }
   private async run(id: string, signal: AbortSignal) {
     let test = this.store.scriptTest(id);
+    const sensitive = this.store.scriptTestSensitive(id);
     try {
       this.store.setScriptTestRunning(id); test = this.store.scriptTest(id);
       let definition = this.store.scriptTestSnapshot(id);
@@ -63,16 +67,18 @@ export class ScriptTestRunner {
         else check(version.revision === test.draftRevision, "REVISION_CONFLICT", "脚本草稿已更新，请重新测试");
         definition = this.store.scriptDefinition(script.id, versionId);
       }
-      assertSchema(test.input, definition.inputSchema, "脚本输入");
-      const result = await executeScript({ ...definition, input: test.input, cwd: this.store.files.path("runs"), signal });
+      const input = this.store.scriptTestInput(id);
+      const dictionaries = new DictionaryExecution(this.store).load("test", id, scriptDictionaryRequirements(definition.dictionaryBindings));
+      assertSchema(input, definition.inputSchema, "脚本输入");
+      const result = await executeScript({ ...definition, dictionaryContext: dictionaries.context(definition.dictionaryBindings), sensitive, input, cwd: this.store.files.path("runs"), signal });
       try { assertSchema(result.output, definition.outputSchema, "脚本输出"); }
       catch (error) {
-        this.store.finishScriptTest(id, { ...result, status: "failed", error: failure(error) });
+        this.store.finishScriptTest(id, { ...result, status: "failed", error: safeExecutionFailure(error, sensitive) });
         return;
       }
       this.store.finishScriptTest(id, { status: "succeeded", ...result });
     } catch (error) {
-      this.store.finishScriptTest(id, { stdout: "", stderr: "", ...(error instanceof ScriptExecutionError ? error.execution : {}), status: signal.aborted ? "cancelled" : "failed", error: failure(error) });
+      this.store.finishScriptTest(id, { stdout: "", stderr: "", ...(error instanceof ScriptExecutionError ? error.execution : {}), status: signal.aborted ? "cancelled" : "failed", error: safeExecutionFailure(error, sensitive) });
     }
   }
 }

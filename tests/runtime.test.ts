@@ -56,7 +56,12 @@ test("script workflow nodes propagate input/output schema failures, timeout and 
   const inputRun = runner.create(inputWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(inputRun.id).status)); assert.equal(store.run(inputRun.id).status, "failed"); assert.equal(store.run(inputRun.id).error?.code, "SCHEMA_MISMATCH");
   const outputWorkflow = makeWorkflow("workflow-returns-number", "returns-number", invalidOutput.version.id); const outputRun = runner.create(outputWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(outputRun.id).status)); assert.equal(store.run(outputRun.id).error?.code, "SCHEMA_MISMATCH");
   const slowWorkflow = makeWorkflow("workflow-slow-script", "slow-script", slow.version.id); const slowRun = runner.create(slowWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(slowRun.id).status), 4000); assert.equal(store.run(slowRun.id).error?.code, "TIMEOUT");
-  writeFileSync(store.files.path(slow.tree.path), "tampered"); const tamperedRun = runner.create(slowWorkflow, {}, randomUUID()); await until(() => ["succeeded", "failed"].includes(store.run(tamperedRun.id).status)); assert.equal(store.run(tamperedRun.id).error?.code, "ARTIFACT_MISMATCH");
+  writeFileSync(store.files.path(slow.tree.path), "tampered");
+  // Admission now reads the immutable declaration to resolve dictionary dependencies.
+  // A corrupt artifact must fail before creating a task, not bypass dependency checks.
+  const before = store.all("SELECT id FROM runs").length;
+  assert.throws(() => runner.create(slowWorkflow, {}, randomUUID()), { code: "ARTIFACT_MISMATCH" });
+  assert.equal(store.all("SELECT id FROM runs").length, before);
 });
 
 test("same published version runs two paths and retains node results and metadata", async t => {

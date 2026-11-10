@@ -1,3 +1,4 @@
+import { requirements, dictionaryFingerprint } from "./dictionaries.js";
 import { randomUUID } from "node:crypto";
 import type { Store } from "../persistence/store.js";
 import type { WebBridgeConfig } from "../web-bridge/config.js";
@@ -17,12 +18,28 @@ interface PreviewDiff { category: SnapshotCategory; objectId?: string; versionId
 interface Blocker { code: string; category?: SnapshotCategory; objectId?: string; versionId?: string; message: string; incomingDigest?: string; targetDigest?: string }
 interface PreviewView { token: string; expiresAt: number; categories: SnapshotCategory[]; diffs: PreviewDiff[]; cumulativeDiffs?: PreviewDiff[]; blockers: string[]; blockerDetails: Blocker[]; requiredMappings: { key: string; label: string }[]; nextCursor?: string; sourceSha?: string; warnings?: string[]; noChanges?: boolean }
 interface SavedPreview { view: PreviewView; diffs: PreviewDiff[]; cumulative: PreviewDiff[]; kind: "commit" | "restore" | "blocked"; preference?: Preference; revision?: string }
-const categories: SnapshotCategory[] = ["general", "providers", "webBridge", "scripts", "workflows"];
-function category(path: string): SnapshotCategory { return path.startsWith("workflows/") ? "workflows" : path.startsWith("scripts/") ? "scripts" : path.includes("providers/") ? "providers" : path.includes("web-bridge") ? "webBridge" : "general"; }
+const categories: SnapshotCategory[] = ["general", "providers", "webBridge", "scripts", "workflows", "dictionaries"];
+function category(path: string): SnapshotCategory { return path.startsWith("dictionaries/") ? "dictionaries" : path.startsWith("workflows/") ? "workflows" : path.startsWith("scripts/") ? "scripts" : path.includes("providers/") ? "providers" : path.includes("web-bridge") ? "webBridge" : "general"; }
 // Never include known local mappings or authentication-shaped source in API diff text.
 function safeDiff(diff: GitFileDiff, secrets: string[] = []): PreviewDiff {
+  if (diff.path.startsWith("dictionaries/")) {
+    const parse = (text: string | null): any => { try { return text ? JSON.parse(text) : null; } catch { return null; } };
+    const left = parse(diff.before), right = parse(diff.after);
+    if (left?.kind === "encrypted" || right?.kind === "encrypted") {
+      const redact = (value: any, other: any, before = false) => value === null ? null : JSON.stringify({ id: value.id, dictionaryId: value.dictionaryId, name: value.name, description: value.description, enabled: value.enabled, kind: value.kind, currentVersionId: value.currentVersionId,
+        ...(value.entries ? { entries: Object.fromEntries(Object.entries(value.entries).map(([key, entry]) => [key, { type: "string", state: !other?.entries?.[key] ? before ? "removed" : "added" : canonicalJson(entry) === canonicalJson(other.entries[key]) ? "unchanged" : "replaced" }])) } : {}),
+        ...(value.versions ? { versions: value.versions.map((v: any) => JSON.parse(redact(v, other?.versions?.find((o: any) => o.id === other.currentVersionId), before)!)) } : {}) });
+      const current = (value: any) => value?.entries ?? value?.versions?.find((version: any) => version.id === value.currentVersionId)?.entries ?? {};
+      const before = current(left), after = current(right);
+      const changes = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().flatMap(key => {
+        const state = !Object.hasOwn(before, key) ? "新增" : !Object.hasOwn(after, key) ? "移除" : canonicalJson(before[key]) === canonicalJson(after[key]) ? "未变化" : "替换";
+        return state === "未变化" ? [] : [`${key}：${state}`];
+      });
+      return { category: "dictionaries", path: diff.path, changeType: diff.before === null ? "add" : diff.after === null ? "remove" : diff.before === diff.after ? "same" : "update", sensitive: true, detail: changes.length ? `加密条目变化 · ${changes.join("；")}` : "加密字典元数据或指针变化；不展示值", before: redact(left, right, true), after: redact(right, left) };
+    }
+  }
   const text = `${diff.before ?? ""}\n${diff.after ?? ""}`;
-  const sensitive = /(?:api[_-]?key|password|passwd|secret|authorization|bearer\s|private[_-]?key|access[_-]?token|refresh[_-]?token|["']?token["']?\s*[:=]|https?:\/\/[^\s/]+:[^\s/]+@)/i.test(text) || secrets.some(value => value.length > 0 && text.includes(value));
+  const sensitive = /encryptedValue|"kind"\s*:\s*"encrypted"/.test(text) || /(?:api[_-]?key|password|passwd|secret|authorization|bearer\s|private[_-]?key|access[_-]?token|refresh[_-]?token|["']?token["']?\s*[:=]|https?:\/\/[^\s/]+:[^\s/]+@)/i.test(text) || secrets.some(value => value.length > 0 && text.includes(value));
   return { category: category(diff.path), path: diff.path, changeType: diff.before === null ? "add" : diff.after === null ? "remove" : diff.before === diff.after ? "same" : "update", sensitive, before: sensitive ? "[已隐藏敏感内容]" : diff.before, after: sensitive ? "[已隐藏敏感内容]" : diff.after };
 }
 function preference(input: Preference): Preference {
@@ -36,6 +53,7 @@ export class ConfigGitService {
   readonly repository: GitRepositoryService;
   readonly operations: ConfigOperations;
   private locked = false;
+  private sourceGeneration = 0;
   private previews = new Map<string, SavedPreview>();
   constructor(readonly store: Store, readonly bridge: WebBridgeConfig, readonly restore: ConfigRestoreService, options: GitRepositoryOptions = {}) {
     this.coordinator = configCoordinator(store);
@@ -63,7 +81,7 @@ export class ConfigGitService {
     if (theme !== undefined && this.restore.getGeneralTheme() !== theme) this.restore.saveGeneralSnapshot(theme);
     return bundle;
   }
-  private revision(theme: SnapshotTheme) { return digest(canonicalJson({ digest: exportSnapshot(this.store, this.bridge, theme).digest, generation: this.coordinator.generation })); }
+  private revision(theme: SnapshotTheme) { return digest(canonicalJson({ keyring: dictionaryFingerprint(this.store), digest: exportSnapshot(this.store, this.bridge, theme).digest, generation: this.coordinator.generation })); }
   private savedMappings(): Record<string, string> {
     const value: unknown = JSON.parse(readOptional(this.store, "config-git/local-mappings.json") ?? "{}");
     check(value !== null && typeof value === "object" && !Array.isArray(value) && Object.values(value).every(v => typeof v === "string"), "LOCAL_MAPPING_INVALID", "本机映射文件格式无效", 422);
@@ -88,7 +106,14 @@ export class ConfigGitService {
     }));
     const preview = await this.repository.previewCommit({ message: input.message, push: input.push, regenerate: input.regenerate, files: bundle.files, revision });
     const diffs = preview.diff.map(d => safeDiff(d, secrets)), cumulative = preview.cumulativeDiff.map(d => safeDiff(d, secrets));
-    const view: PreviewView = { token: preview.token, expiresAt: preview.expiresAt, categories, diffs: [], blockers: [], blockerDetails: [], requiredMappings: [], warnings: preview.regenerate ? ["确认后将备份本地历史，并基于最新远端重生成完整快照。"] : [], noChanges: diffs.length === 0 && (!preview.push || cumulative.length === 0) };
+    const warnings = preview.regenerate ? ["确认后将备份本地历史，并基于最新远端重生成完整快照。"] : [];
+    const manifestDiff = preview.diff.find(d => d.path === "manifest.json");
+    if (manifestDiff?.before && manifestDiff.after) {
+      try {
+        if (JSON.parse(manifestDiff.before).formatVersion === 1 && JSON.parse(manifestDiff.after).formatVersion === 2) warnings.push("本次备份将配置快照格式从 v1 升级到 v2；旧版 Orchard 将无法读取新快照，历史 v1 提交仍保留。");
+      } catch { /* Repository validation reports malformed manifests. */ }
+    }
+    const view: PreviewView = { token: preview.token, expiresAt: preview.expiresAt, categories, diffs: [], blockers: [], blockerDetails: [], requiredMappings: [], warnings, noChanges: diffs.length === 0 && (!preview.push || cumulative.length === 0) };
     this.previews.set(view.token, { view, diffs, cumulative, kind: "commit", preference: { ...prefs, theme }, revision });
     return this.previewPage(view.token);
   }
@@ -143,10 +168,14 @@ export class ConfigGitService {
       check(this.revision(theme) === revision, "PREVIEW_EXPIRED", "配置已变化，请重新预览", 409);
     });
   }
+  async remoteSyncSource() {
+    const source = await this.coordinator.withActivity("git-fetch", () => this.repository.remoteSyncSource());
+    this.sourceGeneration++; return source;
+  }
   private async context() {
     const binding = await this.repository.getBinding(); if (!binding) return { bindingId: null, head: null };
     const status = await this.repository.status(); check(!status.dirty, "DIRTY_REPOSITORY", "Git 工作目录有外部修改，请先处理", 409);
-    return { bindingId: binding.id, head: status.head };
+    return { bindingId: binding.id, branch: binding.branch, head: status.head, sourceGeneration: this.sourceGeneration };
   }
   async restorePreview(input: RestorePreviewOptions & Preference & { source: NonNullable<RestorePreviewOptions["source"]> }) {
     preference(input);
@@ -160,11 +189,12 @@ export class ConfigGitService {
       snapshot = point.snapshot; recoveryMappings = point.mappings; selected ??= point.categories;
     }
     return this.coordinator.withRead(async () => {
-      const target = captureSnapshot(this.store, this.restore.getGeneralTheme() ?? "system"), selectedSet = new Set(selected ?? categories);
+      const target = captureSnapshot(this.store, this.restore.getGeneralTheme() ?? "system"), selectedSet = new Set(selected ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined));
       check(selectedSet.size > 0 && [...selectedSet].every(c => categories.includes(c)), "INVALID_CATEGORY", "恢复类别无效", 422);
       if (selectedSet.has("workflows")) for (const w of snapshot.workflows) for (const source of [...w.versions, ...(w.draft ? [w.draft] : [])]) for (const dep of workflowDependencies(source.files)) {
         if (!this.store.one("SELECT id FROM script_versions WHERE id=? AND script_id=? AND status='published'", dep.versionId, dep.id)) selectedSet.add("scripts");
       }
+      for (const c of ["scripts", "workflows"] as const) if (selectedSet.has(c)) for (const obj of snapshot[c]) for (const r of requirements(snapshot, obj)) if (!target.snapshot.dictionaries?.some(d => d.id === r.dictionaryId)) selectedSet.add("dictionaries");
       const scope = categories.filter(c => selectedSet.has(c));
       // Explicit input overrides current local values; persisted values fill genuinely absent bindings.
       const mappings = { ...this.savedMappings(), ...target.mappings, ...recoveryMappings, ...input.mappings };
@@ -177,7 +207,7 @@ export class ConfigGitService {
       const addDiff = (c: SnapshotCategory, id: string, before: unknown, after: unknown) => diffs.push({ ...safeDiff({ path: `${c}/${id}`, before: before === undefined ? null : canonicalJson(before), after: canonicalJson(after) }, secrets), category: c, objectId: id });
       for (const c of scope) {
         if (c === "general" || c === "webBridge") addDiff(c, c, target.snapshot[c], snapshot[c]);
-        else for (const obj of snapshot[c]) addDiff(c, obj.id, target.snapshot[c].find(v => v.id === obj.id), obj);
+        else for (const obj of snapshot[c] ?? []) addDiff(c, obj.id, target.snapshot[c]?.find(v => v.id === obj.id), obj);
       }
       for (const c of ["scripts", "workflows"] as const) if (selectedSet.has(c)) for (const obj of snapshot[c]) for (const v of obj.versions) {
         const script = this.store.one<{ script_id: string; status: string }>("SELECT script_id,status FROM script_versions WHERE id=?", v.id), workflow = this.store.one<{ workflow_id: string }>("SELECT workflow_id FROM workflow_versions WHERE id=?", v.id);
@@ -195,15 +225,29 @@ export class ConfigGitService {
         try {
           const preview = await this.restore.preview(snapshot, { ...input, categories: scope, mappings, context });
           token = preview.token; expiresAt = preview.expiresAt; finalScope = preview.categories;
-          // Keep planned merge semantics, while exposing only the sanitized comparison data.
-          for (const change of preview.changes) { const diff = diffs.find(d => d.category === change.category && d.objectId === change.objectId); if (diff) diff.changeType = change.changeType; }
+          const effective = this.restore.plannedSnapshot(token);
+          diffs.length = 0;
+          for (const c of finalScope) {
+            if (c === "general" || c === "webBridge") addDiff(c, c, target.snapshot[c], effective[c]);
+            else for (const obj of effective[c] ?? []) {
+              const change = preview.changes.find(v => v.category === c && v.objectId === obj.id);
+              addDiff(c, obj.id, target.snapshot[c]?.find(v => v.id === obj.id), obj);
+              if (change) {
+                const changedModelConfigs = c === "providers" && "agentModelConfigs" in obj && obj.agentModelConfigs?.some(config =>
+                  preview.changes.some(v => v.category === c && v.objectId === config.id && v.changeType !== "same"));
+                diffs[diffs.length - 1]!.changeType = change.changeType === "same" && changedModelConfigs ? "update" : change.changeType;
+                diffs[diffs.length - 1]!.detail = changedModelConfigs ? [change.detail, "Agent 模型配置"].filter(Boolean).join("；") : change.detail;
+              }
+              else { diffs[diffs.length - 1]!.changeType = "same"; diffs[diffs.length - 1]!.detail = "保留本机独有配置"; }
+            }
+          }
         } catch (error) {
           if (!(error instanceof AppError)) throw error;
           const message = `恢复预览校验失败 (${error.code})`; blockers.push({ code: error.code, message });
         }
       }
       const deliverGeneral = finalScope.includes("general") && (input.theme === undefined || input.theme !== snapshot.general.theme);
-      const view: PreviewView = { token, expiresAt, categories: finalScope, diffs: [], blockers: blockers.map(b => b.message), blockerDetails: blockers, requiredMappings, ...(input.source.kind === "git" ? { sourceSha: input.source.sha } : {}), noChanges: !deliverGeneral && diffs.every(d => d.changeType === "same") };
+      const view: PreviewView = { token, expiresAt, categories: finalScope, diffs: [], blockers: blockers.map(b => b.message), blockerDetails: blockers, requiredMappings, warnings: finalScope.filter(c => !(selected ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined)).includes(c)).map(c => `自动补入依赖类别: ${c}`), ...(input.source.kind === "git" ? { sourceSha: input.source.sha } : {}), noChanges: !deliverGeneral && diffs.every(d => d.changeType === "same") };
       this.previews.set(token, { view, diffs, cumulative: [], kind: blockers.length ? "blocked" : "restore" });
       return this.previewPage(token);
     });

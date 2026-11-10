@@ -1,3 +1,4 @@
+import { dictionaryBindingsSchema } from "./dictionaries.js";
 import { check } from "./errors.js";
 import { assertSchema } from "./validation.js";
 import { validateScript, type ScriptDefinition } from "./scripts.js";
@@ -5,7 +6,7 @@ import { validateScript, type ScriptDefinition } from "./scripts.js";
 export interface ScriptProposal {
   summary: string;
   changes: { operation: "create" | "update" | "delete"; path: string; content?: string }[];
-  metadata: Partial<Pick<ScriptDefinition, "name" | "description" | "entryFile" | "inputSchema" | "outputSchema" | "timeoutMs" | "resultMode">>;
+  metadata: Partial<Pick<ScriptDefinition, "name" | "description" | "entryFile" | "inputSchema" | "outputSchema" | "timeoutMs" | "resultMode" | "dictionaryBindings">>;
   testInput?: unknown;
 }
 export const SCRIPT_PROPOSAL_SCHEMA = {
@@ -20,7 +21,7 @@ export const SCRIPT_PROPOSAL_SCHEMA = {
       name: { type: "string", minLength: 1, maxLength: 200 }, description: { type: "string", maxLength: 4000 },
       entryFile: { type: "string" }, inputSchema: { anyOf: [{ type: "object" }, { type: "boolean" }] },
       outputSchema: { anyOf: [{ type: "object" }, { type: "boolean" }] }, timeoutMs: { type: "integer", minimum: 1000, maximum: 300000 },
-      resultMode: { enum: ["process", "json"] },
+      resultMode: { enum: ["process", "json"] }, dictionaryBindings: dictionaryBindingsSchema,
     } },
     testInput: {},
   },

@@ -1,3 +1,4 @@
+import { dictionaryFingerprint } from "./dictionaries.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { check } from "../domain/errors.js";
@@ -27,11 +28,11 @@ export interface RestoreOperation {
   operationId: string; requestId: string; planHash: string; recoveryPointId: string; phase: RestorePhase;
   previewToken: string; createdAt: number; source?: RestorePreviewOptions["source"];
   files: { target: string; staged: string; hash: string }[]; installed: string[];
-  result?: { operationId: string; planHash: string; recoveryPointId: string; changed: number; phase: "completed" };
+  result?: { operationId: string; planHash: string; recoveryPointId: string; changed: number; phase: "completed"; sourceSha?: string; changes?: RestorePreview["changes"]; reconnect?: string[] };
   error?: string;
 }
 interface GeneralState { theme: SnapshotTheme; pending: { clientId: string | null; operationId: string; revision: number | null; theme: SnapshotTheme; requiresConfirmation?: boolean; acknowledged?: "applied" | "kept" }[] }
-interface InternalPreview { public: RestorePreview; snapshot: PortableSnapshot; options: RestorePreviewOptions; prepared: PreparedImport }
+interface InternalPreview { keyFingerprint: string | null; public: RestorePreview; snapshot: PortableSnapshot; options: RestorePreviewOptions; prepared: PreparedImport }
 export interface RestoreServiceOptions {
   afterRestore?: () => void | Promise<void>;
   /** Fault hook runs after each durable boundary; tests can terminate a real process here. */
@@ -52,14 +53,17 @@ export class ConfigRestoreService {
     return this.coordinator.withRead(async () => {
       if (options.clientId !== undefined) check(typeof options.clientId === "string" && options.clientId.length > 0 && options.clientId.length <= 200 && Number.isSafeInteger(options.preferenceRevision) && options.preferenceRevision! >= 0, "INVALID_PREFERENCE", "浏览器偏好身份或修订无效");
       const copy = structuredClone(snapshot), settings = structuredClone(options);
+      const keyFingerprint = dictionaryFingerprint(this.store);
       const prepared = await prepareImport(this.store, copy, settings);
+      check(keyFingerprint === dictionaryFingerprint(this.store), "PREVIEW_EXPIRED", "字典密钥已变化，请重新预览", 409);
       const targetHash = targetFingerprint(this.store), generation = this.coordinator.generation;
       const planHash = digest(canonicalJson({ snapshot: copy, options: settings, categories: prepared.categories, targetHash }));
       const result: RestorePreview = { token: randomUUID(), planHash, targetHash, generation, expiresAt: Date.now() + 30 * 60_000, categories: prepared.categories, changes: prepared.changes, ...(settings.source ? { source: settings.source } : {}), ...(settings.context === undefined ? {} : { context: settings.context }) };
-      this.previews.set(result.token, { public: result, snapshot: copy, options: settings, prepared });
+      this.previews.set(result.token, { keyFingerprint, public: result, snapshot: copy, options: settings, prepared });
       return structuredClone(result);
     });
   }
+  plannedSnapshot(token: string) { const p = this.previews.get(token); check(p, "PREVIEW_EXPIRED", "恢复预览已过期", 409); return structuredClone(p.prepared.effective!); }
   async apply(requestId: string, previewToken: string, context?: unknown): Promise<RestoreOperation> {
     check(typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200, "INVALID_REQUEST_ID", "缺少有效 requestId");
     const prior = this.operations().find(item => item.requestId === requestId);
@@ -91,9 +95,13 @@ export class ConfigRestoreService {
         durableJson(this.store, `config-git/staging/${operation.operationId}/plan.json`, { snapshot: preview.snapshot, options: preview.options, planHash: operation.planHash });
         operation.phase = "prepared"; this.save(operation); this.options.fault?.("prepared", operation);
         this.store.command(SCOPE, requestId, { planHash: operation.planHash }, () => {
+          const assertKeysUnchanged = () => check(preview.keyFingerprint === dictionaryFingerprint(this.store), "PREVIEW_EXPIRED", "字典密钥已变化，请重新预览", 409);
+          assertKeysUnchanged();
           importDefinitions(this.store, preview.prepared);
           this.options.fault?.("transaction", operation);
-          return { operationId: operation.operationId, planHash: operation.planHash, recoveryPointId: operation.recoveryPointId, databaseHash: databaseFingerprint(this.store), changed: preview.public.changes.filter(item => item.changeType !== "same").length };
+          const result = { operationId: operation.operationId, planHash: operation.planHash, recoveryPointId: operation.recoveryPointId, databaseHash: databaseFingerprint(this.store), ...(operation.source?.kind === "git" ? { sourceSha: operation.source.sha } : {}), changes: preview.public.changes, reconnect: preview.public.categories.filter(c => c === "providers" || c === "webBridge"), changed: preview.public.changes.filter(item => item.changeType !== "same").length };
+          assertKeysUnchanged();
+          return result;
         });
         this.options.fault?.("database_committed_before_journal", operation);
         operation.phase = "db_committed"; this.save(operation);

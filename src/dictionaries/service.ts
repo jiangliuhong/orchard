@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AppError, check } from "../domain/errors.js";
+import { DictionaryReferenceScanner } from "./references.js";
 import { canonicalJson, parseStrictJson } from "./canonical.js";
 import { portableContentHash, validateDictionaryDescription, validateDictionaryKey, validateDictionaryName, validateDictionaryKind, validateEntries, type DictionaryEntries, type DictionaryEntry, type DictionaryKind, type PlainEntryType } from "./model.js";
 import { encryptValue, decryptValue, type EncryptedValue } from "../secrets/aead.js";
@@ -28,11 +29,11 @@ export interface DictionaryWriteResult {
 }
 
 export interface DictionaryReferences {
-  /** 返回每个键的引用计数；任务 5 的引用扫描接入后提供真实数据。 */
+  /** 按对象去重的键引用计数。 */
+  scan?(dictionaryId: string): import("./references.js").ReferenceScan;
   keyReferences(dictionaryId: string, keys: string[]): { key: string; workflows: number; scripts: number }[];
 }
 
-const noReferences: DictionaryReferences = { keyReferences: () => [] };
 
 interface DictionaryRow {
   id: string;
@@ -148,13 +149,18 @@ function sha256(text: string): string {
 
 export class DictionaryService {
   readonly coordinator: ConfigWriteCoordinator;
-  /** 引用扫描当前为空实现；任务 5 接入工作流/脚本引用查询。 */
-  references: DictionaryReferences = noReferences;
+  references: DictionaryReferences;
   private confirmations = new Map<string, { dictionaryId: string; requestDigest: string; targetRevision: number; referencesDigest: string; expiresAt: number }>();
   private reEncryptPreviews = new Map<string, { dictionaryId: string; expectedRevision: number; currentVersionId: string; contentHash: string; targetKeyId: string; configGeneration: number; keyGeneration: number; keyFingerprint: string | null; expiresAt: number }>();
 
   constructor(readonly store: Store, readonly secrets: SecretsService) {
     this.coordinator = secrets.coordinator;
+    this.references = new DictionaryReferenceScanner(store);
+  }
+
+  referenceList(id: string, input: { view?: "current" | "history" | "all"; limit?: number; cursor?: string } = {}) {
+    this.requireDictionary(id);
+    return new DictionaryReferenceScanner(this.store).list(id, input);
   }
 
   // ---- 写入 ----
@@ -246,11 +252,12 @@ export class DictionaryService {
     const removedKeys = operations.filter(operation => operation.op === "remove").map(operation => operation.key);
     if (removedKeys.length === 0) return;
     const impacts = this.references.keyReferences(id, removedKeys).filter(impact => impact.workflows > 0 || impact.scripts > 0);
-    if (impacts.length === 0) return;
+    const scan = this.references.scan?.(id);
+    if (impacts.length === 0 && (!scan || scan.complete)) return;
     const business = { dictionaryId: id, expectedRevision: input.expectedRevision, name: input.name ?? null, description: input.description ?? null, enabled: input.enabled ?? null, operations: input.operations };
     const requestDigest = this.requireDictionary(id).kind === "encrypted"
       ? this.secrets.sensitiveDigest("dictionary-secret:update", business) : sha256(canonicalJson(business));
-    const referencesDigest = sha256(canonicalJson(impacts));
+    const referencesDigest = sha256(canonicalJson({ impacts, scan: scan ?? null }));
     if (input.confirmationToken !== undefined) {
       const entry = this.confirmations.get(input.confirmationToken);
       check(entry && entry.dictionaryId === id && entry.requestDigest === requestDigest && entry.targetRevision === targetRevision && entry.referencesDigest === referencesDigest && entry.expiresAt > Date.now(), "PREVIEW_EXPIRED", "确认令牌无效或已过期，请重新确认影响", 409);
@@ -261,7 +268,7 @@ export class DictionaryService {
     const expiresAt = Date.now() + CONFIRMATION_TTL_MS;
     this.confirmations.set(token, { dictionaryId: id, requestDigest, targetRevision, referencesDigest, expiresAt });
     const error = new AppError("CONFIRMATION_REQUIRED", "移除正在被引用的键需要确认影响", 409);
-    (error as AppError & { details?: unknown }).details = { impacts, confirmationToken: token, expiresAt };
+    (error as AppError & { details?: unknown }).details = { impacts, complete: scan?.complete ?? true, issues: scan?.issues ?? [], confirmationToken: token, expiresAt };
     throw error;
   }
 

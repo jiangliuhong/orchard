@@ -2,18 +2,17 @@ import { gitProjects } from "../project-git/service.js";
 import { AppError } from "../domain/errors.js";
 import type { RunAgentBinding } from "../domain/types.js";
 import { configCoordinator } from "../config-git/coordinator.js";
+import { DictionaryExecution, REDACTED, safeExecutionFailure } from "../dictionaries/execution.js";
+import { nodeDictionaryBindings, workflowDictionaryRequirements, workflowDictionarySensitivity } from "../domain/dictionaries.js";
+import { prepareScriptRuntime } from "./dictionary-context.js";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, readFileSync, lstatSync } from "node:fs";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { Store } from "../persistence/store.js";
 import { compileScripts, json, readDefinition, readLayout } from "../persistence/files.js";
 import { ProviderRegistry } from "../providers/registry.js";
 import { assertSchema, resolveBinding } from "../domain/validation.js";
 import { check, failure } from "../domain/errors.js";
 import type { WorkflowNode, Workflow, NodeRun, Run, RunExecution } from "../domain/types.js";
-import { executeProcess } from "./process.js";
-import { executeScript } from "./script.js";
+import { executeScript, ScriptExecutionError } from "./script.js";
 import type { WebBridgeGateway } from "../web-bridge/gateway.js";
 
 export class GraphRunner {
@@ -28,28 +27,45 @@ export class GraphRunner {
   constructor(readonly store: Store, readonly providers: ProviderRegistry, readonly webBridge?: WebBridgeGateway, autoStart = true) { if (autoStart) this.start(); }
   start() {
     configCoordinator(this.store).assertAvailable();
+    prepareScriptRuntime(this.store);
     for (const row of this.store.all<{ id: string }>("SELECT id FROM runs WHERE status IN ('queued','running','cancel_requested')")) this.track(row.id);
     this.enabled = true; this.wake();
   }
   create(versionId: string, input: unknown, requestId: string) {
     return configCoordinator(this.store).withActivity("run:accept", () => {
-      configCoordinator(this.store).assertAvailable();
-      const result = this.store.command(`run:${versionId}`, requestId, input, () => {
-        const version = this.store.version(versionId);
-        assertSchema(input, version.definition.inputSchema, "工作流输入");
-        this.store.assertWorkflowScripts(version.definition, true);
-        const bindings = this.providers.modelConfigs.resolveWorkflow(version.definition);
-        for (const node of version.definition.nodes) if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
-        const id = randomUUID(), now = Date.now();
-        this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.reference(input), now);
-        for (const node of version.definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
-        this.providers.modelConfigs.saveBindings(id, bindings);
-        gitProjects(this.store).pin(id, version.definition);
-        this.store.append("run", id, "run.queued", { versionId });
-        return this.store.run(id);
+      const scope = `run:${versionId}`;
+      if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
+        return configCoordinator(this.store).withAdmission(() => {
+          const prior = this.store.command<{ id: string }>(scope, requestId, input, () => { throw new Error("unreachable"); });
+          const run = this.store.run(prior.id);
+          if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
+          this.wake(); return run;
+        });
+      }
+      const version = this.store.version(versionId), definition = version.definition;
+      assertSchema(input, definition.inputSchema, "工作流输入");
+      this.store.assertWorkflowScripts(definition, true);
+      const inputRef = this.store.prepareReference(input), dependencies = new DictionaryExecution(this.store);
+      const requirements = workflowDictionaryRequirements(definition, (id, version) => this.store.scriptDefinition(id, version));
+      return configCoordinator(this.store).withAdmission(() => {
+        const result = this.store.command(scope, requestId, input, () => {
+          const admission = dependencies.validate(requirements);
+          dependencies.validatePointers(definition, admission.bindings, input);
+          const bindings = this.providers.modelConfigs.resolveWorkflow(definition);
+          for (const node of definition.nodes) if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
+          const id = randomUUID(), now = Date.now();
+          this.store.exec("INSERT INTO runs(id,workflow_version_id,status,input_ref,created_at) VALUES(?,?,'queued',?,?)", id, versionId, this.store.attachPreparedReference(inputRef), now);
+          for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
+          this.providers.modelConfigs.saveBindings(id, bindings); dependencies.save("run", id, admission.bindings);
+          gitProjects(this.store).pin(id, definition);
+          dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
+          this.store.append("run", id, "run.queued", { versionId });
+          return { id };
+        });
+        const run = this.store.run(result.id);
+        if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
+        this.wake(); return run;
       });
-      if (["queued", "running", "cancel_requested"].includes(result.status)) this.track(result.id);
-      this.wake(); return result;
     });
   }
   private editableDraft(id: string, revision: number) {
@@ -63,7 +79,12 @@ export class GraphRunner {
     return configCoordinator(this.store).withActivity("GraphRunner.createDraft", async () => {
       const scope = `draft-run:${draftId}`, command = { revision, input };
       if (this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
-        return this.store.command<Run>(scope, requestId, command, () => { throw new Error("unreachable"); });
+        return configCoordinator(this.store).withAdmission(() => {
+          const result = this.store.command<{ id: string }>(scope, requestId, command, () => { throw new Error("unreachable"); });
+          const run = this.store.run(result.id);
+          if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
+          this.wake(); return run;
+        });
       }
       const draft = this.editableDraft(draftId, revision);
       const original = this.store.files.readTree(draft.artifactPath).files;
@@ -72,23 +93,31 @@ export class GraphRunner {
       const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
       readLayout(files);
       const compiled = await compileScripts(files, definition), tree = this.store.files.saveTree(files, compiled);
+      const inputRef = this.store.prepareReference(input), dependencies = new DictionaryExecution(this.store);
+      const requirements = workflowDictionaryRequirements(definition, (id, version) => this.store.scriptDefinition(id, version));
+      return configCoordinator(this.store).withAdmission(() => {
       const result = this.store.command(scope, requestId, command, () => {
         this.editableDraft(draftId, revision);
         this.store.assertWorkflowScripts(definition);
+        const admission = dependencies.validate(requirements);
+        dependencies.validatePointers(definition, admission.bindings, input);
         const bindings = this.providers.modelConfigs.resolveWorkflow(definition);
         for (const node of definition.nodes) {
           if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
         }
         const id = randomUUID(), now = Date.now();
-        this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.reference(input), now);
+        this.store.exec("INSERT INTO runs(id,draft_id,draft_revision,snapshot_path,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, draftId, revision, tree.path, this.store.attachPreparedReference(inputRef), now);
         for (const node of definition.nodes) this.store.exec("INSERT INTO node_runs(id,run_id,node_id,type,status) VALUES(?,?,?,?,'pending')", randomUUID(), id, node.id, node.type);
-        this.providers.modelConfigs.saveBindings(id, bindings);
+        this.providers.modelConfigs.saveBindings(id, bindings); dependencies.save("run", id, admission.bindings);
         gitProjects(this.store).pin(id, definition);
+        dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
         this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
-        return this.store.run(id);
+        return { id };
       });
-      if (["queued", "running", "cancel_requested"].includes(result.status)) this.track(result.id);
-      this.wake(); return result;
+      const run = this.store.run(result.id);
+      if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
+      this.wake(); return run;
+      });
     });
   }
   private execution(run: Run): RunExecution {
@@ -139,10 +168,18 @@ export class GraphRunner {
   private skipRemaining(id: string, reason: string) { this.store.exec("UPDATE node_runs SET status='skipped',skip_reason=?,ended_at=? WHERE run_id=? AND status='pending'", reason, Date.now(), id); }
   private async execute(id: string, signal: AbortSignal) {
     let active: NodeRun | undefined, attemptId: string | undefined;
+    let sensitiveFailure = true;
     try {
       const run = this.store.run(id), execution = this.execution(run);
       const tree = this.store.files.readTree(execution.artifactPath), workflow = readDefinition(tree.files);
+      this.store.assertWorkflowScripts(workflow, true);
       check(json(workflow) === json(execution.definition), "ARTIFACT_MISMATCH", "流程定义与运行快照不一致");
+      const resolveScript = (scriptId: string, versionId: string) => this.store.scriptDefinition(scriptId, versionId);
+      const policy = workflowDictionarySensitivity(workflow, resolveScript);
+      const requirements = workflowDictionaryRequirements(workflow, resolveScript);
+      const declarations = nodeDictionaryBindings(workflow, resolveScript);
+      const dictionaries = new DictionaryExecution(this.store).load("run", id, requirements);
+      sensitiveFailure = false;
       const bindings = new Map(this.providers.modelConfigs.bindings(id).map(binding => [binding.nodeId, binding]));
       for (const node of workflow.nodes) if (node.type === "agent") check(bindings.has(node.id), "AGENT_BINDING_MISSING", `${node.name} 缺少运行模型绑定`);
       this.store.transaction(() => {
@@ -156,21 +193,23 @@ export class GraphRunner {
         signal.throwIfAborted();
         const node = workflow.nodes.find(n => n.id === next)!;
         const agentBinding = bindings.get(node.id);
+        const sensitive = policy.nodes.has(node.id);
+        sensitiveFailure = sensitive;
         active = this.store.nodes(id).find(n => n.nodeId === node.id)!; attemptId = randomUUID();
-        const value = resolveBinding(node.input, run.input, outputs);
+        const value = resolveBinding(node.input, run.input, outputs, dictionaries.plain);
         assertSchema(value, node.inputSchema ?? true, `${node.id} 输入`);
         this.store.transaction(() => {
           check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
           this.store.exec("UPDATE runs SET active_node_id=? WHERE id=?", node.id, id);
-          const inputRef = this.store.reference(value), now = Date.now();
+          const inputRef = this.store.reference(sensitive ? REDACTED : value), now = Date.now();
           this.store.exec("UPDATE node_runs SET status='running',input_ref=?,started_at=? WHERE id=?", inputRef, now, active!.id);
-          this.store.exec("INSERT INTO node_attempts(id,node_run_id,attempt_no,status,execution_json,input_ref,started_at) VALUES(?,?,1,'running',?,?,?)", attemptId!, active!.id, json({ nodeType: node.type, config: node.config, ...(agentBinding ? { agentModelConfig: agentBinding } : {}) }), inputRef, now);
-          this.store.append("run", id, "node.started", { input: value }, node.id, attemptId);
+          this.store.exec("INSERT INTO node_attempts(id,node_run_id,attempt_no,status,execution_json,input_ref,started_at) VALUES(?,?,1,'running',?,?,?)", attemptId!, active!.id, json({ nodeType: node.type, config: node.config, inputRedacted: sensitive, outputRedacted: sensitive, logsRedacted: sensitive, ...(agentBinding ? { agentModelConfig: agentBinding } : {}) }), inputRef, now);
+          this.store.append("run", id, "node.started", { input: sensitive ? REDACTED : value, inputRedacted: sensitive, logsRedacted: sensitive }, node.id, attemptId);
         });
         let actualProviderRevision: number | undefined;
         const emit = (type: string, payload: unknown) => {
           if (type === "provider.started") actualProviderRevision = (payload as { revision?: number }).revision;
-          if (!signal.aborted) this.store.append("run", id, type, payload, node.id, attemptId);
+          if (!signal.aborted && !sensitive) this.store.append("run", id, type, payload, node.id, attemptId);
         };
         let output: unknown, execution: unknown, route: NodeRun["route"];
         if (node.type === "switch") {
@@ -187,8 +226,8 @@ export class GraphRunner {
               emit: event => emit(event.type, event.payload),
             }).then(result => ({ output: result.output, execution: { agentModelConfig: agentBinding, providerId: result.providerId, modelId: result.modelId, providerRevision: actualProviderRevision, modelSource: result.modelSource, usage: result.usage } }))
             : node.type === "script"
-              ? await this.libraryScript(node, value, signal)
-              : await this.script(id, attemptId, node, value, tree.compiled[node.id], tree.files[node.config.script!], signal, emit);
+              ? await this.libraryScript(node, value, signal, dictionaries.context(declarations.get(node.id)), sensitive)
+              : await this.script(node, value, tree.compiled[node.id], tree.files, signal, emit, dictionaries.context(declarations.get(node.id)), sensitive);
           output = result.output; execution = result.execution;
           next = workflow.edges.find(e => e.from === node.id)?.to ?? null;
         }
@@ -196,31 +235,35 @@ export class GraphRunner {
         assertSchema(output, node.outputSchema, `${node.id} 输出`);
         this.store.transaction(() => {
           check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
-          const ref = this.store.reference(output), now = Date.now();
-          this.store.exec("UPDATE node_runs SET status='succeeded',output_ref=?,route_json=?,ended_at=? WHERE id=?", ref, route ? json(route) : null, now, active!.id);
-          this.store.exec("UPDATE node_attempts SET status='succeeded',output_ref=?,execution_json=?,ended_at=? WHERE id=?", ref, json({ config: node.config, ...(execution && typeof execution === "object" ? execution : {}), ...(route ? { route } : {}) }), now, attemptId!);
+          const safeOutput = sensitive ? REDACTED : output;
+          const safeRoute = route && sensitive ? { ...route, value: REDACTED } : route;
+          const ref = this.store.reference(safeOutput), now = Date.now();
+          this.store.exec("UPDATE node_runs SET status='succeeded',output_ref=?,route_json=?,ended_at=? WHERE id=?", ref, safeRoute ? json(safeRoute) : null, now, active!.id);
+          this.store.exec("UPDATE node_attempts SET status='succeeded',output_ref=?,execution_json=?,ended_at=? WHERE id=?", ref, json({ config: node.config, ...(execution && typeof execution === "object" ? execution : {}), inputRedacted: sensitive, outputRedacted: sensitive, logsRedacted: sensitive, ...(safeRoute ? { route: safeRoute } : {}) }), now, attemptId!);
           this.store.exec("UPDATE runs SET active_node_id=? WHERE id=?", next, id);
-          this.store.append("run", id, "node.succeeded", { output, ...(route ? { route } : {}) }, node.id, attemptId);
+          this.store.append("run", id, "node.succeeded", { output: safeOutput, outputRedacted: sensitive, logsRedacted: sensitive, ...(safeRoute ? { route: safeRoute } : {}) }, node.id, attemptId);
         });
         outputs.set(node.id, output); active = undefined; attemptId = undefined;
       }
-      const output = resolveBinding(workflow.result, run.input, outputs);
+      sensitiveFailure = policy.output;
+      const output = resolveBinding(workflow.result, run.input, outputs, dictionaries.plain);
       assertSchema(output, workflow.outputSchema, "工作流输出");
       signal.throwIfAborted();
       this.store.transaction(() => {
         check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
-        this.store.exec("UPDATE runs SET status='succeeded',output_ref=?,active_node_id=NULL,ended_at=? WHERE id=?", this.store.reference(output), Date.now(), id);
+        this.store.exec("UPDATE runs SET status='succeeded',output_ref=?,active_node_id=NULL,ended_at=? WHERE id=?", this.store.reference(policy.output ? REDACTED : output), Date.now(), id);
         this.skipRemaining(id, "branch_not_selected");
-        this.store.append("run", id, "run.succeeded", { output });
+        this.store.append("run", id, "run.succeeded", { output: policy.output ? REDACTED : output, outputRedacted: policy.output });
       });
     } catch (error) {
       this.store.transaction(() => {
         const run = this.store.run(id);
         if (!["queued", "running", "cancel_requested"].includes(run.status)) return;
         const cancelled = signal.aborted || run.status === "cancel_requested", status = cancelled ? "cancelled" : "failed";
-        const detail = cancelled ? { code: "CANCELLED", message: "用户取消了运行" } : failure(error);
+        const detail = cancelled ? { code: "CANCELLED", message: "用户取消了运行" } : safeExecutionFailure(error, sensitiveFailure);
         const now = Date.now();
         if (active) {
+          if (sensitiveFailure) this.store.exec("UPDATE node_runs SET input_ref=? WHERE id=?", this.store.reference(REDACTED), active.id);
           this.store.exec("UPDATE node_runs SET status=?,error_json=?,ended_at=? WHERE id=?", status, json(detail), now, active.id);
           if (attemptId) this.store.exec("UPDATE node_attempts SET status=?,error_json=?,ended_at=? WHERE id=?", status, json(detail), now, attemptId);
           this.store.append("run", id, `node.${status}`, detail, active.nodeId, attemptId);
@@ -278,48 +321,32 @@ export class GraphRunner {
     assertSchema(output, node.outputSchema, `${node.id} Web Bridge 输出`);
     return { output, execution: { application: node.config.application, tool: node.config.tool, resultMode: node.config.resultMode ?? "result" } };
   }
-  private async libraryScript(node: WorkflowNode, input: unknown, signal: AbortSignal) {
+  private async libraryScript(node: WorkflowNode, input: unknown, signal: AbortSignal, dictionaryContext: import("../dictionaries/execution.js").DictionaryContext, sensitive: boolean) {
     const script = this.store.script(node.config.scriptId!), version = this.store.scriptVersion(node.config.scriptVersionId!);
     check(script.currentPublishedVersionId && version.status === "published" && version.scriptId === script.id, "SCRIPT_VERSION_INVALID", "工作流引用的脚本版本无效");
     assertSchema(input, version.inputSchema, `${node.id} 脚本输入`);
     const tree = this.store.files.readScriptTree(version.sourceRef);
     const timeoutMs = Math.min(version.timeoutMs, node.config.timeoutMs ?? version.timeoutMs);
-    const result = await executeScript({ runtime: script.runtime, entryFile: version.entryFile, files: tree.files, resultMode: tree.definition?.resultMode, input, cwd: this.store.files.path("runs"), timeoutMs, signal });
+    const result = await executeScript({ runtime: script.runtime, entryFile: version.entryFile, files: tree.files, resultMode: tree.definition?.resultMode, dictionaryBindings: tree.definition?.dictionaryBindings, dictionaryContext, sensitive, input, cwd: this.store.files.path("runs"), timeoutMs, signal });
     assertSchema(result.output, version.outputSchema, `${node.id} 脚本输出`);
     return { output: result.output, execution: { scriptId: script.id, scriptVersionId: version.id, exitCode: result.exitCode, durationMs: result.durationMs } };
   }
-  private async script(runId: string, attemptId: string, node: WorkflowNode, input: unknown, compiled: string | undefined, shell: string | undefined, signal: AbortSignal, emit: (type: string, payload: unknown) => void) {
-    const relative = `runs/${runId}/${attemptId}`, directory = this.store.files.path(relative);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const resultFile = join(directory, "result.json");
-    let executable: string, args: string[];
-    if (node.type === "code.nodejs") {
-      check(compiled, "INVALID_SCRIPT", "缺少已编译脚本");
-      writeFileSync(join(directory, "node.mjs"), compiled, { mode: 0o600 });
-      const wrapper = `import {writeFileSync} from 'node:fs'; let text='';for await(const chunk of process.stdin)text+=chunk; const module=await import(${json(pathToFileURL(join(directory, "node.mjs")).href)});if(typeof module.default!=='function')throw new Error('Node.js script must export default function'); const result=await module.default(JSON.parse(text));writeFileSync(process.env.ORCHARD_RESULT_FILE,JSON.stringify(result ?? null));`;
-      writeFileSync(join(directory, "entry.mjs"), wrapper, { mode: 0o600 });
-      executable = process.execPath; args = [join(directory, "entry.mjs")];
-    } else {
-      check(shell !== undefined, "INVALID_SCRIPT", "Shell 脚本不存在");
-      writeFileSync(join(directory, "script.sh"), shell, { mode: 0o600 });
-      executable = "/bin/bash"; args = [join(directory, "script.sh")];
-    }
-    const result = await executeProcess({
-      executable, args, cwd: directory, input: json(input), signal, timeoutMs: node.config.timeoutMs,
-      env: { ORCHARD_RESULT_FILE: resultFile },
+  private async script(node: WorkflowNode, input: unknown, compiled: string | undefined, sources: import("../domain/types.js").SourceFiles, signal: AbortSignal, emit: (type: string, payload: unknown) => void, dictionaryContext: import("../dictionaries/execution.js").DictionaryContext, sensitive: boolean) {
+    const entryFile = node.config.script!.replace(/^scripts\//, "");
+    const files = Object.fromEntries(Object.entries(sources).filter(([path]) => path.startsWith("scripts/") && (node.type === "shell" ? path.endsWith(".sh") : /\.(ts|js|mjs)$/.test(path))).map(([path, source]) => [path.slice(8), source]));
+    if (node.type === "code.nodejs") check(compiled, "INVALID_SCRIPT", "缺少已编译脚本");
+    const result = await executeScript({
+      runtime: node.type === "shell" ? "shell" : "nodejs", entryFile, files, compiledSource: compiled,
+      resultMode: node.config.resultMode, input, cwd: this.store.files.path("runs"), timeoutMs: node.config.timeoutMs, signal,
+      dictionaryBindings: node.config.dictionaryBindings, dictionaryContext, sensitive,
       onLog: (stream, chunk) => {
         for (let at = 0; at < chunk.length; at += 4096) emit("node.log", { stream, text: chunk.slice(at, at + 4096) });
       },
+    }).catch(error => {
+      if (error instanceof ScriptExecutionError) emit("node.process", { exitCode: error.execution.exitCode, durationMs: error.execution.durationMs, stderr: error.execution.stderr.slice(-4000) });
+      throw error;
     });
     emit("node.process", { exitCode: result.exitCode, durationMs: result.durationMs, stderr: result.stderr.slice(-4000) });
-    check(result.exitCode === 0, "PROCESS_FAILED", `脚本退出码 ${result.exitCode}: ${result.stderr.slice(-2000)}`);
-    let output: unknown = { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-    if (node.type === "code.nodejs" || node.config.resultMode === "json") {
-      let info;
-      try { info = lstatSync(resultFile); } catch { check(false, "INVALID_SCRIPT_OUTPUT", "脚本没有生成 JSON 结果文件"); }
-      check(!info.isSymbolicLink() && info.isFile() && info.size <= 8 * 1024 * 1024, "OUTPUT_LIMIT", "节点结果文件无效或超限");
-      try { output = JSON.parse(readFileSync(resultFile, "utf8")); } catch { check(false, "INVALID_SCRIPT_OUTPUT", "脚本未生成合法 JSON 结果文件"); }
-    }
-    return { output, execution: { executable, exitCode: result.exitCode, durationMs: result.durationMs } };
+    return { output: result.output, execution: { exitCode: result.exitCode, durationMs: result.durationMs } };
   }
 }

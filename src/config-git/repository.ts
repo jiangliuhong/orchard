@@ -129,7 +129,7 @@ export class GitRepositoryService {
     const entries = await this.tree(b,sha);
     if (entries.some(e=>e.path===b.configDir || b.configDir.startsWith(e.path+'/'))) fail('INVALID_PATH','Configuration directory is occupied by a file');
     const files = await this.files(b, sha); if (!Object.keys(files).length) return 'empty';
-    try { const manifest = JSON.parse(files['manifest.json'] ?? '{}'); if (manifest.formatVersion > 1) return 'unsupported'; } catch { fail('INVALID_SNAPSHOT','Existing configuration directory has an invalid manifest'); }
+    try { const manifest = JSON.parse(files['manifest.json'] ?? '{}'); if (manifest.formatVersion > 2) return 'unsupported'; } catch { fail('INVALID_SNAPSHOT','Existing configuration directory has an invalid manifest'); }
     if (!this.options.validateSnapshot) fail('INVALID_SNAPSHOT','Snapshot validator is required for nonempty configuration directory');
     this.options.validateSnapshot(files); return 'valid';
   }
@@ -240,6 +240,17 @@ export class GitRepositoryService {
     await this.options.testCheckpoint?.('before-fetch');
     await this.git(b.repositoryPath,['fetch','--no-tags','--no-recurse-submodules','--prune','--',this.transport(b.remoteUrl),`+refs/heads/*:refs/remotes/origin/*`]);
   }
+  async remoteSyncSource() { return this.exclusive(async () => {
+    const b = await this.binding(); await this.clean(b); await this.fetchInternal(b);
+    const sourceSha = await this.ref(b, this.remoteRef(b));
+    if (!sourceSha) fail('REMOTE_BRANCH_MISSING', 'Bound remote branch does not exist');
+    const fetchedAt = new Date().toISOString();
+    const snapshotState = await this.inspect(b, sourceSha);
+    const files = snapshotState === 'valid' ? await this.files(b, sourceSha) : {};
+    const supportedCategories: string[] = snapshotState === 'valid' ? JSON.parse(files['manifest.json']).categories : [];
+    const metadata = (await this.git(b.repositoryPath, ['show', '-s', '--format=%s%x00%an%x00%cI', sourceSha])).trimEnd().split('\0');
+    return { bindingId: b.id, branch: b.branch, sourceSha, fetchedAt, commit: { subject: metadata[0], author: metadata[1], committedAt: metadata[2] }, snapshotState, supportedCategories };
+  }); }
   async fetch() { return this.exclusive(async()=>{const b=await this.binding(); await this.fetchInternal(b); return {...await this.statusInternal(b),remoteFresh:true};}); }
   private async statusInternal(b: GitBinding) {
     let dirty = false, dirtyReason: string | undefined; try { await this.clean(b); } catch(e) { if (!(e instanceof GitRepositoryError) || e.code !== 'DIRTY_REPOSITORY') throw e; dirty=true; dirtyReason=e.message; }

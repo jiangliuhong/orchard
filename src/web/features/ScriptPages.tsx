@@ -1,3 +1,4 @@
+import { DictionaryDeclarationEditor, DictionaryExecutionMetadata, RedactedPayload, isRedacted, type RedactionFlags } from "./DictionaryEditors";
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import type { JsonSchema, ScriptVersion, ScriptView, SourceFiles } from "../../domain/types.js";
@@ -8,6 +9,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
 import { SourceTabs } from "./SourceTabs";
+import { DeleteScriptButton } from "./DeleteScriptButton";
 import { ScriptCleanup, ScriptReferences, ScriptVersionCompare } from "./ScriptVersionPanels";
 import { ScriptAgentPanel } from "./ScriptAgentPanel";
 
@@ -15,7 +17,7 @@ export interface ScriptDetail extends ScriptView {
   versions: ScriptVersion[];
   draft: (ScriptVersion & { files: SourceFiles }) | null;
 }
-interface ScriptTest {
+interface ScriptTest extends RedactionFlags {
   id: string; status: string; draftRevision: number | null; scriptVersionId: string | null;
   input: unknown; output?: unknown; stdout?: unknown; stderr?: unknown; error?: { code: string; message: string };
   inputArtifactId?: string;
@@ -56,7 +58,7 @@ export function ScriptsPage() {
       <select aria-label="筛选运行时" value={runtime} onChange={event => { setRuntime(event.target.value); setOffset(0); }}><option value="">全部运行时</option><option value="nodejs">Node.js</option><option value="shell">Shell</option></select>
       <select aria-label="筛选脚本状态" value={status} onChange={event => { setStatus(event.target.value); setOffset(0); }}><option value="">全部状态</option><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option></select>
     </div><ErrorNotice message={resource.error} />
-    {!resource.data ? <Loading /> : resource.data.items.length ? <div className="script-list">{resource.data.items.map(script => <a className="panel script-card" href={`/scripts/${script.id}`} key={script.id}><div><h2>{script.name}</h2><span className="field-hint">{script.id} · {script.runtime}</span><p>{script.description || "暂无说明"}</p></div><div className="detail-stack"><Status value={script.status} /><span>{script.publishedVersion ? `发布版本 v${script.publishedVersion}` : "尚未发布"}{script.currentDraftVersionId && " · 有草稿"}</span>{script.latestTest && <small>最近测试：<Status value={script.latestTest.status} /> · {script.latestTest.scriptVersionId ? `版本 ${script.latestTest.scriptVersionId.slice(0, 8)}` : `草稿修订 ${script.latestTest.draftRevision}`}</small>}<small>{new Date(script.updatedAt).toLocaleString("zh-CN")}</small></div></a>)}</div> : <EmptyState title="没有匹配的脚本" description="创建脚本，或调整搜索和筛选条件。" symbol={<CreateScript iconOnly />} />}
+    {!resource.data ? <Loading /> : resource.data.items.length ? <div className="script-list">{resource.data.items.map(script => <div className="panel script-card" key={script.id}><a className="script-card-link" href={`/scripts/${script.id}`}><div><h2>{script.name}</h2><span className="field-hint">{script.id} · {script.runtime}</span><p>{script.description || "暂无说明"}</p></div><div className="detail-stack"><Status value={script.status} /><span>{script.publishedVersion ? `发布版本 v${script.publishedVersion}` : "尚未发布"}{script.currentDraftVersionId && " · 有草稿"}</span>{script.latestTest && <small>最近测试：<Status value={script.latestTest.status} /> · {script.latestTest.scriptVersionId ? `版本 ${script.latestTest.scriptVersionId.slice(0, 8)}` : `草稿修订 ${script.latestTest.draftRevision}`}</small>}<small>{new Date(script.updatedAt).toLocaleString("zh-CN")}</small></div></a><DeleteScriptButton id={script.id} name={script.name} compact onDeleted={() => { if (resource.data?.items.length === 1 && offset > 0) setOffset(Math.max(0, offset - 20)); else resource.reload(); }} /></div>)}</div> : <EmptyState title="没有匹配的脚本" description="创建脚本，或调整搜索和筛选条件。" symbol={<CreateScript iconOnly />} />}
     {resource.data && <div className="actions script-pagination"><span>共 {resource.data.total} 个脚本</span><Button variant="outline" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - 20))}>上一页</Button><Button variant="outline" disabled={offset + 20 >= resource.data.total} onClick={() => setOffset(offset + 20)}>下一页</Button></div>}
   </>;
 }
@@ -78,7 +80,7 @@ export function ScriptPage({ id }: { id: string }) {
     catch (error) { setError((error as Error).message); }
     finally { setBusy(false); }
   };
-  return <div className="script-desktop"><div className="script-page-header"><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title={script.name}><Status value={script.status} />{versionId && <CreateScript copy={{ id, versionId, name: script.name }} />}<Button variant="outline" disabled={dirty || script.status === "archived"} onClick={() => setArchiveOpen(true)}>归档脚本</Button></PageHeading></div>
+  return <div className="script-desktop"><div className="script-page-header"><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title={script.name}><Status value={script.status} />{versionId && <CreateScript copy={{ id, versionId, name: script.name }} />}<Button variant="outline" disabled={dirty || script.status === "archived"} onClick={() => setArchiveOpen(true)}>归档脚本</Button><DeleteScriptButton id={id} name={script.name} disabled={dirty || busy} onDeleted={() => window.location.assign("/scripts")} /></PageHeading></div>
     <ErrorNotice message={error || resource.error} />
     {script.status === "archived" && <div className="notice">此脚本已归档，只读保留。已发布工作流仍使用绑定版本运行。</div>}
     <div className="script-page-toolbar"><div className="script-version-picker"><label htmlFor="script-version">查看版本</label><select id="script-version" value={versionId} disabled={dirty} onChange={event => setSelected(event.target.value)}>{script.versions.map(version => <option key={version.id} value={version.id}>v{version.number} · {version.status === "draft" ? `草稿修订 ${version.revision}` : "已发布"}{version.id === script.currentPublishedVersionId ? " · 当前发布" : ""}</option>)}</select>{dirty && <span className="field-hint">未保存</span>}</div></div>
@@ -110,6 +112,7 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
   const [publishOpen, setPublishOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState("run"), [cleanupRefresh, setCleanupRefresh] = useState(0);
   const [restoreOpen, setRestoreOpen] = useState(false), [resultMode, setResultMode] = useState(version.resultMode ?? (script.runtime === "shell" ? "process" : "json"));
+  const [dictionaryBindings, setDictionaryBindings] = useState(version.dictionaryBindings);
   const commandKey = useCommandKey();
   const readOnly = version.status === "published" || script.status === "archived";
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -125,6 +128,7 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
   const save = async () => {
     const input = {
       id: script.id, name, description, runtime: script.runtime, files, entryFile, timeoutMs, resultMode,
+      ...(dictionaryBindings ? { dictionaryBindings } : version.dictionaryBindings ? { dictionaryBindings: {} } : {}),
       inputSchema: JSON.parse(inputSchema) as JsonSchema, outputSchema: JSON.parse(outputSchema) as JsonSchema,
       expectedRevision: version.revision, expectedDraftVersionId: version.id,
     };
@@ -144,6 +148,7 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
       <label>输入 Schema<Textarea rows={5} className="font-mono" value={inputSchema} onChange={event => { setInputSchema(event.target.value); setDirty(true); }} /></label>
       <label>输出 Schema<Textarea rows={5} className="font-mono" value={outputSchema} onChange={event => { setOutputSchema(event.target.value); setDirty(true); }} /></label>
     </fieldset><ScriptVersionCompare script={script} version={version} /></details>
+    <DictionaryDeclarationEditor value={dictionaryBindings} disabled={readOnly || busy} onApply={value => { setDictionaryBindings(value); setDirty(true); }} />
     {!readOnly && <div className="script-filters"><Input aria-label="新文件路径" placeholder={script.runtime === "shell" ? "helpers.sh" : "helpers.ts"} value={newFile} onChange={event => setNewFile(event.target.value)} /><Button variant="outline" disabled={busy || !newFile} onClick={() => {
       const pattern = script.runtime === "shell" ? /^(?:[\w-]+\/)*[\w.-]+\.sh$/ : /^(?:[\w-]+\/)*[\w.-]+\.(ts|js|mjs)$/;
       if (!pattern.test(newFile) || newFile.includes("..") || Object.hasOwn(files, newFile)) { setError("文件名无效或已存在"); return; }
@@ -224,7 +229,7 @@ function ScriptTestResult({ scriptId, testId, onInput, onChange }: { scriptId: s
     } catch (error) { setError((error as Error).message); }
   };
   return <><ErrorNotice message={error || resource.error} /><Status value={result.status} />{["queued", "running"].includes(result.status) && <Button variant="outline" onClick={() => void send(`/scripts/${scriptId}/tests/${testId}/cancel`).then(() => { resource.reload(); onChange(); }).catch(error => setError(error.message))}>取消测试</Button>}
-    <p className="field-hint">退出码 {result.exitCode ?? "—"} · {result.durationMs ?? "—"} ms · {result.scriptVersionId ? `版本 ${result.scriptVersionId}` : `草稿修订 ${result.draftRevision}`}</p>
-    <ErrorNotice message={result.error && `${result.error.code}: ${result.error.message}`} /><label>输入</label><Payload value={result.input} /><Button variant="outline" onClick={() => void reuse()}>复用此输入</Button><label>输出</label><Payload value={result.output} /><label>stdout</label>{typeof result.stdout === "string" ? <pre className="payload">{result.stdout || "—"}</pre> : <Payload value={result.stdout} />}<label>stderr</label>{typeof result.stderr === "string" ? <pre className="payload">{result.stderr || "—"}</pre> : <Payload value={result.stderr} />}
+    <DictionaryExecutionMetadata value={result} /><p className="field-hint">退出码 {result.exitCode ?? "—"} · {result.durationMs ?? "—"} ms · {result.scriptVersionId ? `版本 ${result.scriptVersionId}` : `草稿修订 ${result.draftRevision}`}</p>
+    <ErrorNotice message={result.error && `${result.error.code}: ${result.error.message}`} /><label>输入</label><RedactedPayload redacted={result.inputRedacted} value={result.input} /><Button variant="outline" disabled={result.inputRedacted || isRedacted(result.input)} onClick={() => void reuse()}>复用此输入</Button><label>输出</label><RedactedPayload redacted={result.outputRedacted} value={result.output} /><label>stdout</label>{result.logsRedacted || isRedacted(result.stdout) ? <RedactedPayload redacted value={null} /> : typeof result.stdout === "string" ? <pre className="payload">{result.stdout || "—"}</pre> : <Payload value={result.stdout} />}<label>stderr</label>{result.logsRedacted || isRedacted(result.stderr) ? <RedactedPayload redacted value={null} /> : typeof result.stderr === "string" ? <pre className="payload">{result.stderr || "—"}</pre> : <Payload value={result.stderr} />}
   </>;
 }

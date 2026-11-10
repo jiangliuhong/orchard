@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { validateScript } from "../src/domain/scripts.js";
 import { executeScript } from "../src/runtime/script.js";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -36,6 +36,24 @@ test("script execution uses the same bounded process protocol for Node.js and Sh
   assert.deepEqual(node.output, { doubled: 6 });
   const shell = await executeScript({ runtime: "shell", entryFile: "main.sh", files: { "main.sh": "read input; printf '%s' \"$input\"" }, input: { ok: true }, cwd, timeoutMs: 5000 });
   assert.equal((shell.output as { stdout: string }).stdout, JSON.stringify({ ok: true }));
+});
+
+test("dictionary runtime files do not collide with version-local source filenames", async t => {
+  const cwd = mkdtempSync(join(tmpdir(), "orchard-script-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  for (const declared of [false, true]) {
+    const result = await executeScript({
+      runtime: "nodejs", entryFile: "dictionary-helper.mjs",
+      files: { "dictionary-helper.mjs": declared ? "export default (_, ctx) => ctx.dictionaries.get('settings', 'value')" : "export default () => 42" },
+      ...(declared ? {
+        dictionaryBindings: { settings: { dictionaryId: randomUUID(), kind: "plain" as const, keys: ["value"] } },
+        dictionaryContext: { dictionaries: { settings: { value: 42 } }, secrets: {} },
+      } : {}),
+      input: {}, cwd, timeoutMs: 5000,
+    });
+    assert.equal(result.output, 42);
+    assert.deepEqual(readdirSync(cwd), []);
+  }
 });
 
 test("script execution enforces timeout and output limits", async () => {
