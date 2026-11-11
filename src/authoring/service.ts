@@ -1,7 +1,9 @@
+import { ProviderEventBatcher } from "../providers/event-batcher.js";
 import { validateWorkflowDictionaries, dictionaryDependencyMetadata } from "../dictionaries/validation.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { Store } from "../persistence/store.js";
 import { checkFiles, compileScripts, json, readDefinition, readLayout, safeFile, validateFiles } from "../persistence/files.js";
 import { ProviderRegistry } from "../providers/registry.js";
@@ -58,7 +60,18 @@ export class AuthoringService {
   private readonly jobs = new Map<string, { controller: AbortController; promise: Promise<void> }>();
   private readonly sessionHandles = new Map<string, { providerId: string; handle: import("../providers/session.js").ProviderSessionHandle }>();
   readonly conversations: ConversationService;
-  constructor(readonly store: Store, readonly providers: ProviderRegistry) { this.conversations = new ConversationService(store, providers); }
+  constructor(readonly store: Store, readonly providers: ProviderRegistry) { this.conversations = new ConversationService(store, providers, id => this.connectionState(id)); }
+  private connectionState(id: string): import("../domain/types.js").ConnectionState {
+    const conversation = this.store.conversation(id);
+    if (!conversation) return "absent";
+    if (conversation.status === "needs_rebuild") return "broken";
+    const turn = this.store.turnsOfConversation(id).at(-1);
+    if (turn?.status === "cancel_requested") return "stopping";
+    const entry = this.sessionHandles.get(id);
+    const state = entry ? this.providers.adapter(entry.providerId).sessionProvider?.getConnectionState?.(entry.handle) ?? "ready" : "absent";
+    if (turn && ["queued", "running"].includes(turn.status) && state === "absent") return "starting";
+    return state;
+  }
   private ensureDeletable(draftIds: string[]) {
     check(![...this.jobs.keys()].some(id => draftIds.includes(this.store.turn(id).draftId)), "WORKFLOW_BUSY", "创作任务尚未结束，请等待取消或生成完成后再删除");
   }
@@ -165,33 +178,30 @@ export class AuthoringService {
       check(input.prompt.trim().length > 0 && Buffer.byteLength(input.prompt) <= 100000, "INVALID_PROMPT", "请输入需求，最多 100 KiB");
       this.ensureEditable(id, input.expectedRevision);
       const selection = await this.providers.ready(input);
-      // 在构造上下文前确定实际逻辑会话；后续事务使用相同 conversationId，避免静默切换上下文。
-      const conversation = configCoordinator(this.store).withWrite(() => this.store.transaction(() => this.conversations.ensureForTurn(id, {
-        providerId: selection.providerId, modelId: selection.modelId, mode: input.mode ?? "multi", conversationId: input.conversationId ?? null,
-      })));
-      const snapshot = this.snapshot(id);
-      const previous = this.store.turnsOfConversation(conversation.id).at(-1);
-      const previousOutcome = previous ? {
-        turnId: previous.id,
-        status: previous.status as import("../domain/types.js").AuthoringTurnStatus,
-        appliedRevision: previous.status === "succeeded" ? (previous.baseRevision === this.store.draft(id).revision ? this.store.draft(id).revision : null) : null,
-        errorCode: previous.error?.code ?? null,
-      } : null;
-      const rebuilding = conversation.mode === "multi" && conversation.rebuildFromId !== null && conversation.backendRef === null;
-      const history: ContextHistoryMessage[] | undefined = rebuilding
-        ? this.rebuildHistory(id, conversation.rebuildFromId!)
-        : undefined;
-      const context = buildAuthoringContext({
-        kind: conversation.backendRef === null ? "initial" : "continuation", draftId: id, baseRevision: input.expectedRevision,
-        files: snapshot.files, availableDictionaries: dictionaryDependencyMetadata(this.store), providers: this.providers.views(), modelConfigs: this.providers.modelConfigs.list(true).items, previousOutcome,
-        history, historySource: rebuilding ? "explicit_rebuild" : undefined, userRequest: input.prompt,
-      });
-      const prompt = composeAuthoringPrompt(this.providers.views(), context);
+      let prepared: { prompt: string; files: SourceFiles } | undefined;
       const turn = configCoordinator(this.store).withWrite(() => this.store.command(`turn:${id}`, input.requestId, input, () => this.store.transaction(() => {
         this.ensureEditable(id, input.expectedRevision);
         const conversation = this.conversations.ensureForTurn(id, {
           providerId: selection.providerId, modelId: selection.modelId, mode: input.mode ?? "multi", conversationId: input.conversationId ?? null,
         });
+        const snapshot = this.snapshot(id);
+        const previous = this.store.turnsOfConversation(conversation.id).at(-1);
+        const previousOutcome = previous ? {
+          turnId: previous.id,
+          status: previous.status as import("../domain/types.js").AuthoringTurnStatus,
+          appliedRevision: previous.status === "succeeded" ? (previous.baseRevision === this.store.draft(id).revision ? this.store.draft(id).revision : null) : null,
+          errorCode: previous.error?.code ?? null,
+        } : null;
+        const rebuilding = conversation.mode === "multi" && conversation.rebuildFromId !== null && conversation.backendRef === null;
+        const history: ContextHistoryMessage[] | undefined = rebuilding
+          ? this.rebuildHistory(id, conversation.rebuildFromId!)
+          : undefined;
+        const context = buildAuthoringContext({
+          kind: conversation.backendRef === null ? "initial" : "continuation", draftId: id, baseRevision: input.expectedRevision,
+          files: snapshot.files, availableDictionaries: dictionaryDependencyMetadata(this.store), providers: this.providers.views(), modelConfigs: this.providers.modelConfigs.list(true).items, previousOutcome,
+          history, historySource: rebuilding ? "explicit_rebuild" : undefined, userRequest: input.prompt,
+        });
+        prepared = { prompt: composeAuthoringPrompt(this.providers.views(), context), files: snapshot.files };
         const turnId = randomUUID(), now = Date.now();
         this.store.insertTurn({ id: turnId, draftId: id, providerId: selection.providerId, modelId: selection.modelId, providerRevision: selection.setting.revision, baseRevision: input.expectedRevision, conversationId: conversation.id, status: "queued", createdAt: now });
         this.store.transitionTurn(turnId, ["queued"], { status: "running", connectionGeneration: 0 });
@@ -203,20 +213,23 @@ export class AuthoringService {
         this.store.append("authoring_turn", turnId, "turn.started", { conversationId: conversation.id, connectionGeneration: 0 });
         return this.store.turn(turnId);
       })));
-      if (this.jobs.has(turn.id)) return turn;
+      // A concurrent receipt replay must never dispatch the same model call again.
+      if (!prepared || this.jobs.has(turn.id)) return turn;
       const controller = new AbortController();
-      const promise = this.generate(turn.id, prompt, snapshot.files, controller).finally(() => this.jobs.delete(turn.id));
+      const promise = this.generate(turn.id, prepared.prompt, prepared.files, controller).finally(() => this.jobs.delete(turn.id));
       this.jobs.set(turn.id, { controller, promise }); return turn;
     });
   }
   private async generate(turnId: string, prompt: string, before: SourceFiles, controller: AbortController) {
     return configCoordinator(this.store).withActivity("AuthoringService.generate", async () => {
       const turn = this.store.turn(turnId);
+      let persistenceError: unknown;
+      const batcher = new ProviderEventBatcher(event => {
+        const current = this.store.turn(turnId);
+        if (current.status === "running" || current.status === "cancel_requested") this.store.append("authoring_turn", turnId, event.type, event.payload);
+      }, error => { persistenceError = error; controller.abort(error); });
       try {
-        const emit = (event: { type: string; payload: unknown }) => {
-          const current = this.store.turn(turnId);
-          if ((current.status === "running" || current.status === "cancel_requested") && !controller.signal.aborted) this.store.append("authoring_turn", turnId, event.type, event.payload);
-        };
+        const emit = batcher.emit;
         const conversation = turn.conversationId ? this.store.conversation(turn.conversationId) : undefined;
         const setting = this.providers.setting(turn.providerId);
         const adapter = this.providers.adapter(turn.providerId);
@@ -235,25 +248,44 @@ export class AuthoringService {
           check(handle.ref !== null, "PROTOCOL_STATE_INVALID", "原生会话未返回后端引用");
           check(this.store.saveBackendRef(conversation!.id, handle.ref, handle.generation), "CONVERSATION_CONFLICT", "会话后端引用保存失败", 409);
           this.store.transitionTurn(turnId, ["running"], { submissionState: "sending", connectionGeneration: handle.generation });
-          this.store.append("authoring_turn", turnId, "provider.session", { conversationId: conversation!.id, state: conversation!.backendRef ? "resuming" : "creating" });
-          this.store.append("authoring_turn", turnId, "provider.started", { providerId: turn.providerId, requestedModel: turn.modelId, revision: turn.providerRevision, transport: "native" });
+          emit({ type: "provider.session", payload: { conversationId: conversation!.id, state: conversation!.backendRef ? "resuming" : "creating" } });
+          emit({ type: "provider.started", payload: { providerId: turn.providerId, requestedModel: turn.modelId, revision: turn.providerRevision, executable: setting.config.executable, transport: "native" } });
           result = await adapter.sessionProvider!.sendTurn(handle, {
             modelId: turn.modelId, prompt, schema: AUTHORING_SCHEMA, cwd: workspace, signal: controller.signal, timeoutMs: 600000,
             hostTurnId: turnId, emit,
             onAccepted: async backendTurnId => {
               check(this.store.transitionTurn(turnId, ["running"], { submissionState: "accepted", backendTurnId }), "TURN_INTERRUPTED", "轮次在后端接受前已结束");
-              this.store.append("authoring_turn", turnId, "provider.accepted", { conversationId: conversation!.id, backendTurnId });
+              emit({ type: "provider.accepted", payload: { conversationId: conversation!.id, backendTurnId } });
             },
           });
           this.store.transitionTurn(turnId, ["running"], { submissionState: "settled" });
-          this.store.append("authoring_turn", turnId, "provider.session", { conversationId: conversation!.id, state: "ready" });
+          emit({ type: "provider.session", payload: { conversationId: conversation!.id, state: "ready" } });
           this.store.touchConversation(conversation!.id, turn.baseRevision);
-          this.store.append("authoring_turn", turnId, "provider.completed", result);
+          emit({ type: "provider.completed", payload: result });
         } else {
-          result = await this.providers.run({ providerId: turn.providerId, modelId: turn.modelId }, {
-            prompt, schema: AUTHORING_SCHEMA, cwd: this.store.root, signal: controller.signal, timeoutMs: 600000, emit,
-          });
+          const workspace = mkdtempSync(join(this.store.root, ".agent-"));
+          try {
+            const handle = await adapter.sessionProvider.openSession(setting, { key: `single:${turnId}`, modelId: turn.modelId, cwd: workspace, persistent: false, signal: controller.signal });
+            if (turn.conversationId) this.sessionHandles.set(turn.conversationId, { providerId: turn.providerId, handle });
+            try {
+              this.store.transitionTurn(turnId, ["running"], { submissionState: "sending", connectionGeneration: handle.generation });
+              emit({ type: "provider.started", payload: { providerId: turn.providerId, requestedModel: turn.modelId, revision: turn.providerRevision, executable: setting.config.executable, transport: "native" } });
+              result = await adapter.sessionProvider.sendTurn(handle, {
+                modelId: turn.modelId, prompt, schema: AUTHORING_SCHEMA, cwd: workspace, signal: controller.signal, timeoutMs: 600000, hostTurnId: turnId, emit,
+                onAccepted: async backendTurnId => {
+                  check(this.store.transitionTurn(turnId, ["running"], { submissionState: "accepted", backendTurnId }), "TURN_INTERRUPTED", "轮次在后端接受前已结束");
+                  emit({ type: "provider.accepted", payload: { conversationId: turn.conversationId, backendTurnId } });
+                },
+              });
+              this.store.transitionTurn(turnId, ["running"], { submissionState: "settled" });
+              emit({ type: "provider.completed", payload: result });
+            } finally {
+              try { await adapter.sessionProvider.releaseSession(handle); }
+              finally { if (turn.conversationId) this.sessionHandles.delete(turn.conversationId); }
+            }
+          } finally { rmSync(workspace, { recursive: true, force: true }); }
         }
+        batcher.flush();
         assertSchema(result.output, AUTHORING_SCHEMA, "创作输出");
         const response = result.output as { summary: string; changes: AuthoringChange[] };
         // 纯准备阶段（§19.3）：应用文件变更并静态检查；后续 validateFiles 诊断不通过仍可保存待修复草稿。
@@ -267,21 +299,22 @@ export class AuthoringService {
           if (response.changes.length) this.store.exec("UPDATE drafts SET artifact_path=?,validation_json=?,revision=revision+1,updated_at=? WHERE id=?", tree.path, json(validation), Date.now(), turn.draftId);
           this.store.message(turn.draftId, turnId, "assistant", { text: response.summary, proposal: response, files: response.changes.map(c => c.path), validation, providerId: result.providerId, modelId: result.modelId }, turn.conversationId ?? null);
           this.store.transitionTurn(turnId, ["running"], { status: "succeeded", submissionState: "settled", end: true });
-          this.store.append("authoring_turn", turnId, "turn.succeeded", { summary: response.summary, validation });
+          this.store.append("authoring_turn", turnId, "turn.succeeded", { summary: response.summary, validation, conversationId: turn.conversationId, appliedRevision: this.store.draft(turn.draftId).revision });
         }));
       } catch (error) {
+        try { batcher.flush(); } catch (flushError) { error = flushError; }
         if (ACTIVE_TURN_STATUSES.includes(this.store.turn(turnId).status as typeof ACTIVE_TURN_STATUSES[number])) configCoordinator(this.store).withWrite(() => this.store.transaction(() => {
           const current = this.store.turn(turnId), detail = failure(error);
-          const cancelled = current.status === "cancel_requested" || controller.signal.aborted;
+          const cancelled = current.status === "cancel_requested" || (controller.signal.aborted && persistenceError === undefined);
           const finalDetail = cancelled ? { code: "CANCELLED", message: "已取消生成" } : detail;
           if (!cancelled && turn.conversationId && ["PROCESS_EXITED_UNEXPECTEDLY", "SESSION_REBUILD_REQUIRED", "TURN_INTERRUPTED", "INTERRUPT_UNCONFIRMED"].includes(detail.code)) {
             this.store.markConversation(turn.conversationId, "needs_rebuild");
           }
           this.store.transitionTurn(turnId, [current.status], { status: cancelled ? "cancelled" : "failed", error: finalDetail, end: true });
           this.store.message(turn.draftId, turnId, "error", finalDetail, turn.conversationId ?? null);
-          this.store.append("authoring_turn", turnId, cancelled ? "turn.cancelled" : "turn.failed", finalDetail);
+          this.store.append("authoring_turn", turnId, cancelled ? "turn.cancelled" : "turn.failed", { ...finalDetail, conversationId: turn.conversationId });
         }));
-      }
+      } finally { batcher.close(); }
     });
   }
   cancel(id: string, turnId: string) {
@@ -290,7 +323,7 @@ export class AuthoringService {
     if (turn.status === "queued" || turn.status === "running") {
       configCoordinator(this.store).withWrite(() => this.store.transaction(() => {
         this.store.transitionTurn(turnId, [turn.status], { status: turn.status === "queued" ? "cancelled" : "cancel_requested" , end: turn.status === "queued" });
-        this.store.append("authoring_turn", turnId, turn.status === "queued" ? "turn.cancelled" : "turn.cancel_requested", { reason: "user" });
+        this.store.append("authoring_turn", turnId, turn.status === "queued" ? "turn.cancelled" : "turn.cancel_requested", { reason: "user", conversationId: turn.conversationId, ...(turn.status === "queued" ? { code: "CANCELLED", message: "已取消生成" } : {}) });
       }));
       this.jobs.get(turnId)?.controller.abort();
     }

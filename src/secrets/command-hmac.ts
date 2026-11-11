@@ -33,7 +33,7 @@ export class CommandHmac {
 
   /** 数据库敏感 scope 回执或密钥环本机操作记录是否已存在。 */
   hasSensitiveHistory(): boolean {
-    const receipt = this.store.one("SELECT 1 AS present FROM command_receipts WHERE scope LIKE 'secrets:%' OR scope LIKE 'dictionary-secret:%' LIMIT 1");
+    const receipt = this.store.one("SELECT 1 AS present FROM command_receipts WHERE scope LIKE 'secrets:%' OR scope LIKE 'dictionary-secret:%' OR scope LIKE 'script-test-v2:%' OR scope LIKE 'private-run:%' OR scope LIKE 'private-draft-run:%' LIMIT 1");
     if (receipt) return true;
     const keyring = this.keyring.load();
     return !!keyring && keyring.operations.length > 0;

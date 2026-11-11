@@ -515,6 +515,14 @@ export class CodexAppServerProvider implements SessionProvider {
     await this.stopActive(session, turn);
   }
 
+  getConnectionState(handle: ProviderSessionHandle): import("../domain/types.js").ConnectionState {
+    const session = this.sessions.get(handle.key);
+    if (!session || session.generation !== handle.generation) return "absent";
+    if (session.managerKey && !this.manager.isCurrent(session.managerKey, handle.generation)) return "absent";
+    if (session.broken) return "broken";
+    return "ready";
+  }
+
   async releaseSession(handle: ProviderSessionHandle): Promise<void> {
     const session = this.sessions.get(handle.key);
     if (!session || session.generation !== handle.generation) return;

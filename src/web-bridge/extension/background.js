@@ -88,7 +88,7 @@ const getProfile = () => {
       const stored = await chrome.storage.local.get(["profileId", "profileName"]);
       const id = stored.profileId || crypto.randomUUID();
       if (!stored.profileId) await chrome.storage.local.set({ profileId: id });
-      return { id, name: stored.profileName || `Chrome · ${id.slice(0, 8)}`, extensionId: chrome.runtime.id };
+      return { id, name: stored.profileName || `Chrome · ${id.slice(0, 8)}`, extensionId: chrome.runtime.id, extensionVersion: chrome.runtime.getManifest?.().version };
     })().catch(error => {
       profileReady = undefined;
       throw error;
@@ -97,26 +97,59 @@ const getProfile = () => {
   return profileReady;
 };
 
+function discoverServer() {
+  if (!chrome.runtime.connectNative) return Promise.resolve();
+  return new Promise(resolve => {
+    let port, timer, settled = false;
+    const id = crypto.randomUUID();
+    const finish = message => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      port?.onMessage.removeListener(onMessage);
+      port?.onDisconnect.removeListener(onDisconnect);
+      try { port?.disconnect(); } catch { /* The host may already have exited. */ }
+      resolve(message);
+    };
+    const onMessage = message => { if (message?.id === id) finish(message); };
+    const onDisconnect = () => { void chrome.runtime.lastError; finish(); };
+    try {
+      port = chrome.runtime.connectNative("com.jiangliuhong.orchard");
+      port.onMessage.addListener(onMessage); port.onDisconnect.addListener(onDisconnect);
+      timer = setTimeout(() => finish(), 3000);
+      port.postMessage({ id, type: "discover" });
+    } catch { finish(); }
+  });
+}
+
 const registerProfile = () => {
   registration = registration.catch(() => {}).then(async () => {
     const profile = { ...await getProfile() };
     const servers = [];
-    for (const port of [7441, 7443]) {
+    const defaults = ["http://127.0.0.1:7441", "http://127.0.0.1:7443"];
+    const register = async server => {
       try {
-        const response = await fetch(`http://127.0.0.1:${port}/api/web-bridge/profiles/register`, {
+        const response = await fetch(`${server}/api/web-bridge/profiles/register`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(profile),
           signal: AbortSignal.timeout(3000),
         });
         if (response.ok) {
-          const server = `http://127.0.0.1:${port}`;
           const registered = await response.json();
           if (registered.bridgeToken) startPolling(server, profile.id, registered.bridgeToken);
           servers.push(server);
         }
       } catch {}
-    }
+    };
+    // Default HTTP connections do not depend on a working Native Host.
+    const direct = Promise.all(defaults.map(register));
+    const discovered = discoverServer().then(async discovery => {
+      try {
+        const url = new URL(discovery?.result?.serverUrl);
+        if (url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) && !url.username && !url.password && url.pathname === "/" && !url.search && !url.hash && !defaults.includes(url.origin)) await register(url.origin);
+      } catch { /* Default HTTP ports remain available without a Native Host installation. */ }
+    });
+    await Promise.all([direct, discovered]);
     if (!servers.length) console.warn("Orchard 浏览器资料注册失败，请确认本机服务已启动；插件会每 30 秒自动重连。");
     lastConnection = { profile, servers };
     return lastConnection;

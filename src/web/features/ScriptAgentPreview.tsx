@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { historyPolicyRelaxed, schemaChanges } from "../../domain/schema-diff.js";
 import type { ScriptAgentService } from "../../authoring/script-agent.js";
 import { send, useCommandKey, useResource } from "../lib/api";
 import { ErrorNotice, Loading, Payload, Status } from "../components/common";
@@ -30,7 +31,10 @@ export function ScriptAgentPreview({ script, turnId, disabled, onApplied, onTest
   const stale = script.currentDraftVersionId !== turn.draftVersionId || script.draft?.revision !== turn.baseRevision;
   const hasChanges = !!turn.proposal && (!!turn.proposal.changes.length || !!Object.keys(turn.proposal.metadata).length);
   return <div className="detail-stack"><h3>{hasChanges ? `变更详情 · 修订 ${turn.baseRevision}` : "回复详情"}</h3><Status value={turn.status} /><ErrorNotice message={error || resource.error || turn.error?.message} />
-    {turn.proposal && <><p>{turn.proposal.summary}</p>{hasChanges && turn.base && turn.candidate && <ScriptDiff original={versionFiles(turn.base)} modified={versionFiles(turn.candidate)} />}
+    {turn.proposal && <><p>{turn.proposal.summary}</p>{turn.base && turn.candidate && <>{(["inputSchema", "outputSchema"] as const).map(key => {
+      const changes = schemaChanges(turn.base![key], turn.candidate![key]);
+      return changes.length ? <details key={key} open><summary>{key === "inputSchema" ? "输入参数" : "返回结果"}契约变更（{changes.length}）</summary>{historyPolicyRelaxed(turn.base![key], turn.candidate![key]) && <div className="notice warning">注意：提案移除或放宽了手动值历史保护，请确认是否允许记录。</div>}<ul className="schema-diff-list">{changes.map(change => <li key={change.path}><code>{change.path}</code><span>原：{JSON.stringify(change.before) ?? "未声明"}</span><span>新：{JSON.stringify(change.after) ?? "未声明"}</span></li>)}</ul></details> : null;
+    })}</>}{hasChanges && turn.base && turn.candidate && <ScriptDiff original={versionFiles(turn.base)} modified={versionFiles(turn.candidate)} />}
       {hasChanges && !turn.validation?.valid && <div className="notice warning"><div>提案源码存在校验错误，可应用为待修复草稿。{turn.validation?.diagnostics.map((message, index) => <pre key={index}>{message}</pre>)}</div></div>}
       {Object.hasOwn(turn.proposal, "testInput") && <><label>建议测试输入</label><Payload value={turn.proposal.testInput} /><Button variant="outline" disabled={disabled} onClick={() => onTestInput(turn.proposal!.testInput)}>使用建议测试输入</Button></>}
       {hasChanges && (turn.appliedRevision !== null ? <div className="notice success">已应用为草稿修订 {turn.appliedRevision}。</div> : stale ? <div className="notice warning">草稿已改变，此提案只读保留。请基于当前草稿重新生成。</div> : <Button disabled={disabled || busy} onClick={() => setConfirm(true)}>确认应用变更…</Button>)}

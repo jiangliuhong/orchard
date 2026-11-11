@@ -9,6 +9,8 @@
 - [脚本库、Agent 创作与版本复用](./product/script-library.md)
 - [Agent 模型配置与工作流引用](./product/agent-model-configs.md)
 - [Git 项目分析与存储空间](./product/git-project-analysis.md)
+- [字典与跨设备执行](./product/dictionaries.md)
+- [浏览器桥接安装、连接与诊断](./product/web-bridge.md)
 
 ## 技术规范
 
@@ -33,7 +35,7 @@
 功能专项设计和实施记录统一放在上级的 [`features`](../features/) 目录。当前 feature：[Agent 对话](../features/2026-11-04-agent-conversations/)；[工作流脚本库](../features/2026-11-06-script-library/)；[版本升级与数据迁移向导（已完成并验收）](../features/2026-11-06-data-migration/design.md)；[配置定义信息 Git 存储（实现与验证记录）](../features/2026-11-06-config-git-storage/design.md)。
 
 - [Agent 模型配置与工作流动态引用](../features/2026-11-07-agent-model-configs/design.md)
-- [字典、加密字典与 Git 同步方案（实施中，管理入口已实现）](../features/2026-11-09-dictionaries/design.md)
+- [字典、加密字典与 Git 同步方案（编码完成，执行与同步已接入）](../features/2026-11-09-dictionaries/design.md)
 
 - [Git 项目工作区、Agent 分析与设置存储空间查看（已实现，验证记录见 feature）](../features/2026-11-10-git-project-agent/design.md)
 

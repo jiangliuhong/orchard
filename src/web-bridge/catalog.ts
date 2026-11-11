@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { BridgeHttpMethod } from "./http-methods.js";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -31,7 +32,8 @@ export interface WebBridgeApplication {
 
 export const catalog: WebBridgeTool[] = [];
 export const catalogHash = createHash("sha256").update(JSON.stringify(catalog)).digest("hex");
-export const extensionId = "abcdefghijklmnopabcdefghijklmnop";
+const extensionManifest = JSON.parse(readFileSync(new URL("./extension/manifest.json", import.meta.url), "utf8")) as { key: string };
+export const extensionId = [...createHash("sha256").update(Buffer.from(extensionManifest.key, "base64")).digest("hex").slice(0, 32)].map(char => String.fromCharCode(97 + parseInt(char, 16))).join("");
 
 export function listTools(application?: string) {
   return catalog.filter(tool => !application || tool.application === application);

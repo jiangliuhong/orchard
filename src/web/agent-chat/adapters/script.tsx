@@ -26,7 +26,7 @@ function ScriptReferencePicker({ context, selected, onAdd, onClose }: Attachment
     const test = tests.data?.items.find(item => item.id === event.target.value);
     if (!test) return;
     onAdd({ id: "script-test", kind: "script-test", label: `测试引用 · ${new Date(test.createdAt).toLocaleString("zh-CN")} · ${test.status}`, payload: { testId: test.id } }); onClose();
-  }}><option value="">选择测试记录</option>{tests.data?.items.map(test => <option value={test.id} key={test.id}>{new Date(test.createdAt).toLocaleString("zh-CN")} · {test.status}</option>)}</select><ErrorNotice message={tests.error} />{!tests.data?.items.length && <p className="field-hint">暂无测试记录，请先运行一次脚本测试。</p>}<p className="field-hint">将所选测试的输入、输出和日志提供给 Agent。</p></>;
+  }}><option value="">选择测试记录</option>{tests.data?.items.map(test => <option value={test.id} key={test.id}>{new Date(test.createdAt).toLocaleString("zh-CN")} · {test.status}</option>)}</select><ErrorNotice message={tests.error} />{!tests.data?.items.length && <p className="field-hint">暂无测试记录，请先运行一次脚本测试。</p>}<p className="field-hint">仅提供所选测试可记录的上下文；敏感执行的输入、输出和日志不会提供给 Agent。</p></>;
 }
 
 function useScriptSession(context: ScriptChatContext, choice: AgentChoice): ChatSession {

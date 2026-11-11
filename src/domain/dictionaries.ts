@@ -121,6 +121,7 @@ export function assertLegacyWorkflowDictionaries(value: unknown) {
   inspect(value.result);
   if (Array.isArray(value.nodes)) for (const node of value.nodes) if (object(node)) {
     inspect(node.input);
+    check(!object(node.config) || !Object.hasOwn(node.config, "credentialBindings"), "FORMAT_UNSUPPORTED", "凭据字典引用需要 Git 快照 v2", 422);
     check(!object(node.config) || !Object.hasOwn(node.config, "dictionaryBindings"), "FORMAT_UNSUPPORTED", "字典声明需要 Git 快照 v2", 422);
   }
 }

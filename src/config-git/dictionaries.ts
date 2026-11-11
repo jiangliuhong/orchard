@@ -48,6 +48,13 @@ export function requirements(snapshot: PortableSnapshot, obj: PortableScript | P
     walk(w.result); nodes.forEach((n: any) => walk(n.input));
     for (const n of nodes) {
       declarations(n.config?.dictionaryBindings);
+      if (n.type === "web-bridge") for (const ref of Object.values(n.config?.credentialBindings ?? {}) as { dictionaryId: string; key: string }[]) {
+        const dictionary = snapshot.dictionaries?.find(d => d.id === ref.dictionaryId);
+        check(dictionary, "DEPENDENCY_MISSING", "缺少凭据字典", 422);
+        const current = dictionary.versions.find(v => v.id === dictionary.currentVersionId);
+        check(current?.entries[ref.key]?.type === "string", "INVALID_CREDENTIALS", "凭据字典键必须为字符串", 422);
+        add({ dictionaryId: ref.dictionaryId, kind: dictionary.kind, keys: [ref.key] });
+      }
       if (n.type === "script") {
         const d = snapshot.scripts.find(s => s.id === n.config?.scriptId)?.versions.find(v => v.id === n.config?.scriptVersionId)?.definition;
         check(d, "DEPENDENCY_MISSING", "缺少固定脚本版本", 422); declarations(d.dictionaryBindings);

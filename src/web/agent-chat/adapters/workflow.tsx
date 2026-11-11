@@ -26,15 +26,17 @@ function useWorkflowSession(context: WorkflowChatContext, choice: AgentChoice, c
   const [viewedId, setViewedId] = useState<string | null>(null);
   const [newId, setNewId] = useState<string | null>(requestId);
   const [draftKey, setDraftKey] = useState<string>(requestId);
-  const [delta, setDelta] = useState("");
+  const [stream, setStream] = useState({ turnId: "", text: "" });
+  const [newMode, setNewMode] = useState<"single" | "multi">("multi");
   const createdConversation = useRef<ConversationView | undefined>(undefined);
   const activeTurn = draft.turns.find(turn => ["queued", "running", "cancel_requested"].includes(turn.status));
+  const delta = stream.turnId === activeTurn?.id ? stream.text : "";
   useStream("turns", activeTurn?.id, event => {
-    if (event.type === "provider.text") setDelta(text => (text + (event.payload as { text: string }).text).slice(-4000));
-    if (/turn\.(succeeded|failed|cancelled|interrupted)/.test(event.type)) { setDelta(""); reload(); }
+    if (event.type === "provider.text" && activeTurn) setStream(current => ({ turnId: activeTurn.id, text: (current.turnId === activeTurn.id ? current.text : "") + (event.payload as { text: string }).text }));
+    if (/turn\.(succeeded|failed|cancelled|interrupted)/.test(event.type)) { setStream({ turnId: "", text: "" }); reload(); }
   });
   useEffect(() => {
-    if (!activeTurn) { setDelta(""); return; }
+    if (!activeTurn) { setStream({ turnId: "", text: "" }); return; }
     const timer = setInterval(reload, 1500);
     return () => clearInterval(timer);
   }, [activeTurn?.id]);
@@ -44,7 +46,7 @@ function useWorkflowSession(context: WorkflowChatContext, choice: AgentChoice, c
   const selectConversation = (id: string) => {
     const selectedId = !newId && viewedId === id ? draft.currentConversation : id;
     setDraftKey(requestId());
-    setViewedId(selectedId); setNewId(null); setDelta(""); createdConversation.current = undefined;
+    setViewedId(selectedId); setNewId(null); createdConversation.current = undefined;
     const target = records.find(item => item.id === selectedId);
     if (target) choose({ providerId: target.providerId, modelId: target.modelId });
   };
@@ -99,11 +101,13 @@ function useWorkflowSession(context: WorkflowChatContext, choice: AgentChoice, c
     conversations, messages, active: !!activeTurn, stopping: activeTurn?.status === "cancel_requested",
     locked: dirty || busy || draft.status !== "draft" || (!newId && (!!records.length && (!draft.currentConversation || activeView !== draft.currentConversation))),
     managementLocked: busy || !!activeTurn || draft.status !== "draft",
+    connectionState: !newId ? conversation?.connectionState : undefined,
+    mode: { value: newId ? newMode : conversation?.mode ?? newMode, disabled: dirty || busy || !!activeTurn || draft.status !== "draft", change: mode => { setNewMode(mode); setNewId(requestId()); createdConversation.current = undefined; } },
     hint: dirty ? "先保存修改，再继续对话" : "工作流仅在手动运行时执行",
     historyHint: records.length && !draft.currentConversation ? "没有进行中的对话，请新建或继续历史对话。" : undefined,
     notice: broken && !draft.currentConversation ? <div className="notice warning">对话「{broken.title ?? "未命名对话"}」的后端上下文已中断，仅可阅读；重建会开启新上下文并保留原对话作诊断历史。</div> : undefined,
     noticeActions: broken && !draft.currentConversation ? [{ label: "重建上下文", run: async () => command("rebuild", broken) }] : undefined,
-    newConversation: () => { setNewId(requestId()); setDraftKey(requestId()); setViewedId(null); setDelta(""); createdConversation.current = undefined; },
+    newConversation: () => { setNewId(requestId()); setDraftKey(requestId()); setViewedId(null); createdConversation.current = undefined; },
     selectConversation,
     send: async submission => {
       context.setBusy(true);
@@ -111,7 +115,7 @@ function useWorkflowSession(context: WorkflowChatContext, choice: AgentChoice, c
         let target = conversation;
         if (newId) {
           target = createdConversation.current ?? await send<ConversationView>(`/drafts/${draft.id}/conversations`, {
-            ...choice, mode: "multi", expectedRevision: draft.revision, requestId: `${submission.requestId}:conversation`,
+            ...choice, mode: newMode, expectedRevision: draft.revision, requestId: `${submission.requestId}:conversation`,
           });
           createdConversation.current = target;
         }
@@ -119,7 +123,7 @@ function useWorkflowSession(context: WorkflowChatContext, choice: AgentChoice, c
           ...choice, conversationId: target?.id, mode: target?.mode ?? "multi",
           prompt: submission.prompt, expectedRevision: draft.revision, requestId: submission.requestId,
         });
-        setViewedId(target?.id ?? null); setNewId(null); setDelta(""); createdConversation.current = undefined;
+        setViewedId(target?.id ?? null); setNewId(null); createdConversation.current = undefined;
       } finally { context.setBusy(false); reload(); }
     },
     cancel: activeTurn ? async () => { await send(`/drafts/${draft.id}/turns/${activeTurn.id}/cancel`); reload(); } : undefined,

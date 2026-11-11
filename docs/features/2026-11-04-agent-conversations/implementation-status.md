@@ -70,19 +70,20 @@
 
 Pi 后端本机无认证，未做真实调用；模拟协议测试已覆盖同一状态机与消息契约，待有账号时按同样场景补录（Phase F 双后端专项仍待做）。
 
-## 待实施
+## 当前编码状态（2026-11-10 补齐）
 
-| 阶段 | 内容 | 状态 |
-| --- | --- | --- |
-| E 完整语义 | 完整受理事务幂等/崩溃窗口、全部 SSE payload 字段、事件批量持久化与断线补读细化 | 继续完善 |
-| F UI 与验收 | 连接状态细化、真实双后端三轮/取消/重启恢复专项验收 | 待真实环境验收（Codex 已过，Pi 待账号） |
-| G 历史对话 | 历史管理、上下文隔离、归档恢复、重启恢复、needs_rebuild 重建 | **完成**（模拟测试 + Codex 真实验收均通过，2026-11-06） |
+- 单次／多轮选择已接入工作流 UI。模式变化准备新对话，保留未发送输入；活动任务与未保存草稿锁定切换。
+- ConversationView 从活动轮次和 Provider 当前句柄派生 absent／starting／ready／stopping／broken；生产适配器检查代次与空闲回收，不把已回收连接显示为 ready。
+- 文本在宿主持久化边界按 50 ms 或 4 KiB 合并，保留 UTF-8 offset 与 itemId，非文本事件和所有终态前刷新；定时落库失败终止生成并按失败处理。
+- turn.succeeded 增加 conversationId／appliedRevision；失败／取消携带 conversationId，单次调用也记录 sending／accepted／settled，终态仍与草稿更新共同提交。
+- 会话选择／懒创建、上下文构造、轮次、用户消息和回执在同一受理事务中完成；上下文失败回滚新会话。延迟到达的同请求回执重放不重新派发模型。
+- 前端去除 4000 字符截断，按 SSE sequence 去重并保留完整当前轮文本；服务端继续支持 Last-Event-ID 持久化补读。
+- 已有历史管理、显式重建和重启中断语义保留。
 
-数据库方案已在本次会话获审核通过后实施；若后续调整字段或约束，先同步 design.md。
+专项测试：`tests/feature-completion.test.ts` 覆盖批量计时／阈值／UTF-8、落库失败、取消、单次／多轮受理状态与安全回执重放；`tests/interface.test.ts` 覆盖模式、输入保留、活动锁定及长流式回复去重。完整检查结果见[补齐验证记录](./completion-verification.md)。
 
-## 行为说明（当前状态）
+## 当前协议与验收边界
 
-- 所有现有安装的 Provider 配置缺少 `transport`，读取时按 `legacy` 处理，默认行为与升级前完全一致（§17.1）。
-- 用户在设置中将内建 Provider 的 `transport` 切为 `native` 后：节点调用与模型验证走原生协议单次调用；创作可创建持久逻辑会话，并在 native multi 模式下复用后端上下文。
-- `native` 模式探测失败时 readiness 为 unavailable 并携带错误码（PROTOCOL_UNSUPPORTED/TIMEOUT），可切回 legacy；不自动回退或静默重试（§13）。
-- 已实现 `/api/drafts/:id/conversations` 创建/重置、会话列表、显式消息过滤与创作提交的 `conversationId`；needs_rebuild 会话禁止继续生成并提供重建入口。
+仅支持 native；缺省 transport 也按 native 处理，不再提供 legacy 或回退。旧兼容对话按 [native-only 迁移](../2026-11-06-native-only/design.md)显式重建。上文 Phase A–G 是历史实施记录，不能据其 legacy 说明判断当前行为。
+
+Codex 的真实历史场景已在上文记录；Pi／Codex 项目工具分析的真实验证见[项目分析实施记录](../2026-11-10-git-project-agent/implementation.md)，它不等于完成两种后端创作的三轮／取消／重启专项。此轮不调用真实付费模型，不把新增确定性测试或编码完成声明为全部外部环境验收通过。数据库结构、迁移身份和历史审核资源均无变更。

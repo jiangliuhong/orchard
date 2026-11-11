@@ -1,6 +1,6 @@
 # Orchard 浏览器桥接设计
 
-状态：实施中  
+状态：已完成编码；当前 HTTP 执行及 Native Host 服务发现见 [implementation-status.md](./implementation-status.md)。真实业务站点、登录与扩展全链路验收仍单列。
 日期：2026-11-06  
 参考实现：`/Users/jaromejiang/Workspace/kn/web-agent-bridge`
 

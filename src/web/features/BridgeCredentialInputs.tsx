@@ -11,7 +11,7 @@ import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 
-function DictionaryKeys({ dictionaryId, disabled, onSelect }: { dictionaryId: string; disabled: boolean; onSelect: (key: string) => void }) {
+function DictionaryKeys({ dictionaryId, disabled, onSelect, acceptedTypes = ["string"] }: { dictionaryId: string; disabled: boolean; onSelect: (key: string) => void; acceptedTypes?: string[] }) {
   const [search, setSearch] = useState("");
   const { data, error, reload } = useResource<DictionaryDetail>(`/dictionaries/${encodeURIComponent(dictionaryId)}`);
   const keys = Object.entries(data?.keys ?? {}).filter(([key]) => key.toLowerCase().includes(search.trim().toLowerCase()));
@@ -24,8 +24,8 @@ function DictionaryKeys({ dictionaryId, disabled, onSelect }: { dictionaryId: st
       {!data && !error && <Loading />}
       {data && (!data.enabled || data.readiness !== "ready") ? <p role="alert">字典已禁用或不可用，请检查字典设置。</p> : data && <>
         {keys.map(([key, entry]) => <button type="button" className="bridge-dictionary-item" key={key}
-          disabled={disabled || entry.type !== "string"} onClick={() => onSelect(key)}>
-          <span>{key}</span>{entry.type !== "string" && <small>仅支持字符串</small>}
+          disabled={disabled || !acceptedTypes.includes(entry.type)} onClick={() => onSelect(key)}>
+          <span>{key}</span>{!acceptedTypes.includes(entry.type) && <small>{acceptedTypes.length === 1 && acceptedTypes[0] === "string" ? "仅支持字符串" : `类型不符（${entry.type}）`}</small>}
         </button>)}
         {!keys.length && <p className="field-hint" role="status">{search.trim() ? "没有匹配的 Key。" : "此字典暂无 Key。"}</p>}
       </>}
@@ -33,8 +33,8 @@ function DictionaryKeys({ dictionaryId, disabled, onSelect }: { dictionaryId: st
   </section>;
 }
 
-function CredentialDictionaryPicker({ name, disabled, initialDictionaryId, onSelect, onClose }: {
-  name: string; disabled: boolean; initialDictionaryId: string; onSelect: (dictionaryId: string, key: string) => void; onClose: () => void;
+export function CredentialDictionaryPicker({ name, disabled, initialDictionaryId, onSelect, onClose, acceptedTypes }: {
+  name: string; disabled: boolean; initialDictionaryId: string; onSelect: (dictionaryId: string, key: string) => void; onClose: () => void; acceptedTypes?: string[];
 }) {
   const [search, setSearch] = useState(""), [dictionaryId, setDictionaryId] = useState(initialDictionaryId);
   const [items, setItems] = useState<DictionaryListView[]>([]), [loading, setLoading] = useState(true);
@@ -60,7 +60,7 @@ function CredentialDictionaryPicker({ name, disabled, initialDictionaryId, onSel
   const dictionaries = items.filter(item => item.name.toLowerCase().includes(search.trim().toLowerCase()));
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
     <DialogContent className="bridge-credential-dialog">
-      <DialogHeader><DialogTitle>引入字典 · {name}</DialogTitle><DialogDescription>选择字典，点击字符串 Key 即可引用。这里只展示名称，不展示值。</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>引入字典 · {name}</DialogTitle><DialogDescription>选择字典，点击类型匹配的 Key 即可引用。这里只展示名称和类型，不展示值。</DialogDescription></DialogHeader>
       <div className="bridge-dictionary-columns">
         <section className="bridge-dictionary-column" aria-label="字典列表">
           <label htmlFor="credential-dictionary-search">字典</label>
@@ -78,7 +78,7 @@ function CredentialDictionaryPicker({ name, disabled, initialDictionaryId, onSel
             {!loading && !error && !dictionaries.length && <p className="field-hint" role="status">{search.trim() ? "没有匹配的字典。" : "暂无字典，请先在字典页面创建。"}</p>}
           </div>
         </section>
-        {dictionaryId ? <DictionaryKeys key={dictionaryId} dictionaryId={dictionaryId} disabled={disabled} onSelect={key => onSelect(dictionaryId, key)} />
+        {dictionaryId ? <DictionaryKeys key={dictionaryId} dictionaryId={dictionaryId} disabled={disabled} acceptedTypes={acceptedTypes} onSelect={key => onSelect(dictionaryId, key)} />
           : <section className="bridge-dictionary-column" aria-label="Key 列表"><label htmlFor="credential-key-search">Key</label><Input id="credential-key-search" placeholder="搜索 Key…" disabled /><p className="field-hint">请先选择左侧字典。</p></section>}
       </div>
     </DialogContent>

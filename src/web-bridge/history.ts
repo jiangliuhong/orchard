@@ -79,10 +79,12 @@ export class BridgeExecutionHistory {
     if (tool) this.restrict(tool);
     return structuredClone(this.items.filter(item => item.application === application && item.toolId === toolId).slice(0, 100).map(record => ({ ...record, definitionChanged: !!tool && !!record.toolHash && record.toolHash !== bridgeToolHash(tool), legacy: record.formatVersion !== 2 || record.legacy })));
   }
-  add(input: Input, context: { tool?: WebBridgeTool; bindings?: CredentialBindings } = {}) {
+  add(input: Input, context: { tool?: WebBridgeTool; bindings?: CredentialBindings; omitArgs?: boolean } = {}) {
     const tool = context.tool;
     const schemas = { parameters: tool?.parameters ?? { "x-history": { record: false } }, credentials: tool?.execution?.transport === "browser" ? credentialSchema(tool.execution) : undefined };
-    const args = captureHistory(input.args, schemas.parameters);
+    // Keep the root omission authoritative when current tool policy is reapplied.
+    const args = captureHistory(context.omitArgs ? null : input.args, schemas.parameters,
+      context.omitArgs ? { "": { source: "omitted", reason: "schema-policy" } } : {});
     const credentials = tool?.execution?.transport === "browser" ? credentialHistoryInput(tool.execution, context.bindings ?? {}) : { values: {}, sources: {} };
     const captured = captureCredentials(credentials.values, schemas.credentials ?? true, credentials.sources);
     const record: BridgeExecutionRecord = {

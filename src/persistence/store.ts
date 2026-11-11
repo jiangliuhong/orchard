@@ -1,3 +1,8 @@
+import { CommandHmac, sensitiveRequestDigest } from "../secrets/command-hmac.js";
+import { KeyringStore, resolveKeyringPath } from "../secrets/keyring.js";
+import { captureScriptInput, normalizeScriptInputSources, stripReferencedInput, type ScriptInputSources } from "../domain/script-test-input.js";
+import type { HistorySources } from "../web-bridge/history-policy.js";
+import type { DictionaryRequirement } from "../domain/dictionaries.js";
 import { workflowDictionaryRequirements, workflowDictionarySensitivity } from "../domain/dictionaries.js";
 import { DictionaryExecution, REDACTED, isRedacted, safeExecutionFailure, scriptDictionaryRequirements } from "../dictionaries/execution.js";
 import { configCoordinator } from "../config-git/coordinator.js";
@@ -65,7 +70,7 @@ export class Store {
       this.files = new FileStore(this.root);
     } catch(error) { this.db.close(); throw error; }
   }
-  close() { if(this.db.isOpen) this.db.close(); }
+  close() { this.scriptTestTransient.clear(); if(this.db.isOpen) this.db.close(); }
   recoverBusiness() {
     return configCoordinator(this).withWrite(() => { rmSync(this.files.path("staging"), { force: true, recursive: true }); this.recover();
     });
@@ -165,6 +170,16 @@ export class Store {
     const artifact = this.one("SELECT * FROM artifacts WHERE id=?", value.artifactId!);
     check(artifact, "ARTIFACT_MISSING", "产物记录不存在");
     return this.files.readBlob(String(artifact.relative_path), String(artifact.sha256), Number(artifact.byte_size));
+  }
+  /** Private workflow inputs use keyed receipts and never enter the ordinary SHA-256 protocol. */
+  workflowRunCommand<T>(scope: string, requestId: string, input: unknown, operation: () => T, privateInput = false): T {
+    check(/^(run|draft-run):/.test(scope), "INVALID_SCOPE", "工作流运行 scope 无效");
+    const protectedScope = `private-${scope}`;
+    if (!privateInput && !this.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", protectedScope, requestId)) return this.command(scope, requestId, input, operation);
+    check(typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200, "INVALID_REQUEST_ID", "缺少有效 requestId");
+    const hmac = new CommandHmac(this, this.root, new KeyringStore(resolveKeyringPath(this.root)));
+    const hash = sensitiveRequestDigest(hmac.ensure(), protectedScope, input);
+    return this.receiptedCommand(protectedScope, requestId, hash, operation);
   }
   command<T>(scope: string, requestId: string, input: unknown, operation: () => T): T {
     check(typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200, "INVALID_REQUEST_ID", "缺少有效 requestId");
@@ -307,14 +322,39 @@ export class Store {
       return this.transaction(() => { const script = this.script(scriptId); check(script.status !== "archived", "INVALID_STATE", "脚本已归档"); const now = Date.now(); this.exec("UPDATE scripts SET status='archived',archived_at=?,updated_at=? WHERE id=?", now, now, scriptId); return this.script(scriptId); });
     });
   }
+  private readonly scriptTestTransient = new Map<string, unknown>();
   private readonly scriptTestActivities = new Map<string, () => void>();
+  scriptTestInputPolicy(id: string): { version: 1; sources: HistorySources; transient: boolean } | undefined {
+    const row = this.one<{ input_ref: string }>("SELECT input_ref FROM script_tests WHERE id=?", id);
+    check(row, "NOT_FOUND", "脚本测试不存在");
+    return JSON.parse(row.input_ref).scriptInput;
+  }
+  scriptTestHasTransient(id: string) { return this.scriptTestTransient.has(id); }
+  clearScriptTestTransient(id: string) { this.scriptTestTransient.delete(id); }
+  scriptTestRequirements(definition: ScriptDefinition, sources: ScriptInputSources, fixed?: ReturnType<DictionaryExecution["metadata"]>): DictionaryRequirement[] {
+    const result = new Map(scriptDictionaryRequirements(definition.dictionaryBindings).map(r => [r.dictionaryId, r]));
+    for (const ref of Object.values(sources)) {
+      const kind = fixed ? fixed.find(b => b.dictionaryId === ref.dictionaryId)?.kind : this.one<{ kind: "plain" | "encrypted" }>("SELECT kind FROM dictionaries WHERE id=?", ref.dictionaryId)?.kind;
+      check(kind, "DICTIONARY_NOT_FOUND", "字典不存在", 422);
+      const prior = result.get(ref.dictionaryId);
+      check(!prior || prior.kind === kind, "DICTIONARY_KIND_MISMATCH", "字典类型不符", 422);
+      result.set(ref.dictionaryId, { dictionaryId: ref.dictionaryId, kind, keys: [...new Set([...(prior?.keys ?? []), ref.key])].sort() });
+    }
+    return [...result.values()].sort((a, b) => a.dictionaryId.localeCompare(b.dictionaryId));
+  }
   trackScriptTestActivity(id: string) {
     if (!this.scriptTestActivities.has(id)) this.scriptTestActivities.set(id, configCoordinator(this).beginActivity(`script-test:${id}`));
   }
-  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown, requestId?: string, commandInput?: unknown) {
+  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown, requestId?: string, commandInput?: unknown, inputSources?: unknown) {
     return configCoordinator(this).withActivity("script-test:accept", () => {
-      const scope = `script-test:${scriptId}`, request = commandInput ?? { versionId, draftRevision, input };
-      const replay = () => this.command<{ id: string }>(scope, requestId!, request, () => { throw new Error("unreachable"); });
+      const scope = `script-test-v2:${scriptId}`, request = commandInput ?? { versionId, draftRevision, input, ...(inputSources === undefined ? {} : { inputSources }) };
+      const hmac = new CommandHmac(this, this.root, new KeyringStore(resolveKeyringPath(this.root)));
+      const requestHash = configCoordinator(this).withAdmission(() => sensitiveRequestDigest(hmac.ensure(), scope, request));
+      const replay = () => this.receiptedCommand<{ id: string }>(scope, requestId!, requestHash, () => { throw new Error("unreachable"); });
+      if (requestId && this.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", `script-test:${scriptId}`, requestId)) {
+        const prior = this.command<{ id: string }>(`script-test:${scriptId}`, requestId, request, () => { throw new Error("unreachable"); });
+        return this.scriptTest(prior.id);
+      }
       if (requestId && this.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
         const prior = configCoordinator(this).withAdmission(replay);
         const test = this.scriptTest(prior.id);
@@ -328,22 +368,27 @@ export class Store {
       const version = this.scriptVersion(selected);
       check(version.scriptId === scriptId && (versionId ? version.status === "published" : version.status === "draft" && version.revision === draftRevision), "REVISION_CONFLICT", "脚本版本或草稿修订已变化", 409);
       const snapshot = this.scriptDefinition(scriptId, selected);
-      const preparedInput = this.prepareReference(input), preparedSnapshot = this.prepareReference(snapshot);
-      const dependencies = new DictionaryExecution(this), requirements = scriptDictionaryRequirements(snapshot.dictionaryBindings);
+      const sources = normalizeScriptInputSources(inputSources, snapshot.inputSchema);
+      const captured = captureScriptInput(input, snapshot.inputSchema, sources);
+      const preparedInput = this.prepareReference(captured.input), preparedSnapshot = this.prepareReference(snapshot);
+      const dependencies = new DictionaryExecution(this);
       return configCoordinator(this).withAdmission(() => {
         const create = () => {
           const current = this.scriptVersion(selected), currentScript = this.script(scriptId);
           check(currentScript.status !== "archived", "SCRIPT_ARCHIVED", "脚本已归档");
           check(current.contentHash === version.contentHash && (versionId ? current.status === "published" : currentScript.currentDraftVersionId === selected && current.revision === draftRevision), "REVISION_CONFLICT", "脚本定义在准备期间变化", 409);
+          const requirements = this.scriptTestRequirements(snapshot, sources);
           const admission = dependencies.validate(requirements);
-          const inputRef = json({ ...JSON.parse(this.attachPreparedReference(preparedInput)), scriptSnapshot: this.attachPreparedReference(preparedSnapshot) });
+          const inputRef = json({ ...JSON.parse(this.attachPreparedReference(preparedInput)), scriptSnapshot: this.attachPreparedReference(preparedSnapshot), scriptInput: { version: 1, sources: captured.sources, transient: captured.transient } });
           const id = randomUUID(), now = Date.now();
           this.exec("INSERT INTO script_tests(id,script_id,script_version_id,draft_revision,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, scriptId, versionId, draftRevision, inputRef, now);
           dependencies.save("test", id, admission.bindings);
           dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
           return { id };
         };
-        const result = requestId ? this.command(scope, requestId, request, create) : this.transaction(create);
+        if (requestId !== undefined) check(typeof requestId === "string" && requestId.length > 0 && requestId.length <= 200, "INVALID_REQUEST_ID", "requestId 无效");
+        const result = requestId ? this.receiptedCommand(scope, requestId, requestHash, create) : this.transaction(create);
+        if (captured.transient) this.scriptTestTransient.set(result.id, stripReferencedInput(input, sources));
         const test = this.scriptTest(result.id);
         if (["queued", "running"].includes(test.status)) this.trackScriptTestActivity(test.id);
         return test;
@@ -357,9 +402,14 @@ export class Store {
   }
   scriptTestInput(id: string): unknown {
     const row = this.one("SELECT input_ref FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在");
+    if (this.scriptTestInputPolicy(id)?.transient) {
+      check(this.scriptTestTransient.has(id), "INTERRUPTED", "服务重启，敏感参数需要重新填写");
+      return structuredClone(this.scriptTestTransient.get(id));
+    }
     return this.dereference(row.input_ref);
   }
   scriptTestSensitive(id: string): boolean {
+    if (this.scriptTestInputPolicy(id)?.transient) return true;
     if (this.one("SELECT 1 FROM script_test_dictionary_bindings b JOIN dictionary_versions v ON v.id=b.dictionary_version_id WHERE b.test_id=? AND v.kind='encrypted'", id)) return true;
     try { return Object.values(this.scriptTestSnapshot(id)?.dictionaryBindings ?? {}).some(binding => binding.kind === "encrypted"); }
     catch { return true; } // Broken immutable metadata must not downgrade the disclosure policy.
@@ -367,7 +417,9 @@ export class Store {
   scriptTest(id: string) {
     const row = this.one("SELECT * FROM script_tests WHERE id=?", id); check(row, "NOT_FOUND", "脚本测试不存在");
     const sensitive = this.scriptTestSensitive(id);
+    const policy = this.scriptTestInputPolicy(id);
     return { id: String(row.id), scriptId: String(row.script_id), scriptVersionId: row.script_version_id as string | null, draftRevision: row.draft_revision as number | null, status: String(row.status),
+      reusableInput: policy ? this.dereference(row.input_ref) : sensitive ? null : this.dereference(row.input_ref), inputSources: policy?.sources ?? {}, legacyInput: !policy,
       input: sensitive ? REDACTED : this.dereference(row.input_ref), output: row.output_ref ? sensitive ? REDACTED : this.dereference(row.output_ref) : undefined,
       error: row.error_json ? parsed(row.error_json) : undefined, stdout: row.stdout_ref ? sensitive ? REDACTED : this.dereference(row.stdout_ref) : undefined, stderr: row.stderr_ref ? sensitive ? REDACTED : this.dereference(row.stderr_ref) : undefined,
       inputRedacted: sensitive, outputRedacted: sensitive, logsRedacted: sensitive, dictionaryBindings: new DictionaryExecution(this).metadata("test", id),
@@ -382,7 +434,7 @@ export class Store {
     const detail = result.error === undefined ? undefined : sensitive ? safeExecutionFailure(result.error instanceof AppError ? result.error : new AppError(String((result.error as { code?: string }).code ?? "EXECUTION_FAILED"), ""), true) : result.error;
     this.transaction(() => { const now = Date.now(); this.exec("UPDATE script_tests SET status=?,output_ref=?,error_json=?,stdout_ref=?,stderr_ref=?,exit_code=?,duration_ms=?,ended_at=? WHERE id=? AND status='running'", result.status, output === undefined ? null : this.reference(output), detail === undefined ? null : json(detail), this.reference(stdout), this.reference(stderr), result.exitCode ?? null, result.durationMs ?? null, now, id); });
     const test = this.scriptTest(id);
-    if (!["queued", "running"].includes(test.status)) { this.scriptTestActivities.get(id)?.(); this.scriptTestActivities.delete(id); }
+    if (!["queued", "running"].includes(test.status)) { this.scriptTestTransient.delete(id); this.scriptTestActivities.get(id)?.(); this.scriptTestActivities.delete(id); }
     return test;
   }
   publishScript(scriptId: string, expectedRevision: number) {
@@ -683,7 +735,8 @@ export class Store {
   run(id: string): Run {
     const r = this.one("SELECT * FROM runs WHERE id=?", id); check(r, "NOT_FOUND", "运行不存在");
     const output = this.dereference(r.output_ref), dictionaryBindings = new DictionaryExecution(this).metadata("run", id);
-    return { ...(isRedacted(output) ? { outputRedacted: true } : {}), ...(dictionaryBindings.length ? { dictionaryBindings, logsRedacted: dictionaryBindings.some(b => b.kind === "encrypted") } : {}), id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input: this.dereference(r.input_ref), output, activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
+    const input = this.dereference(r.input_ref), privateInput = isRedacted(input);
+    return { ...(privateInput ? { inputRedacted: true, logsRedacted: true } : {}), ...(isRedacted(output) ? { outputRedacted: true } : {}), ...(dictionaryBindings.length ? { dictionaryBindings, logsRedacted: privateInput || dictionaryBindings.some(b => b.kind === "encrypted") } : {}), id: String(r.id), workflowVersionId: r.workflow_version_id as string | null, draftId: r.draft_id as string | null, draftRevision: r.draft_revision as number | null, snapshotPath: r.snapshot_path as string | null, status: r.status as Run["status"], input, output, activeNodeId: r.active_node_id as string | null, error: parsed(r.error_json), createdAt: Number(r.created_at), startedAt: r.started_at as number | null, endedAt: r.ended_at as number | null };
   }
   runs() { return this.all<{ id: string }>("SELECT id FROM runs ORDER BY created_at DESC LIMIT 200").map(r => this.run(r.id)); }
   runSummaries(filters: { workflowId?: string; draftId?: string; type?: string; status?: string } = {}) {

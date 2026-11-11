@@ -43,6 +43,7 @@ export interface WorkflowNode {
     timeoutMs?: number;
     application?: string;
     environmentId?: string;
+    credentialBindings?: import("../web-bridge/credential-inputs.js").WorkflowCredentialBindings;
     tool?: string;
   };
 }

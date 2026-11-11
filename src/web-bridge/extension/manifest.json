@@ -1,4 +1,5 @@
 {
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvWl0LUu1lBknfpmjsPLxo9F7+xnPlj7ehaDvb6FzXmWDkVEaehhfpY9Lh2PrFONRNOd3/qcZeHmhGIWVVQcinKZGOer2khPh4h5YuEzsUzUXQlX8Frfv+hB0UoEpofAVx0DSNrwTfibGCDR733r4GDSMUjUlXO+XA2aW2QFdZmSrb6GK2e/UNCtO8D8dI0bbrAHu7irv12ypzixzQHO5DcZ/DlsQ2BOd2a7f0KgV/+axmFZaYuBkYKtqH+XaGWmXoJ2Jh8zkAdcRqhpEEd8oVXcivtyRpyXuzOcc3/ATDnaNu23PsukyyuP5igxG9AOA8WdPAsoAyxJYf98Pyo4riwIDAQAB",
   "manifest_version": 3,
   "minimum_chrome_version": "120",
   "name": "Orchard Web Bridge",

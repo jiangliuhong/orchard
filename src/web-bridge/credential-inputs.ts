@@ -1,9 +1,17 @@
+import { dictionaryIdSchema, dictionaryKeySchema } from "../domain/dictionaries.js";
 import { check, AppError } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import type { JsonSchema } from "../domain/types.js";
 import type { CredentialResolver } from "./execution.js";
 
 export type CredentialBinding = { source: "dictionary"; dictionaryId: string; key: string } | { source: "inline"; value: string };
+export type WorkflowCredentialBindings = Record<string, Extract<CredentialBinding, { source: "dictionary" }>>;
+export const WORKFLOW_CREDENTIAL_BINDINGS_SCHEMA: JsonSchema = {
+  type: "object", maxProperties: 20, propertyNames: { pattern: "^[A-Za-z][A-Za-z0-9_]{0,63}$" },
+  additionalProperties: { type: "object", additionalProperties: false, required: ["source", "dictionaryId", "key"], properties: {
+    source: { const: "dictionary" }, dictionaryId: dictionaryIdSchema, key: dictionaryKeySchema,
+  } },
+};
 export type CredentialBindings = Record<string, CredentialBinding>;
 export const CREDENTIAL_BINDINGS_SCHEMA: JsonSchema = {
   type: "object", maxProperties: 20, propertyNames: { pattern: "^[A-Za-z][A-Za-z0-9_]{0,63}$" },

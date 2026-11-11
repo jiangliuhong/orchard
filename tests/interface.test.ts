@@ -4,6 +4,7 @@ import { createElement, useState } from "react";
 import { JSDOM } from "jsdom";
 import { registerHooks } from "node:module";
 import type { AgentModelConfigView, Binding, ConversationView, ProviderView, NodeRun, StreamEvent, Workflow } from "../src/domain/types.js";
+import type { WorkflowChatContext } from "../src/web/agent-chat/adapters/workflow.js";
 import type { AgentChatConfig, ChatSubmission } from "../src/web/agent-chat/types.js";
 import { projectGraph, applyEventStatus, renderableWorkflow } from "../src/web/features/graph.js";
 import { mergeEvents } from "../src/web/lib/api.js";
@@ -671,21 +672,25 @@ test("script three-column workspace keeps Agent visible and preserves run input 
     : String(url).endsWith("/versions/draft-v1") ? version : { items: [], total: 0, activeCount: 0 });
   try {
     render(createElement(ScriptPage, { id: "test" }));
-    const runTab = await screen.findByRole("tab", { name: "运行" });
+    const runTab = await screen.findByRole("tab", { name: "运行参数" });
     assert.equal(runTab.getAttribute("aria-selected"), "true");
     assert.ok(screen.getByRole("complementary", { name: "Agent 对话" }));
     const testInput = screen.getByLabelText("测试输入 JSON");
     fireEvent.change(testInput, { target: { value: '{"message":"保留测试输入"}' } });
     fireEvent.change(screen.getByLabelText("描述脚本需求或修复要求"), { target: { value: "保留这个需求" } });
     fireEvent.keyDown(runTab, { key: "ArrowRight" });
+    const resultsTab = screen.getByRole("tab", { name: "运行结果" });
+    assert.equal(document.activeElement, resultsTab);
+    assert.ok(screen.getByRole("tabpanel", { name: "运行结果" }));
+    fireEvent.keyDown(resultsTab, { key: "ArrowRight" });
     const referencesTab = screen.getByRole("tab", { name: "引用" });
     assert.equal(document.activeElement, referencesTab);
-    assert.equal(screen.getByRole("tabpanel").id, "script-panel-references");
+    assert.equal(screen.getByRole("tabpanel", { name: "引用" }).getAttribute("aria-labelledby"), referencesTab.id);
     assert.ok(screen.getByLabelText("描述脚本需求或修复要求"));
     assert.ok(screen.getByLabelText("新文件路径"));
     assert.equal((screen.getByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "保留这个需求");
     fireEvent.keyDown(referencesTab, { key: "Home" });
-    assert.equal(screen.getByRole("tabpanel").id, "script-panel-run");
+    assert.equal(screen.getByRole("tabpanel", { name: "运行参数" }).getAttribute("aria-labelledby"), runTab.id);
     assert.equal((screen.getByLabelText("测试输入 JSON") as HTMLTextAreaElement).value, '{"message":"保留测试输入"}');
   } finally { globalThis.fetch = originalFetch; }
 });
@@ -2028,6 +2033,58 @@ test("final result copies and downloads the displayed text or JSON without alter
     if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard); else Reflect.deleteProperty(navigator, "clipboard");
     URL.createObjectURL = createURL; URL.revokeObjectURL = revokeURL; dom.window.HTMLAnchorElement.prototype.click = click;
   }
+});
+
+test("workflow conversation mode preserves unsent input, creates single sessions and locks while active", async () => {
+  const { workflowChatConfig } = await import("../src/web/agent-chat/adapters/workflow.js");
+  const originalFetch = globalThis.fetch;
+  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  const posts: { path: string; body: Record<string, unknown> }[] = [];
+  const draft = { id: "mode-draft", createdAt: 0, updatedAt: 0, workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft" as const, publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files: exampleFiles(), turns: [], conversations: [], currentConversation: null, messages: [] };
+  const context = { draft, dirty: false, busy: false, setBusy: () => {}, reload: () => {}, onOpenFile: () => {} };
+  globalThis.fetch = async (url, options) => {
+    if (String(url) === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
+    const body = JSON.parse(String(options?.body)); posts.push({ path: String(url), body });
+    return Response.json({ id: "single-conversation", mode: body.mode });
+  };
+  try {
+    const view = render(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context, resourceKey: draft.id }));
+    const input = screen.getByLabelText("描述工作流需求");
+    fireEvent.change(input, { target: { value: "保留这段未发送需求" } });
+    fireEvent.change(screen.getByLabelText("对话模式"), { target: { value: "single" } });
+    assert.equal((input as HTMLTextAreaElement).value, "保留这段未发送需求");
+    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.equal(posts.length, 2));
+    assert.equal(posts[0]!.body.mode, "single"); assert.equal(posts[1]!.body.mode, "single");
+    const conversation = { id: "single-conversation", mode: "single" as const, connectionState: "ready" as const, status: "current" as const } as ConversationView;
+    view.rerender(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context: { ...context, draft: { ...draft, conversations: [conversation], currentConversation: conversation.id, turns: [{ id: "active", conversationId: conversation.id, status: "running" } as never] } }, resourceKey: draft.id }));
+    assert.equal((screen.getByLabelText("对话模式") as HTMLSelectElement).disabled, true);
+    assert.ok(screen.getByText("已连接"));
+  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+});
+
+test("workflow streams preserve text beyond 4000 characters and ignore replayed events", async () => {
+  const { workflowChatConfig } = await import("../src/web/agent-chat/adapters/workflow.js");
+  const originalFetch = globalThis.fetch, OriginalSource = globalThis.EventSource;
+  let source!: EventSourceStub;
+  class Stream extends EventSourceStub { constructor() { super(); source = this; } }
+  Object.defineProperty(globalThis, "EventSource", { value: Stream, configurable: true });
+  globalThis.fetch = async () => Response.json({ items: [] });
+  const conversation = { id: "stream-conversation", mode: "multi", status: "current", title: "Streaming", connectionState: "ready" } as ConversationView;
+  const draft = { id: "stream-draft", createdAt: 0, updatedAt: 0, workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft" as const, publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files: exampleFiles(), conversations: [conversation], currentConversation: conversation.id, messages: [], turns: [{ id: "stream-turn", conversationId: conversation.id, status: "running" } as never] };
+  try {
+    render(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context: { draft, dirty: false, busy: false, setBusy: () => {}, reload: () => {}, onOpenFile: () => {} }, resourceKey: draft.id }));
+    const text = "BEGIN-" + "中".repeat(5000) + "-END";
+    await act(async () => { for (let replay = 0; replay < 2; replay++) source.onmessage?.({ data: JSON.stringify({ sequence: 1, type: "provider.text", payload: { text } }) } as MessageEvent); });
+    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
+    fireEvent.click(screen.getByRole("button", { name: "Streaming" }));
+    assert.ok(screen.getByText(text));
+    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
+    fireEvent.click(screen.getByRole("button", { name: "Streaming" }));
+    assert.ok(screen.getByText(text));
+    assert.equal(screen.queryByText(text + text), null);
+  } finally { globalThis.fetch = originalFetch; Object.defineProperty(globalThis, "EventSource", { value: OriginalSource, configurable: true }); }
 });
 
 test("conversation panel lists history groups and wires resume, archive, rename and message filtering", async () => {

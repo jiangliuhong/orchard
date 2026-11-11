@@ -27,6 +27,14 @@ export function validateWorkflowDictionaries(store: Store, workflow: Workflow) {
     return store.scriptDefinition(id, versionId);
   };
   validateDictionaryRequirements(store, workflowDictionaryRequirements(workflow, resolve));
+  for (const node of workflow.nodes) if (node.type === "web-bridge") for (const ref of Object.values(node.config.credentialBindings ?? {})) {
+    const row = store.one<{ kind: DictionaryKind; entries_json: string; enabled: number }>("SELECT d.kind,v.entries_json,v.enabled FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=?", ref.dictionaryId);
+    check(row, "DICTIONARY_NOT_FOUND", "凭据字典不存在", 422);
+    check(row.enabled === 1, "DICTIONARY_DISABLED", "凭据字典已禁用", 422);
+    const entry = validateEntries(row.kind, JSON.parse(row.entries_json))[ref.key];
+    check(entry, "DICTIONARY_KEY_MISSING", "凭据字典键不存在", 422);
+    check(entry.type === "string", "INVALID_CREDENTIALS", "凭据字典键必须为字符串", 422);
+  }
   const inspect = (binding: Workflow["result"]) => walkBindings(binding, b => {
     if (b.source !== "dictionary") return;
     const row = store.one<{ entries_json: string }>("SELECT v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=?", b.dictionaryId)!;

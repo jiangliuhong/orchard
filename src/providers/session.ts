@@ -44,6 +44,7 @@ export interface SessionTurnRequest extends TurnRequest {
 }
 
 export interface SessionProvider {
+  getConnectionState?(handle: ProviderSessionHandle): import("../domain/types.js").ConnectionState;
   openSession(setting: ProviderSetting, request: SessionOpenRequest): Promise<ProviderSessionHandle>;
   sendTurn(handle: ProviderSessionHandle, request: SessionTurnRequest): Promise<ProviderResult>;
   interruptTurn(handle: ProviderSessionHandle, hostTurnId: string, signal: AbortSignal): Promise<void>;

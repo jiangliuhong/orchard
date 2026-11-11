@@ -81,6 +81,7 @@ process.stdout.write(JSON.stringify(value));`;
 export class BrowserChannel {
   private sessions = new Map<string, { token: string; extensionId: string }>();
   private pending = new Map<string, { profileId: string; payload: unknown; delivered: boolean; resolve: (value: unknown) => void; reject: (error: unknown) => void }>();
+  status() { return { pending: this.pending.size }; }
   register(profileId: string, extensionId: string) {
     const previous = this.sessions.get(profileId);
     const token = previous?.extensionId === extensionId ? previous.token : randomUUID();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import type { JsonSchema } from "../../domain/types";
 import { assertSchema } from "../../domain/validation";
 import { Input } from "../components/ui/input";
@@ -9,10 +9,13 @@ type FieldSchema = Record<string, unknown> & {
   "x-ui"?: { widget?: "input" | "textarea"; rows?: number; placeholder?: string };
 };
 
-export function BridgeParameterInputs({ schema, value, disabled, onChange, onInvalidChange, onFieldChange }: {
-  schema: JsonSchema; value: string; disabled: boolean;
+export function BridgeParameterInputs({ schema, value, disabled, onChange, onInvalidChange, onFieldChange, legend = "请求参数", emptyLabel = "此工具无需请求参数。", allowGeneric = false, preserveUnknown = false, boundFields, validationSchema, renderBoundField, renderFieldActions }: {
+  schema: JsonSchema; value: string; disabled: boolean; legend?: string; emptyLabel?: string;
   onChange: (value: string) => void; onInvalidChange: (invalid: boolean) => void; onFieldChange?: (name: string) => void;
+  allowGeneric?: boolean; preserveUnknown?: boolean; boundFields?: string[]; validationSchema?: JsonSchema;
+  renderBoundField?: (name: string, id: string) => ReactNode; renderFieldActions?: (name: string) => ReactNode;
 }) {
+  const inputPrefix = useId();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const result = useMemo(() => {
     const fields: [string, FieldSchema][] = [];
@@ -24,11 +27,14 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
       if (schema.oneOf || schema.anyOf || schema.allOf || schema.$ref) throw new Error("测试表单暂不支持根级组合或引用 Schema，请在工具定义中展开参数。");
       const properties = schema.properties as Record<string, unknown> | undefined;
       const existing = JSON.parse(value) as Record<string, unknown>;
+      if (!existing || typeof existing !== "object" || Array.isArray(existing)) throw new Error("表单输入必须是 JSON 对象，请在 JSON 模式修正。");
+      if (preserveUnknown) for (const [key, item] of Object.entries(existing)) if (!Object.hasOwn(properties ?? {}, key)) values[key] = item;
       for (const [name, definition] of Object.entries(properties ?? {})) {
-        if (!definition || typeof definition !== "object" || Array.isArray(definition)) throw new Error(`参数 ${name} 必须声明字段 Schema。`);
-        const field = definition as FieldSchema;
-        if (!["string", "number", "integer", "boolean", "object", "array"].includes(field.type ?? "") || field.$ref) throw new Error(`参数 ${name} 需要明确声明支持的 type。`);
+        if (!allowGeneric && (!definition || typeof definition !== "object" || Array.isArray(definition))) throw new Error(`参数 ${name} 必须声明字段 Schema。`);
+        const field = definition && typeof definition === "object" && !Array.isArray(definition) ? definition as FieldSchema : {};
+        if (!allowGeneric && (!["string", "number", "integer", "boolean", "object", "array"].includes(field.type ?? "") || field.$ref)) throw new Error(`参数 ${name} 需要明确声明支持的 type。`);
         fields.push([name, field]);
+        if (boundFields?.includes(name)) continue;
         if (!Object.hasOwn(edits, name)) {
           if (Object.hasOwn(existing, name)) values[name] = existing[name];
           continue;
@@ -47,15 +53,15 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
         } catch { errors[name] = "请输入有效的值"; }
       }
       for (const [name, field] of fields) {
-        if (Object.hasOwn(values, name)) {
-          try { assertSchema(values[name], field, name); }
+        if (Object.hasOwn(values, name) && !(allowGeneric && field.$ref)) {
+          try { assertSchema(values[name], properties?.[name] as JsonSchema, name); }
           catch { errors[name] = "输入不符合参数 Schema"; }
         }
       }
-      try { assertSchema(values, schema, "参数"); } catch { error = "请填写必填参数，并确保输入符合参数 Schema。"; }
+      try { assertSchema(values, validationSchema ?? schema, "参数"); } catch { error = "请填写必填参数，并确保输入符合参数 Schema。"; }
     } catch (failure) { error = (failure as Error).message; }
     return { fields, values, errors, error, invalid: !!error || Object.keys(errors).length > 0 };
-  }, [schema, value, edits]);
+  }, [schema, value, edits, allowGeneric, preserveUnknown, boundFields, validationSchema]);
   useEffect(() => { onInvalidChange(result.invalid); }, [result.invalid, onInvalidChange]);
   const update = (name: string, text: string) => { onFieldChange?.(name); setEdits(current => ({ ...current, [name]: text })); };
   useEffect(() => {
@@ -64,26 +70,28 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
       if (next !== value) onChange(next);
     }
   }, [result, value, onChange]);
-  return <fieldset className="bridge-parameter-inputs" disabled={disabled}><legend>请求参数</legend>
+  return <fieldset className="bridge-parameter-inputs" disabled={disabled}><legend>{legend}</legend>
     {result.fields.map(([name, field]) => {
       const current = result.values[name];
       const text = Object.hasOwn(edits, name) ? edits[name] : current === undefined ? "" : field.enum ? String(field.enum.findIndex(item => JSON.stringify(item) === JSON.stringify(current))) : field.type === "string" ? String(current) : JSON.stringify(current);
-      const inputId = `bridge-parameter-${name}`;
+      const inputId = `${inputPrefix}-parameter-${name}`;
       const required = typeof schema === "object" && Array.isArray(schema.required) && schema.required.includes(name);
       const props = { id: inputId, value: text, "aria-invalid": !!result.errors[name], "aria-describedby": `${inputId}-hint`, onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => update(name, event.target.value) };
       return <div className="bridge-parameter-row" key={name}>
         <label htmlFor={inputId}>{field.title || name}{required ? " *" : ""}:</label>
         <div className="bridge-parameter-control">
-          {field.enum ? <select {...props}><option value="">请选择</option>{field.enum.map((item, index) => <option key={index} value={index}>{typeof item === "string" ? item : JSON.stringify(item)}</option>)}</select>
+          <div className={renderFieldActions ? "script-parameter-inline" : undefined}>
+          {boundFields?.includes(name) ? renderBoundField?.(name, inputId) : field.enum ? <select {...props}><option value="">请选择</option>{field.enum.map((item, index) => <option key={index} value={index}>{typeof item === "string" ? item : JSON.stringify(item)}</option>)}</select>
             : field.type === "boolean" ? <select {...props}><option value="">请选择</option><option value="true">是</option><option value="false">否</option></select>
-              : field.type === "object" || field.type === "array" ? <Textarea {...props} className="font-mono" rows={5} spellCheck={false} placeholder={field.type === "array" ? "[]" : "{}"} />
+              : field.type === "object" || field.type === "array" || allowGeneric && (!["string", "number", "integer", "boolean"].includes(field.type ?? "") || !!field.$ref) ? <Textarea {...props} className="font-mono" rows={5} spellCheck={false} placeholder={field.type === "array" ? "[]" : field.type === "object" ? "{}" : "JSON 值"} />
                 : field["x-ui"]?.widget === "textarea" ? <Textarea {...props} rows={field["x-ui"].rows ?? 5} placeholder={field["x-ui"].placeholder} />
                   : <Input {...props} type={field.type === "number" || field.type === "integer" ? "number" : "text"} step={field.type === "integer" ? 1 : "any"} placeholder={field["x-ui"]?.placeholder} />}
+          {renderFieldActions?.(name)}</div>
           <div id={`${inputId}-hint`}>{field.description && <p className="field-hint">{field.description}</p>}{result.errors[name] && <p className="field-hint" role="alert">{result.errors[name]}</p>}</div>
         </div>
       </div>;
     })}
     {result.error && <p className="field-hint" role="alert">{result.error}</p>}
-    {!result.fields.length && !result.error && <p className="field-hint">此工具无需请求参数。</p>}
+    {!result.fields.length && !result.error && <p className="field-hint">{emptyLabel}</p>}
   </fieldset>;
 }

@@ -25,9 +25,9 @@ const summaryFromMessage = (text: string) => excerpt(text, 120);
 
 /** 逻辑对话生命周期与历史状态机；不启动后端进程、不包含 backend ref 到公开返回值。 */
 export class ConversationService {
-  constructor(readonly store: Store, readonly providers: ProviderRegistry) {}
+  constructor(readonly store: Store, readonly providers: ProviderRegistry, private readonly connectionState: (id: string) => ConversationView["connectionState"] = () => "absent") {}
 
-  view(id: string, connectionState: ConversationView["connectionState"] = "absent") {
+  view(id: string, connectionState = this.connectionState(id)) {
     const record = this.store.conversation(id);
     check(record, "NOT_FOUND", "会话不存在", 404);
     return this.toView(record, undefined, connectionState);
@@ -178,7 +178,7 @@ export class ConversationService {
   }
 
   /** 派生字段（title 回退、最后用户消息摘要、最后轮次状态、活动轮次）在此补齐，不落库。 */
-  private toView(record: ConversationRecord, activeTurnId?: string | null, connectionState: ConversationView["connectionState"] = "absent"): ConversationView {
+  private toView(record: ConversationRecord, activeTurnId?: string | null, connectionState = this.connectionState(record.id)): ConversationView {
     const firstUser = record.title === null ? this.store.userMessageText(record.id, "first") : null;
     const lastUser = this.store.userMessageText(record.id, "last");
     return {

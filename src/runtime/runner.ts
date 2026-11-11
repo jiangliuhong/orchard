@@ -1,3 +1,6 @@
+import { privateWorkflowHistory } from "./workflow-history.js";
+import type { DictionaryRequirement } from "../domain/dictionaries.js";
+import type { CredentialResolver } from "../web-bridge/execution.js";
 import { gitProjects } from "../project-git/service.js";
 import { AppError } from "../domain/errors.js";
 import type { RunAgentBinding } from "../domain/types.js";
@@ -19,6 +22,30 @@ export class GraphRunner {
   private current?: { id: string; controller: AbortController; job: Promise<void> };
   private closing = false;
   private enabled = false;
+  private readonly privateInputs = new Map<string, unknown>();
+  private privateHistory(workflow: Workflow) {
+    return privateWorkflowHistory(workflow, (id, version) => this.store.scriptDefinition(id, version),
+      (application, tool) => this.webBridge?.tools(application).find(item => item.toolId === tool)?.parameters);
+  }
+  private dictionaryRequirements(workflow: Workflow, runId?: string): DictionaryRequirement[] {
+    const requirements = new Map(workflowDictionaryRequirements(workflow, (id, version) => this.store.scriptDefinition(id, version)).map(r => [r.dictionaryId, r]));
+    const fixed = runId ? new DictionaryExecution(this.store).metadata("run", runId) : undefined;
+    for (const node of workflow.nodes) if (node.type === "web-bridge") for (const ref of Object.values(node.config.credentialBindings ?? {})) {
+      const current = fixed ? undefined : this.store.one<{ kind: "plain" | "encrypted"; entries_json: string }>(
+        "SELECT d.kind,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=?", ref.dictionaryId);
+      const kind = fixed ? fixed.find(b => b.dictionaryId === ref.dictionaryId)?.kind : current?.kind;
+      check(kind, "DICTIONARY_NOT_FOUND", "凭据字典不存在", 422);
+      if (current) {
+        const entry = JSON.parse(current.entries_json)[ref.key];
+        check(entry, "DICTIONARY_KEY_MISSING", "凭据字典键不存在", 422);
+        check(entry.type === "string", "INVALID_CREDENTIALS", "凭据字典键必须为字符串", 422);
+      }
+      const prior = requirements.get(ref.dictionaryId);
+      check(!prior || prior.kind === kind, "DICTIONARY_KIND_MISMATCH", "凭据字典类型不符", 422);
+      requirements.set(ref.dictionaryId, { dictionaryId: ref.dictionaryId, kind, keys: [...new Set([...(prior?.keys ?? []), ref.key])].sort() });
+    }
+    return [...requirements.values()].sort((a, b) => a.dictionaryId.localeCompare(b.dictionaryId));
+  }
   private readonly activities = new Map<string, () => void>();
   private track(id: string) {
     if (!this.activities.has(id)) this.activities.set(id, configCoordinator(this.store).beginActivity(`run:${id}`));
@@ -34,9 +61,9 @@ export class GraphRunner {
   create(versionId: string, input: unknown, requestId: string) {
     return configCoordinator(this.store).withActivity("run:accept", () => {
       const scope = `run:${versionId}`;
-      if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
+      if (this.store.one("SELECT 1 FROM command_receipts WHERE scope IN (?,?) AND request_id=?", scope, `private-${scope}`, requestId)) {
         return configCoordinator(this.store).withAdmission(() => {
-          const prior = this.store.command<{ id: string }>(scope, requestId, input, () => { throw new Error("unreachable"); });
+          const prior = this.store.workflowRunCommand<{ id: string }>(scope, requestId, input, () => { throw new Error("unreachable"); });
           const run = this.store.run(prior.id);
           if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
           this.wake(); return run;
@@ -45,10 +72,11 @@ export class GraphRunner {
       const version = this.store.version(versionId), definition = version.definition;
       assertSchema(input, definition.inputSchema, "工作流输入");
       this.store.assertWorkflowScripts(definition, true);
-      const inputRef = this.store.prepareReference(input), dependencies = new DictionaryExecution(this.store);
-      const requirements = workflowDictionaryRequirements(definition, (id, version) => this.store.scriptDefinition(id, version));
+      const privateInput = this.privateHistory(definition);
+      const inputRef = this.store.prepareReference(privateInput ? REDACTED : input), dependencies = new DictionaryExecution(this.store);
+      const requirements = this.dictionaryRequirements(definition);
       return configCoordinator(this.store).withAdmission(() => {
-        const result = this.store.command(scope, requestId, input, () => {
+        const result = this.store.workflowRunCommand(scope, requestId, input, () => {
           const admission = dependencies.validate(requirements);
           dependencies.validatePointers(definition, admission.bindings, input);
           const bindings = this.providers.modelConfigs.resolveWorkflow(definition);
@@ -61,8 +89,9 @@ export class GraphRunner {
           dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
           this.store.append("run", id, "run.queued", { versionId });
           return { id };
-        });
+        }, privateInput);
         const run = this.store.run(result.id);
+        if (privateInput && run.status === "queued" && !this.privateInputs.has(result.id)) this.privateInputs.set(result.id, structuredClone(input));
         if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
         this.wake(); return run;
       });
@@ -78,9 +107,9 @@ export class GraphRunner {
   async createDraft(draftId: string, revision: number, input: unknown, requestId: string) {
     return configCoordinator(this.store).withActivity("GraphRunner.createDraft", async () => {
       const scope = `draft-run:${draftId}`, command = { revision, input };
-      if (this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", scope, requestId)) {
+      if (this.store.one("SELECT * FROM command_receipts WHERE scope IN (?,?) AND request_id=?", scope, `private-${scope}`, requestId)) {
         return configCoordinator(this.store).withAdmission(() => {
-          const result = this.store.command<{ id: string }>(scope, requestId, command, () => { throw new Error("unreachable"); });
+          const result = this.store.workflowRunCommand<{ id: string }>(scope, requestId, command, () => { throw new Error("unreachable"); });
           const run = this.store.run(result.id);
           if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
           this.wake(); return run;
@@ -93,10 +122,11 @@ export class GraphRunner {
       const files = { ...original, "workflow.json": JSON.stringify(definition, null, 2) };
       readLayout(files);
       const compiled = await compileScripts(files, definition), tree = this.store.files.saveTree(files, compiled);
-      const inputRef = this.store.prepareReference(input), dependencies = new DictionaryExecution(this.store);
-      const requirements = workflowDictionaryRequirements(definition, (id, version) => this.store.scriptDefinition(id, version));
+      const privateInput = this.privateHistory(definition);
+      const inputRef = this.store.prepareReference(privateInput ? REDACTED : input), dependencies = new DictionaryExecution(this.store);
+      const requirements = this.dictionaryRequirements(definition);
       return configCoordinator(this.store).withAdmission(() => {
-      const result = this.store.command(scope, requestId, command, () => {
+      const result = this.store.workflowRunCommand(scope, requestId, command, () => {
         this.editableDraft(draftId, revision);
         this.store.assertWorkflowScripts(definition);
         const admission = dependencies.validate(requirements);
@@ -113,8 +143,9 @@ export class GraphRunner {
         dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
         this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
         return { id };
-      });
+      }, privateInput);
       const run = this.store.run(result.id);
+      if (privateInput && run.status === "queued" && !this.privateInputs.has(result.id)) this.privateInputs.set(result.id, structuredClone(input));
       if (["queued", "running", "cancel_requested"].includes(run.status)) this.track(run.id);
       this.wake(); return run;
       });
@@ -146,7 +177,7 @@ export class GraphRunner {
       return this.store.run(id).status;
     });
     if (status === "cancel_requested" && this.current?.id === id) this.current.controller.abort();
-    if (status === "cancelled" && this.current?.id !== id) { this.release(id); gitProjects(this.store).forget(id); }
+    if (status === "cancelled" && this.current?.id !== id) { this.privateInputs.delete(id); this.release(id); gitProjects(this.store).forget(id); }
     return this.store.run(id);
   }
   wake() {
@@ -164,6 +195,8 @@ export class GraphRunner {
   async close() {
     this.closing = true;
     if (this.current) { this.cancel(this.current.id); await this.current.job; }
+    for (const id of this.privateInputs.keys()) this.cancel(id);
+    this.privateInputs.clear();
   }
   private skipRemaining(id: string, reason: string) { this.store.exec("UPDATE node_runs SET status='skipped',skip_reason=?,ended_at=? WHERE run_id=? AND status='pending'", reason, Date.now(), id); }
   private async execute(id: string, signal: AbortSignal) {
@@ -175,11 +208,15 @@ export class GraphRunner {
       this.store.assertWorkflowScripts(workflow, true);
       check(json(workflow) === json(execution.definition), "ARTIFACT_MISMATCH", "流程定义与运行快照不一致");
       const resolveScript = (scriptId: string, versionId: string) => this.store.scriptDefinition(scriptId, versionId);
+      const privateInput = run.inputRedacted === true || this.privateHistory(workflow);
+      check(!privateInput || this.privateInputs.has(id), "INTERRUPTED", "服务重启，敏感运行参数需要重新填写");
+      const input = privateInput ? this.privateInputs.get(id) : run.input;
       const policy = workflowDictionarySensitivity(workflow, resolveScript);
-      const requirements = workflowDictionaryRequirements(workflow, resolveScript);
+      if (privateInput) { workflow.nodes.forEach(node => policy.nodes.add(node.id)); policy.output = true; }
+      const requirements = this.dictionaryRequirements(workflow, id);
       const declarations = nodeDictionaryBindings(workflow, resolveScript);
       const dictionaries = new DictionaryExecution(this.store).load("run", id, requirements);
-      sensitiveFailure = false;
+      sensitiveFailure = privateInput;
       const bindings = new Map(this.providers.modelConfigs.bindings(id).map(binding => [binding.nodeId, binding]));
       for (const node of workflow.nodes) if (node.type === "agent") check(bindings.has(node.id), "AGENT_BINDING_MISSING", `${node.name} 缺少运行模型绑定`);
       this.store.transaction(() => {
@@ -196,7 +233,7 @@ export class GraphRunner {
         const sensitive = policy.nodes.has(node.id);
         sensitiveFailure = sensitive;
         active = this.store.nodes(id).find(n => n.nodeId === node.id)!; attemptId = randomUUID();
-        const value = resolveBinding(node.input, run.input, outputs, dictionaries.plain);
+        const value = resolveBinding(node.input, input, outputs, dictionaries.plain);
         assertSchema(value, node.inputSchema ?? true, `${node.id} 输入`);
         this.store.transaction(() => {
           check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");
@@ -219,7 +256,11 @@ export class GraphRunner {
           output = route; next = edge.to;
         } else {
           const result = node.type === "web-bridge"
-            ? await this.webBridgeCall(node, value, signal)
+            ? await this.webBridgeCall(node, value, signal, sensitive, (dictionaryId, key) => {
+                const credential = dictionaries.value(dictionaryId, key);
+                check(typeof credential === "string", "CREDENTIAL_UNAVAILABLE", "凭据字典键必须为字符串");
+                return credential;
+              })
             : node.type === "agent"
             ? node.config.project ? await this.projectAgent(id, node, attemptId!, agentBinding!, value, signal, emit) : await this.providers.run(agentBinding!, {
               signal, cwd: this.store.root, prompt: `${node.config.prompt}\nNode input (data):\n${json(value)}`, schema: node.outputSchema, timeoutMs: node.config.timeoutMs,
@@ -246,7 +287,7 @@ export class GraphRunner {
         outputs.set(node.id, output); active = undefined; attemptId = undefined;
       }
       sensitiveFailure = policy.output;
-      const output = resolveBinding(workflow.result, run.input, outputs, dictionaries.plain);
+      const output = resolveBinding(workflow.result, input, outputs, dictionaries.plain);
       assertSchema(output, workflow.outputSchema, "工作流输出");
       signal.throwIfAborted();
       this.store.transaction(() => {
@@ -273,6 +314,7 @@ export class GraphRunner {
         this.store.append("run", id, `run.${status}`, detail);
       });
     } finally {
+      this.privateInputs.delete(id);
       try { gitProjects(this.store).forget(id); } catch { /* Startup recovery retries stale admission cleanup. */ }
     }
   }
@@ -315,9 +357,9 @@ export class GraphRunner {
       throw new AppError(error instanceof AppError ? error.code : "PROJECT_ANALYSIS_FAILED", "项目分析失败，请检查 Provider 状态或输出 Schema");
     } finally { clearTimeout(timer); await prepared?.cleanup(); }
   }
-  private async webBridgeCall(node: WorkflowNode, input: unknown, signal: AbortSignal) {
+  private async webBridgeCall(node: WorkflowNode, input: unknown, signal: AbortSignal, sensitive: boolean, resolveCredential: CredentialResolver) {
     check(this.webBridge, "BROWSER_NOT_CONNECTED", "Web Bridge 未配置");
-    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs, environmentId: node.config.environmentId });
+    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs, environmentId: node.config.environmentId, credentialBindings: node.config.credentialBindings, resolveCredential, omitHistoryArgs: sensitive });
     assertSchema(output, node.outputSchema, `${node.id} Web Bridge 输出`);
     return { output, execution: { application: node.config.application, tool: node.config.tool, resultMode: node.config.resultMode ?? "result" } };
   }

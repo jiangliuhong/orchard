@@ -1,6 +1,6 @@
 # 字典、加密字典与 Git 同步方案
 
-状态：实施中。任务 0–3 及任务 4 的管理服务、HTTP API、字典页面、密钥设置页与 CLI 已实现；引用扫描、运行绑定、敏感执行与 Git v2 尚未完成，功能未完成整体验收。实施与验证记录见 [implementation-notes.md](./implementation-notes.md)。
+状态：已完成编码。管理、真实引用扫描、运行绑定、敏感执行与 Git v2 均已接入；执行及同步闭环由后续[远端同步需求](../2026-11-10-remote-config-sync/implementation.md)交付。实施记录见 [implementation-notes.md](./implementation-notes.md)，人工与跨设备验收边界仍单独保留。
 创建日期：2026-11-09。
 最后更新：2026-11-09。
 

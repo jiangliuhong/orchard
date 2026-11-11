@@ -4,9 +4,8 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { installNativeHost, uninstallNativeHost } from "../web-bridge/install.js";
-import { catalogHash, extensionDirectory } from "../web-bridge/catalog.js";
-import { decodeNativeMessages, encodeNativeMessage } from "../web-bridge/protocol.js";
-import { WebBridgeClient } from "../web-bridge/client.js";
+import { catalogHash, extensionDirectory, extensionId } from "../web-bridge/catalog.js";
+import { runNativeHost } from "../web-bridge/native-host.js";
 import { existsSync, readFileSync } from "node:fs";
 import { configGitHelp, runConfigGitCli } from "../config-git/cli.js";
 import { secretsHelp, runSecretsCli } from "../secrets/cli.js";
@@ -48,7 +47,7 @@ async function main() {
   }, output: body => console.log(JSON.stringify(body, null, args.includes("--pretty") ? 2 : undefined)) });
   if (args[0] !== "web-bridge") return help();
   const command = args[1];
-  if (command === "install") return console.log(JSON.stringify(installNativeHost(dataDir)));
+  if (command === "install") return console.log(JSON.stringify(installNativeHost(dataDir, process.argv[1], { serverUrl, extensionId: value("--extension-id", extensionId) })));
   if (command === "uninstall") return console.log(JSON.stringify({ manifest: uninstallNativeHost(dataDir) }));
   if (command === "chrome-ext") {
     console.log(`Extension directory: ${extensionDirectory()}\nVersion: 0.1.0\nCatalog hash: ${catalogHash}\nLoad it from chrome://extensions with Developer mode enabled.`);
@@ -64,26 +63,10 @@ async function main() {
     if (jsonArg) body = jsonArg; else if (file) body = await (await import("node:fs/promises")).readFile(file, "utf8"); else if (args.includes("--stdin-json")) body = await new Promise<string>(resolve => { let text = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => text += chunk); process.stdin.on("end", () => resolve(text)); });
     return request("/api/web-bridge/calls", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: randomUUID(), application, tool, args: JSON.parse(body), environmentId: value("--environment-id", "") || undefined, approved: args.includes("--approve") }) });
   }
-  if (command === "doctor") return request("/api/web-bridge/status");
+  if (command === "doctor") return request("/api/web-bridge/doctor");
   if (command === "host") {
-    const socketPath = join(dataDir, "runtime", "web-bridge.sock");
-    let buffer = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
-    process.stdin.on("data", async chunk => {
-      buffer = Buffer.concat([buffer, Buffer.from(chunk)]) as Buffer<ArrayBufferLike>;
-      const decoded = decodeNativeMessages(buffer); buffer = decoded.rest;
-      for (const message of decoded.values) {
-        const value = message as { id?: string; tool?: string; args?: unknown; catalogHash?: string };
-        if (!value.id || !value.tool) continue;
-        try {
-          const client = new WebBridgeClient(socketPath, catalogHash);
-          const result = await client.call(value.tool, value.args, { timeoutMs: 18000 });
-          process.stdout.write(encodeNativeMessage({ id: value.id, result }));
-          client.close();
-        } catch (error) {
-          process.stdout.write(encodeNativeMessage({ id: value.id, error: { code: (error as any).code ?? "BROWSER_DISCONNECTED", message: error instanceof Error ? error.message : String(error) } }));
-        }
-      }
-    });
+    const origin = args.find(arg => /^chrome-extension:\/\//.test(arg));
+    await runNativeHost(serverUrl, value("--extension-id", extensionId), origin, process.stdin, data => { process.stdout.write(data); });
     return;
   }
   return help();

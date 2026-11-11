@@ -1,7 +1,10 @@
+import { existsSync } from "node:fs";
+import { extensionDirectory } from "./catalog.js";
+import { nativeHostStatus } from "./install.js";
 import { BridgeExecutionHistory } from "./history.js";
 import { BrowserChannel, preprocessBrowser } from "./browser-execution.js";
 import type { CredentialBindings } from "./credential-inputs.js";
-import { executeHttpTool, type HttpDependencies } from "./execution.js";
+import { executeHttpTool, type HttpDependencies, type CredentialResolver } from "./execution.js";
 import { ConfigWriteCoordinator } from "../config-git/coordinator.js";
 import { AppError, check } from "../domain/errors.js";
 import { catalogHashFor, listTools, validateToolArgs, type WebBridgeApplication, type WebBridgeTool } from "./catalog.js";
@@ -10,7 +13,7 @@ import { WebBridgeConfig } from "./config.js";
 import { postprocessResponse } from "./postprocess.js";
 
 export interface WebBridgeStatus { enabled: boolean; connected: boolean; catalogHash: string; extensionVersion: string | null; pending: number; sites: unknown[] }
-export interface WebBridgeProfile { id: string; name: string; extensionId: string; connected: boolean; lastSeen: number }
+export interface WebBridgeProfile { id: string; name: string; extensionId: string; extensionVersion?: string; connected: boolean; lastSeen: number }
 export class WebBridgeGateway {
   readonly browserChannel = new BrowserChannel();
   history = new BridgeExecutionHistory();
@@ -31,10 +34,20 @@ export class WebBridgeGateway {
     return this.coordinator.withActivity("WebBridgeGateway.status", async () => {
       if (this.closed) throw new AppError("SERVER_NOT_RUNNING", "Web Bridge 已关闭");
       this.client.catalogHash = catalogHashFor(this.tools());
-      const state = await this.client.status();
       signal?.throwIfAborted();
-      return { enabled: true, connected: state.connected, catalogHash: this.client.catalogHash, extensionVersion: null, pending: 0, sites: [] };
+      const profiles = this.profilesList().filter(profile => profile.connected);
+      const sites = (this.config?.applications() ?? []).filter(application => application.enabled).flatMap(application => this.config!.environments(application.id).filter(environment => environment.enabled).map(environment => ({ application: application.id, environmentId: environment.id, origin: environment.origin, profileId: environment.profileId, connected: profiles.some(profile => profile.id === environment.profileId) })));
+      return { enabled: true, connected: profiles.length > 0, catalogHash: this.client.catalogHash, extensionVersion: profiles[0]?.extensionVersion ?? null, pending: this.browserChannel.status().pending, sites };
     });
+  }
+  async doctor() {
+    const status = await this.status();
+    return { ...status, transport: "http", checks: [
+      { id: "node", ok: Number(process.versions.node.split(".")[0]) >= 24, code: "NODE_VERSION", message: `Node.js ${process.versions.node}` },
+      { id: "extension-package", ok: existsSync(extensionDirectory()), code: "EXTENSION_PACKAGE", message: "Chrome 扩展文件" },
+      { id: "browser", ok: status.connected, code: status.connected ? "BROWSER_CONNECTED" : "BROWSER_NOT_CONNECTED", message: status.connected ? "浏览器资料已连接；调用时仍需检查目标页签及登录态" : "请加载扩展并连接本机服务" },
+      { id: "native-host", ...nativeHostStatus(), message: "Native Host 用于发现安装时指定的服务；默认端口也可直接通过 HTTP 连接" },
+    ] };
   }
   applications(): WebBridgeApplication[] { return this.config?.applications() ?? []; }
   tools(application?: string): WebBridgeTool[] { return this.config?.tools(application) ?? listTools(application); }
@@ -45,7 +58,7 @@ export class WebBridgeGateway {
   saveEnvironment(application: string, environment: Parameters<WebBridgeConfig["saveEnvironment"]>[1]) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); return this.config.saveEnvironment(application, environment); }
   deleteEnvironment(application: string, id: string) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); this.config.deleteEnvironment(application, id); }
   setToolEnabled(application: string, toolId: string, enabled: boolean) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); check(this.tools(application).some(tool => tool.toolId === toolId), "UNKNOWN_TOOL", "工具不存在"); this.config.setToolEnabled(application, toolId, enabled); }
-  registerProfile(profile: { id: string; name: string; extensionId: string }) {
+  registerProfile(profile: { id: string; name: string; extensionId: string; extensionVersion?: string }) {
     return this.coordinator.withWrite(() => {
       check(/^[a-zA-Z0-9._-]{1,100}$/.test(profile.id), "INVALID_PROFILE", "浏览器资料 ID 无效");
       check(profile.name.trim().length > 0 && profile.name.length <= 100, "INVALID_PROFILE", "浏览器资料名称不能为空");
@@ -63,9 +76,11 @@ export class WebBridgeGateway {
     });
   }
   profilesList() { return [...this.profiles.values()].map(profile => ({ ...profile, connected: Date.now() - profile.lastSeen < 150000 })).sort((a, b) => b.lastSeen - a.lastSeen); }
-  async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; source?: "call" | "test" } = {}) {
+  async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver; source?: "call" | "test"; omitHistoryArgs?: boolean } = {}) {
     const startedAt = Date.now();
-    const capturedArgs = JSON.parse(JSON.stringify(args ?? null));
+    // Caller privacy policy can only tighten the tool’s own history policy.
+    const omitHistoryArgs = options.omitHistoryArgs === true;
+    const capturedArgs = omitHistoryArgs ? null : JSON.parse(JSON.stringify(args ?? null));
     const capturedTool = structuredClone(this.tools(application).find(item => item.toolId === toolId));
     const capturedBindings = structuredClone(options.credentialBindings);
     const environments = this.config?.environments(application).filter(item => item.enabled) ?? [];
@@ -80,7 +95,7 @@ export class WebBridgeGateway {
       throw error;
     } finally {
       try {
-        this.history.add({ application, toolId, args: capturedArgs, source: options.source ?? "call", startedAt, durationMs: Date.now() - startedAt, status, environmentId, errorCode }, { tool: capturedTool, bindings: capturedBindings });
+        this.history.add({ application, toolId, args: capturedArgs, source: options.source ?? "call", startedAt, durationMs: Date.now() - startedAt, status, environmentId, errorCode }, { tool: capturedTool, bindings: capturedBindings, omitArgs: omitHistoryArgs });
         const currentTool = this.tools(application).find(item => item.toolId === toolId);
         if (currentTool) this.history.restrict(currentTool);
       } catch {
@@ -89,7 +104,7 @@ export class WebBridgeGateway {
       }
     }
   }
-  private async execute(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings }) {
+  private async execute(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver }) {
     return this.coordinator.withActivity("WebBridgeGateway.call", async () => {
       const tool = this.tools(application).find(item => item.toolId === toolId);
       check(tool, "UNKNOWN_TOOL", `未知浏览器工具: ${application}/${toolId}`);
@@ -112,7 +127,13 @@ export class WebBridgeGateway {
           if (tool.execution.transport === "browser") {
             const environment = environments[0];
             check(environment.profileId, "PROFILE_REQUIRED", "浏览器环境需要绑定资料");
-            const { request, secrets } = await preprocessBrowser(tool.execution, args, tool, signal, this.httpDependencies.resolveCredential, options.credentialBindings);
+            const resolveCredential: CredentialResolver = (dictionaryId, key) => {
+              const explicit = Object.values(options.credentialBindings ?? {}).some(binding => binding.source === "dictionary" && binding.dictionaryId === dictionaryId && binding.key === key);
+              const resolve = explicit && options.resolveCredential ? options.resolveCredential : this.httpDependencies.resolveCredential;
+              check(resolve, "CREDENTIAL_UNAVAILABLE", "服务未配置安全凭据解析器");
+              return resolve(dictionaryId, key);
+            };
+            const { request, secrets } = await preprocessBrowser(tool.execution, args, tool, signal, resolveCredential, options.credentialBindings);
             const result = await this.browserChannel.call(environment.profileId, { origin: environment.origin, request, maxBytes: tool.execution.response.maxBytes, timeoutMs: Math.max(1, deadline - Date.now()), deadline }, signal);
             const serialized = JSON.stringify(result);
             check(serialized !== undefined && Buffer.byteLength(serialized) <= tool.execution.response.maxBytes, "RESPONSE_TOO_LARGE", "响应超过限制");

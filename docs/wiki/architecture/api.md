@@ -142,11 +142,19 @@ status 为 available、failed 或 cancelled。checkedAt 是服务端完成检查
 
 结果不入库；客户端在配置修订变化时清除旧结果。`GET /health` 的 activeModelVerifications 返回当前活动验证数。
 
+## 浏览器桥接诊断
+
+`GET /web-bridge/status` 返回 `enabled, connected, catalogHash, extensionVersion, pending, sites`。connected 表示最近 150 秒内存在注册资料；pending 是实际在途 browser 调用数。sites 展示启用环境及绑定资料的连接状态，不代表业务页签或登录态可用。
+
+`GET /web-bridge/doctor` 在状态基础上返回 `transport: "http"` 和 checks，分别报告 Node、扩展文件、浏览器资料与 Native Host 安装。Native Host 只做本机服务发现，业务请求仍经过受认证的 HTTP 轮询通道。安装、端口与升级步骤见[浏览器桥接](../product/web-bridge.md)。
+
 ## 快照和事件
 
 正式运行快照包括 version；草稿测试快照包括 draftId、draftRevision 和 execution（不可变流程定义、布局与产物路径），两者都包括 nodes、attempts 和 lastSequence。初次获取快照后可以从 lastSequence 订阅；SSE 使用 `id: sequence`、`data: JSON`，支持 Last-Event-ID 重连。事件包含 streamType、streamId、sequence、type、可选 nodeId / attemptId、payload 与 createdAt。
 
 HTTP events 一次最多返回 500 条，按最后返回的 sequence 分页，直到达到 lastSequence。客户端按 sequence 去重，不能用数组长度当游标。服务先补读历史再续读新事件；慢连接结束后可以用持久化游标重连，服务不无限缓存日志。
+
+工作流创作的 provider.text 在宿主持久化前按 50 ms 或 4 KiB 合并，保留 UTF-8 字节 offset 与可选 itemId；超大单条增量拆成 inline 事件，非文本事件和终态前刷新。turn.succeeded 包含 summary、validation、conversationId、appliedRevision；失败／取消包含会话身份和安全错误。客户端按活动 turn 保存已收到文本，切换历史不清空该轮内容。
 
 较大输入输出和事件 payload 返回 `{artifact:{id,sha256,byteSize}}`，通过产物端点读取并校验完整内容。产物 ID 不接受任意本地路径。运行列表暂保留最近 200 条展示，历史记录本身不自动删除。
 

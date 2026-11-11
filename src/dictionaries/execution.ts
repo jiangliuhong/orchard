@@ -11,7 +11,7 @@ import { portableContentHash, validateEntries, type DictionaryEntries, type Dict
 export const REDACTED = Object.freeze({ orchardRedacted: true as const });
 export function isRedacted(value: unknown): boolean { return !!value && typeof value === "object" && (value as { orchardRedacted?: unknown }).orchardRedacted === true; }
 const safeMessages: Record<string, string> = {
-  CANCELLED: "执行已取消", TIMEOUT: "执行超过超时时间", OUTPUT_LIMIT: "执行输出超过限制",
+  CANCELLED: "执行已取消", INTERRUPTED: "服务重启，敏感运行参数需要重新填写", TIMEOUT: "执行超过超时时间", OUTPUT_LIMIT: "执行输出超过限制",
   PROCESS_START_FAILED: "无法启动执行进程", PROCESS_FAILED: "执行进程失败", INVALID_SCRIPT_OUTPUT: "脚本输出格式无效",
   SCHEMA_MISMATCH: "敏感执行的数据不符合 Schema", EXECUTION_FAILED: "敏感执行失败，详细信息未保存",
   DICTIONARY_NOT_FOUND: "字典不存在", DICTIONARY_DISABLED: "字典已禁用", DICTIONARY_KIND_MISMATCH: "字典类型不符",
@@ -121,6 +121,7 @@ export class DictionaryExecution {
     };
     return {
       bindings,
+      value: (dictionaryId: string, key: string) => { const binding = bindings.find(b => b.dictionaryId === dictionaryId); check(binding, "DICTIONARY_ACCESS_DENIED", "字典访问被拒绝", 422); return get(dictionaryId, key, binding.kind); },
       plain: (dictionaryId: string, key: string) => get(dictionaryId, key, "plain"),
       context: (declarations: DictionaryBindings | undefined): DictionaryContext => {
         const dictionaries: DictionaryContext["dictionaries"] = Object.create(null), secrets: DictionaryContext["secrets"] = Object.create(null);

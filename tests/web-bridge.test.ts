@@ -15,21 +15,39 @@ import { catalogHash } from "../src/web-bridge/catalog.js";
 
 interface ExtensionProfile { id: string; name: string; extensionId: string }
 interface ExtensionReply { ok: boolean; profile?: ExtensionProfile; servers?: string[]; error?: string }
-function extensionHarness(stored: Record<string, string> = {}, initiallyAvailable = true, alarms: { name: string; periodInMinutes: number }[] = []) {
+function extensionHarness(stored: Record<string, string> = {}, initiallyAvailable = true, alarms: { name: string; periodInMinutes: number }[] = [], discoveryUrl?: string, initialNativeMode?: "hang" | "disconnect") {
   const source = readFileSync(new URL("../src/web-bridge/extension/background.js", import.meta.url), "utf8");
   const extensionId = "abcdefghijklmnopabcdefghijklmnop";
   const requests: { url: string; profile: ExtensionProfile }[] = [];
   const listeners = new Map<string, (event?: { name: string }) => void>();
   const warnings: string[] = [];
+  const timers = new Map<number, () => void>();
+  const native = { connections: 0, disconnects: 0 };
+  let nextTimer = 0, nativeMode = initialNativeMode;
   let available = initiallyAvailable;
   let onMessage: (message: unknown, sender: { id: string }, sendResponse: (result: ExtensionReply) => void) => boolean | undefined;
   const event = (name: string) => ({ addListener: (listener: (event?: { name: string }) => void) => listeners.set(name, listener) });
   runInNewContext(source, {
-    AbortSignal,
+    AbortSignal, URL,
+    setTimeout: (callback: () => void, delay: number) => { assert.equal(delay, 3000); const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearTimeout: (id: number) => { timers.delete(id); },
     crypto: { randomUUID },
     console: { warn: (message: string) => warnings.push(message) },
     chrome: {
       runtime: {
+        connectNative: discoveryUrl || initialNativeMode ? () => {
+          native.connections++;
+          const messages = new Set<(message: unknown) => void>(), disconnects = new Set<() => void>();
+          return {
+            onMessage: { addListener: (listener: (message: unknown) => void) => messages.add(listener), removeListener: (listener: (message: unknown) => void) => messages.delete(listener) },
+            onDisconnect: { addListener: (listener: () => void) => disconnects.add(listener), removeListener: (listener: () => void) => disconnects.delete(listener) },
+            disconnect: () => { native.disconnects++; },
+            postMessage: (message: { id: string }) => {
+              if (nativeMode === "disconnect") queueMicrotask(() => { for (const listener of disconnects) listener(); });
+              else if (nativeMode !== "hang") queueMicrotask(() => { for (const listener of messages) listener({ id: message.id, result: { serverUrl: discoveryUrl } }); });
+            },
+          };
+        } : undefined,
         id: extensionId, onInstalled: event("installed"), onStartup: event("startup"),
         onMessage: { addListener: (listener: typeof onMessage) => { onMessage = listener; } },
       },
@@ -45,15 +63,62 @@ function extensionHarness(stored: Record<string, string> = {}, initiallyAvailabl
     },
     fetch: async (url: string, options: RequestInit) => {
       requests.push({ url, profile: JSON.parse(String(options.body)) });
-      return { ok: available && url.includes(":7443/"), json: async () => ({}) };
+      return { ok: available && (url.includes(":7443/") || !!discoveryUrl && url.startsWith(`${discoveryUrl}/`)), json: async () => ({}) };
     },
   });
   return {
-    requests, listeners, alarms, warnings, stored,
+    requests, listeners, alarms, warnings, stored, native, timers,
+    setNativeMode: (mode: typeof nativeMode) => { nativeMode = mode; },
     setAvailable: (value: boolean) => { available = value; },
     send: (message: unknown) => new Promise<ExtensionReply>(resolve => onMessage(message, { id: extensionId }, resolve)),
   };
 }
+
+test("extension discovers a custom local service through Native Host and rejects remote discovery results", async () => {
+  const extension = extensionHarness({}, true, [], "http://127.0.0.1:7555");
+  await extension.send({ type: "profile:register" });
+  assert.ok(extension.requests.some(request => request.url === "http://127.0.0.1:7555/api/web-bridge/profiles/register"));
+  const untrusted = extensionHarness({}, true, [], "https://evil.test");
+  await untrusted.send({ type: "profile:register" });
+  assert.equal(untrusted.requests.some(request => request.url.includes("evil.test")), false);
+});
+
+test("a stalled Native Host cannot block default HTTP, queued retries, or later discovery recovery", async () => {
+  const extension = extensionHarness({}, true, [], "http://127.0.0.1:7555", "hang");
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick();
+  assert.equal(extension.requests.length, 2);
+  assert.equal(extension.native.connections, 1);
+  assert.equal(extension.timers.size, 1);
+  const retry = extension.send({ type: "profile:register" });
+  for (const timer of [...extension.timers.values()]) timer();
+  await tick();
+  assert.equal(extension.native.disconnects, 1);
+  assert.equal(extension.native.connections, 2);
+  assert.equal(extension.requests.length, 4);
+  for (const timer of [...extension.timers.values()]) timer();
+  const result = await retry;
+  assert.deepEqual(Array.from(result.servers ?? []), ["http://127.0.0.1:7443"]);
+  assert.equal(extension.native.disconnects, 2);
+  assert.equal(extension.timers.size, 0);
+  extension.setNativeMode(undefined);
+  extension.listeners.get("alarm")!({ name: "orchard-profile-registration" });
+  await tick();
+  const recovered = await extension.send({ type: "profile:status" });
+  assert.ok(recovered.servers!.includes("http://127.0.0.1:7555"));
+  assert.equal(extension.native.connections, 3);
+  assert.equal(extension.native.disconnects, 3);
+  assert.equal(extension.timers.size, 0);
+});
+
+test("Native Host disconnect clears its deadline and preserves default HTTP registration", async () => {
+  const extension = extensionHarness({}, true, [], undefined, "disconnect");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(extension.requests.length, 2);
+  assert.equal(extension.timers.size, 0);
+  const status = await extension.send({ type: "profile:status" });
+  assert.deepEqual(Array.from(status.servers ?? []), ["http://127.0.0.1:7443"]);
+});
 
 test("browser extension retries registration and checks both local services", async () => {
   const { requests, listeners, alarms, warnings, setAvailable } = extensionHarness({}, false);

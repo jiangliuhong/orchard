@@ -131,8 +131,8 @@ export class ScriptLibrary {
         this.store.exec("UPDATE scripts SET current_draft_version_id=NULL,current_published_version_id=NULL WHERE id=?", scriptId);
         this.store.exec("DELETE FROM script_versions WHERE script_id=?", scriptId);
         this.store.exec("DELETE FROM scripts WHERE id=?", scriptId);
-        const scopes = ["script-update", "script-copy", "script-restore", "script-publish", "script-test", "script-clean", "script-agent-confirm", "script-agent-apply"].map(scope => `${scope}:${scriptId}`);
-        this.store.exec("DELETE FROM command_receipts WHERE scope IN (?,?,?,?,?,?,?,?) OR json_extract(result_json,'$.script.id')=?", ...scopes, scriptId);
+        const scopes = ["script-update", "script-copy", "script-restore", "script-publish", "script-test", "script-test-v2", "script-clean", "script-agent-confirm", "script-agent-apply"].map(scope => `${scope}:${scriptId}`);
+        this.store.exec("DELETE FROM command_receipts WHERE scope IN (?,?,?,?,?,?,?,?,?) OR json_extract(result_json,'$.script.id')=?", ...scopes, scriptId);
         return { id: scriptId, deleted: true };
       });
       // Source trees and blobs are content-addressed and may be shared by other scripts.

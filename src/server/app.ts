@@ -151,8 +151,8 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   };
   const publicEvent = (event: StreamEvent) => ({ ...event, payload: publicValue(event.payload) });
   const publicScriptTest = (test: ReturnType<Store["scriptTest"]>) => {
-    const input = publicValue(test.input);
-    return { ...test, input, inputArtifactId: input !== test.input ? (input as { artifact?: { id: string } })?.artifact?.id : undefined,
+    const input = publicValue(test.input), reusableInput = publicValue(test.reusableInput);
+    return { ...test, input, reusableInput, reusableInputArtifactId: reusableInput !== test.reusableInput ? (reusableInput as { artifact?: { id: string } })?.artifact?.id : undefined, inputArtifactId: input !== test.input ? (input as { artifact?: { id: string } })?.artifact?.id : undefined,
       output: publicValue(test.output), stdout: publicValue(test.stdout), stderr: publicValue(test.stderr) };
   };
   app.addHook("onRequest", async (request, reply) => {
@@ -242,6 +242,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.get("/api/web-bridge/auth", async () => apiAuth.view());
   app.get("/api/web-bridge/extension", async () => ({ directory: extensionDirectory() }));
   app.get("/api/web-bridge/status", async () => bridge.status());
+  app.get("/api/web-bridge/doctor", async () => bridge.doctor());
   app.get("/api/web-bridge/profiles", async () => ({ items: bridge.profilesList() }));
   app.get<{ Params: { applicationId: string }; Querystring: { conversationId?: string } }>("/api/web-bridge/applications/:applicationId/agent/turns", async request =>
     bridgeAgent.list(request.params.applicationId, request.query.conversationId));
@@ -262,8 +263,8 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.post<{ Params: { applicationId: string; turnId: string } }>("/api/web-bridge/applications/:applicationId/agent/turns/:turnId/cancel", async request =>
     bridgeAgent.cancel(request.params.applicationId, request.params.turnId));
   app.post("/api/web-bridge/profiles/register", async request => {
-    const profile = body<{ id: string; name: string; extensionId: string }>(request.body,
-      { id: { type: "string", minLength: 1, maxLength: 100 }, name: { type: "string", minLength: 1, maxLength: 100 }, extensionId: { type: "string", pattern: "^[a-p]{32}$" } },
+    const profile = body<{ id: string; name: string; extensionId: string; extensionVersion?: string }>(request.body,
+      { id: { type: "string", minLength: 1, maxLength: 100 }, name: { type: "string", minLength: 1, maxLength: 100 }, extensionId: { type: "string", pattern: "^[a-p]{32}$" }, extensionVersion: { type: "string", minLength: 1, maxLength: 50 } },
       ["id", "name", "extensionId"]);
     const origin = request.headers.origin;
     check(!origin?.startsWith("chrome-extension:") || origin === `chrome-extension://${profile.extensionId}`, "INVALID_ORIGIN", "浏览器插件来源与插件 ID 不一致");
@@ -425,9 +426,9 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     return publicScriptTest(scriptTests.cancel(test.id));
   });
   app.post<{ Params: { id: string } }>("/api/scripts/:id/tests", async request => {
-    const input = body<{ scriptVersionId?: string; draftRevision?: number; input: unknown; requestId: string }>(request.body, { scriptVersionId: { type: "string" }, draftRevision: { type: "integer", minimum: 0 }, input: {}, requestId }, ["input", "requestId"]);
+    const input = body<{ scriptVersionId?: string; draftRevision?: number; input: unknown; inputSources?: unknown; requestId: string }>(request.body, { scriptVersionId: { type: "string" }, draftRevision: { type: "integer", minimum: 0 }, input: {}, inputSources: { type: "object" }, requestId }, ["input", "requestId"]);
     check(Boolean(input.scriptVersionId) !== (input.draftRevision !== undefined), "INVALID_REQUEST", "必须指定已发布版本或草稿修订号");
-    const test = store.createScriptTest(request.params.id, input.scriptVersionId ?? null, input.draftRevision ?? null, input.input, input.requestId, input);
+    const test = store.createScriptTest(request.params.id, input.scriptVersionId ?? null, input.draftRevision ?? null, input.input, input.requestId, input, input.inputSources);
     check(store.one("SELECT 1 FROM script_tests WHERE id=?", test.id), "TEST_EXPIRED", "测试记录已清理，请使用新的请求标识", 410);
     scriptTests.enqueue(test.id); return publicScriptTest(test);
   });

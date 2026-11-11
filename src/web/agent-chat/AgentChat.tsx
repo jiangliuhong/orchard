@@ -89,6 +89,7 @@ function AgentChatContent<Context>({ config, context, className, onClose }: {
       <Button variant="ghost" size="sm" disabled={managementLocked} onClick={chat.newConversation}>新对话</Button>
       {onClose && <Button variant="ghost" size="icon" aria-label="关闭 Agent" onClick={onClose}><X size={15} /></Button>}
     </div>
+    {session.mode && <div className="agent-chat-session-toolbar"><label>对话模式<select aria-label="对话模式" value={session.mode.value} disabled={chat.busy || session.mode.disabled} onChange={event => session.mode!.change(event.target.value as "single" | "multi")}><option value="multi">多轮对话</option><option value="single">单次对话</option></select></label>{session.connectionState && <span className="field-hint" role="status">{{ absent: "未连接", starting: "正在连接", ready: "已连接", stopping: "正在停止", broken: "连接中断" }[session.connectionState]}</span>}</div>}
     <ConversationDrawer open={chat.historyOpen} onOpenChange={chat.setHistoryOpen}>
       <ChatHistory key={session.conversationId} session={session} disabled={!!managementLocked} onSelect={chat.selectConversation} perform={chat.perform} onAction={() => chat.setHistoryOpen(false)} />
     </ConversationDrawer>

@@ -1,8 +1,8 @@
-import { DictionaryDeclarationEditor, DictionaryExecutionMetadata, RedactedPayload, isRedacted, type RedactionFlags } from "./DictionaryEditors";
-import { useEffect, useRef, useState } from "react";
+import { DictionaryDeclarationEditor } from "./DictionaryEditors";
+import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
-import type { JsonSchema, ScriptVersion, ScriptView, SourceFiles } from "../../domain/types.js";
-import { api, pretty, requestId, send, useCommandKey, useResource } from "../lib/api";
+import type { ScriptVersion, ScriptView, SourceFiles } from "../../domain/types.js";
+import { api, pretty, send, useCommandKey, useResource } from "../lib/api";
 import { EmptyState, ErrorNotice, Loading, PageHeading, Payload, Status } from "../components/common";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -10,18 +10,16 @@ import { Textarea } from "../components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
 import { SourceTabs } from "./SourceTabs";
 import { DeleteScriptButton } from "./DeleteScriptButton";
-import { ScriptCleanup, ScriptReferences, ScriptVersionCompare } from "./ScriptVersionPanels";
+import { ScriptVersionCompare } from "./ScriptVersionPanels";
 import { ScriptAgentPanel } from "./ScriptAgentPanel";
+import { SchemaEditor } from "./SchemaEditor";
+import { ScriptRunInspector } from "./ScriptRunInspector";
+import { parseEditorSchema, processOutputSchema } from "../lib/schema-editor";
+
 
 export interface ScriptDetail extends ScriptView {
   versions: ScriptVersion[];
   draft: (ScriptVersion & { files: SourceFiles }) | null;
-}
-interface ScriptTest extends RedactionFlags {
-  id: string; status: string; draftRevision: number | null; scriptVersionId: string | null;
-  input: unknown; output?: unknown; stdout?: unknown; stderr?: unknown; error?: { code: string; message: string };
-  inputArtifactId?: string;
-  exitCode: number | null; durationMs: number | null; createdAt: number;
 }
 const emptyFiles = (runtime: string) => runtime === "shell"
   ? { "main.sh": "read -r input\nprintf '%s\\n' \"$input\"\n" }
@@ -110,9 +108,10 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
   const [inputSchema, setInputSchema] = useState(pretty(version.inputSchema)), [outputSchema, setOutputSchema] = useState(pretty(version.outputSchema)), [timeoutMs, setTimeoutMs] = useState(version.timeoutMs);
   const [dirty, setDirty] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(""), [newFile, setNewFile] = useState("");
   const [publishOpen, setPublishOpen] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState("run"), [cleanupRefresh, setCleanupRefresh] = useState(0);
   const [restoreOpen, setRestoreOpen] = useState(false), [resultMode, setResultMode] = useState(version.resultMode ?? (script.runtime === "shell" ? "process" : "json"));
   const [dictionaryBindings, setDictionaryBindings] = useState(version.dictionaryBindings);
+  const [inputInvalid, setInputInvalid] = useState(false), [outputInvalid, setOutputInvalid] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false), [outputGeneration, setOutputGeneration] = useState(0);
   const commandKey = useCommandKey();
   const readOnly = version.status === "published" || script.status === "archived";
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
@@ -129,14 +128,14 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
     const input = {
       id: script.id, name, description, runtime: script.runtime, files, entryFile, timeoutMs, resultMode,
       ...(dictionaryBindings ? { dictionaryBindings } : version.dictionaryBindings ? { dictionaryBindings: {} } : {}),
-      inputSchema: JSON.parse(inputSchema) as JsonSchema, outputSchema: JSON.parse(outputSchema) as JsonSchema,
+      inputSchema: parseEditorSchema(inputSchema), outputSchema: parseEditorSchema(outputSchema),
       expectedRevision: version.revision, expectedDraftVersionId: version.id,
     };
     await api(`/scripts/${script.id}/draft`, { method: "PATCH", body: JSON.stringify({ ...input, requestId: commandKey(input) }) });
     setDirty(false); onSaved();
   };
   return <><div className="script-workspace"><section className="panel script-editor"><div className="section-heading"><h2>v{version.number} · {version.status === "draft" ? `草稿修订 ${version.revision}` : "只读发布版本"}</h2><div className="actions">
-    {!readOnly && <><Button variant="ghost" disabled={busy || !dirty} onClick={onSaved}>放弃修改</Button><Button variant="outline" disabled={busy || !dirty} onClick={() => void action(() => save())}>保存修改</Button><Button disabled={busy || dirty || !version.validation.valid} onClick={() => setPublishOpen(true)}>发布版本</Button></>}
+    {!readOnly && <><Button variant="ghost" disabled={busy || !dirty} onClick={onSaved}>放弃修改</Button><Button variant="outline" disabled={busy || !dirty || inputInvalid || outputInvalid} onClick={() => void action(() => save())}>保存修改</Button><Button disabled={busy || dirty || !version.validation.valid} onClick={() => setPublishOpen(true)}>发布版本</Button></>}
     {version.status === "published" && script.status !== "archived" && <Button disabled={busy} onClick={() => setRestoreOpen(true)}>{script.currentDraftVersionId ? "还原此版本…" : "复制此版本为新草稿"}</Button>}
     </div></div><ErrorNotice message={error} />{!version.validation.valid && <div className="notice warning"><div>源码尚未通过校验，可继续编辑并保存。{version.validation.diagnostics.map((diagnostic, index) => <pre key={index}>{diagnostic}</pre>)}</div></div>}{dirty && <div className="notice">修改尚未保存。保存后才能测试、发布或切换版本；也可以放弃修改。</div>}
     <details className="script-settings"><summary>脚本配置 · 名称、入口、超时与 Schema</summary><fieldset disabled={readOnly || busy} className="script-fields">
@@ -145,9 +144,12 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
       <label>入口文件<select value={entryFile} onChange={event => { setEntryFile(event.target.value); setDirty(true); }}>{Object.keys(files).map(file => <option key={file}>{file}</option>)}</select></label>
       <label>超时（毫秒）<Input type="number" min={1000} max={300000} value={timeoutMs} onChange={event => { setTimeoutMs(Number(event.target.value)); setDirty(true); }} /></label>
       {script.runtime === "shell" && <label>Shell 输出协议<select value={resultMode} onChange={event => { setResultMode(event.target.value as "process" | "json"); setDirty(true); }}><option value="process">进程输出：stdout / stderr / exitCode</option><option value="json">结构化 JSON：$ORCHARD_RESULT_FILE</option></select></label>}
-      <label>输入 Schema<Textarea rows={5} className="font-mono" value={inputSchema} onChange={event => { setInputSchema(event.target.value); setDirty(true); }} /></label>
-      <label>输出 Schema<Textarea rows={5} className="font-mono" value={outputSchema} onChange={event => { setOutputSchema(event.target.value); setDirty(true); }} /></label>
-    </fieldset><ScriptVersionCompare script={script} version={version} /></details>
+    </fieldset><div className="script-schema-fields">
+      <SchemaEditor label="输入参数" value={inputSchema} disabled={readOnly || busy} onChange={value => { setInputSchema(value); setDirty(true); }} onDirty={() => setDirty(true)} onInvalidChange={setInputInvalid} />
+      {script.runtime === "shell" && <p className="field-hint">切换输出协议不会自动修改 Schema，请核对返回定义。{resultMode === "process" ? "process 固定返回 stdout、stderr、exitCode。" : "JSON 模式将业务结果写入 $ORCHARD_RESULT_FILE。"}</p>}
+      {script.runtime === "shell" && resultMode === "process" && <Button type="button" variant="outline" disabled={readOnly || busy} onClick={() => setTemplateOpen(true)}>使用进程输出结构…</Button>}
+      <SchemaEditor key={outputGeneration} label="返回结果" value={outputSchema} disabled={readOnly || busy} onChange={value => { setOutputSchema(value); setDirty(true); }} onDirty={() => setDirty(true)} onInvalidChange={setOutputInvalid} />
+    </div><ScriptVersionCompare script={script} version={version} /></details>
     <DictionaryDeclarationEditor value={dictionaryBindings} disabled={readOnly || busy} onApply={value => { setDictionaryBindings(value); setDirty(true); }} />
     {!readOnly && <div className="script-filters"><Input aria-label="新文件路径" placeholder={script.runtime === "shell" ? "helpers.sh" : "helpers.ts"} value={newFile} onChange={event => setNewFile(event.target.value)} /><Button variant="outline" disabled={busy || !newFile} onClick={() => {
       const pattern = script.runtime === "shell" ? /^(?:[\w-]+\/)*[\w.-]+\.sh$/ : /^(?:[\w-]+\/)*[\w.-]+\.(ts|js|mjs)$/;
@@ -157,79 +159,12 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
     <div className="script-source"><SourceTabs files={files} path={path} onPath={setPath} onChange={readOnly || busy ? undefined : (value, selected) => { setFiles(current => ({ ...current, [selected]: value })); setDirty(true); }} /></div>
     <span className="field-hint">Node.js 默认导出函数接收并返回 JSON。Shell 从 stdin 读取输入；JSON 协议须将合法 JSON 写入 $ORCHARD_RESULT_FILE，stdout 仅作为日志。</span>
     {version.metadataSnapshot === false && <p className="field-hint">旧版本未保存名称和说明快照，此处展示当前脚本元数据；原始源码、Schema 和超时保持原版本。</p>}
-  </section><aside className="panel script-inspector" aria-label="运行与引用"><div className="script-page-tabs" role="tablist" aria-label="运行与引用">{[{ id: "run", label: "运行" }, { id: "references", label: "引用" }].map(item => <button type="button" key={item.id} id={`script-tab-${item.id}`} role="tab" aria-selected={inspectorTab === item.id} aria-controls={`script-panel-${item.id}`} tabIndex={inspectorTab === item.id ? 0 : -1} onClick={() => setInspectorTab(item.id)} onKeyDown={event => {
-    const next = event.key === "Home" ? "run" : event.key === "End" ? "references" : ["ArrowLeft", "ArrowRight"].includes(event.key) ? inspectorTab === "run" ? "references" : "run" : undefined;
-    if (next) { event.preventDefault(); setInspectorTab(next); document.getElementById(`script-tab-${next}`)?.focus(); }
-  }}>{item.label}</button>)}</div><div className="script-run-tab" role="tabpanel" id="script-panel-run" aria-labelledby="script-tab-run" hidden={inspectorTab !== "run"}><ScriptTests script={script} version={version} disabled={dirty || busy || script.status === "archived"} suggestedInput={suggestedInput} externalRefresh={testRefresh + cleanupRefresh} onTestsChanged={onTestsChanged} /></div><div className="script-reference-tab" role="tabpanel" id="script-panel-references" aria-labelledby="script-tab-references" hidden={inspectorTab !== "references"}><ScriptReferences scriptId={script.id} /><ScriptCleanup scriptId={script.id} onCleaned={() => { setCleanupRefresh(value => value + 1); onTestsChanged(); }} /></div></aside>
+  </section><ScriptRunInspector script={script} version={version} disabled={dirty || busy || script.status === "archived"} suggestedInput={suggestedInput} externalRefresh={testRefresh} onTestsChanged={onTestsChanged} />
+    <Dialog open={templateOpen} onOpenChange={setTemplateOpen}><DialogContent><DialogHeader><DialogTitle>替换返回结果 Schema？</DialogTitle><DialogDescription>使用 stdout、stderr、exitCode 的进程输出结构，现有结果定义将被替换。确认后仍需保存。</DialogDescription></DialogHeader><Payload value={processOutputSchema} /><DialogFooter><Button variant="outline" onClick={() => setTemplateOpen(false)}>取消</Button><Button disabled={readOnly || busy} onClick={() => { setOutputSchema(pretty(processOutputSchema)); setOutputGeneration(value => value + 1); setDirty(true); setTemplateOpen(false); }}>替换定义</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent><DialogHeader><DialogTitle>发布脚本 v{version.number}</DialogTitle><DialogDescription>发布草稿修订 {version.revision}，校验源码后创建只读版本。已有工作流继续使用原来绑定的版本；此操作不会运行脚本。</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setPublishOpen(false)}>取消</Button><Button disabled={busy || dirty} onClick={() => void action(async () => { const input = { expectedRevision: version.revision }; await send(`/scripts/${script.id}/publish`, { ...input, requestId: commandKey(input) }); setPublishOpen(false); onSaved(); })}>确认发布</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={restoreOpen} onOpenChange={setRestoreOpen}><DialogContent><DialogHeader><DialogTitle>还原 v{version.number} 到草稿</DialogTitle><DialogDescription>{script.draft ? `将替换当前草稿修订 ${script.draft.revision} 的源码、Schema 和元数据，旧提案将因修订变化失效。` : "将创建新的可编辑草稿，保留原发布版本。"}确认后不会运行或自动发布。</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setRestoreOpen(false)}>取消</Button><Button disabled={busy} onClick={() => void action(async () => {
       const input = { versionId: version.id, expectedRevision: script.draft?.revision ?? 0, expectedDraftVersionId: script.currentDraftVersionId, replaceDraft: !!script.draft };
       await send(`/scripts/${script.id}/restore`, { ...input, requestId: commandKey(input) }); setRestoreOpen(false); onSaved();
     })}>确认还原到草稿</Button></DialogFooter></DialogContent></Dialog>
   </div></>;
-}
-
-function ScriptTests({ script, version, disabled, suggestedInput, externalRefresh, onTestsChanged }: { script: ScriptDetail; version: ScriptVersion; disabled: boolean; suggestedInput?: { value: unknown; key: number }; externalRefresh: number; onTestsChanged: () => void }) {
-  const [input, setInput] = useState("{}"), [tests, setTests] = useState<ScriptTest[]>([]), [error, setError] = useState(""), [busy, setBusy] = useState(false), [refresh, setRefresh] = useState(0);
-  const [selected, setSelected] = useState("");
-  const [offset, setOffset] = useState(0), [total, setTotal] = useState(0);
-  const [submission, setSubmission] = useState(0), commandKey = useCommandKey();
-  useEffect(() => { if (suggestedInput) setInput(pretty(suggestedInput.value)); }, [suggestedInput]);
-  useEffect(() => { setSelected(""); setOffset(0); }, [externalRefresh]);
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const load = async () => {
-      try {
-        const result = await api<{ items: ScriptTest[]; total: number; activeCount: number }>(`/scripts/${script.id}/tests?offset=${offset}&limit=20`, { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        setTests(result.items);
-        setTotal(result.total);
-        if (result.activeCount) timer = setTimeout(() => void load(), 750);
-      } catch (error) { if (!controller.signal.aborted) setError((error as Error).message); }
-    };
-    void load();
-    return () => { controller.abort(); clearTimeout(timer); };
-  }, [script.id, refresh, offset, externalRefresh]);
-  const run = async () => {
-    setBusy(true); setError("");
-    try {
-      const value = { input: JSON.parse(input), ...(version.status === "published" ? { scriptVersionId: version.id } : { draftRevision: version.revision }) };
-      const test = await send<ScriptTest>(`/scripts/${script.id}/tests`, { ...value, requestId: commandKey({ value, submission }) });
-      setSelected(test.id); setOffset(0); setRefresh(value => value + 1); setSubmission(value => value + 1); onTestsChanged();
-    } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
-  };
-  const resultId = selected || tests[0]?.id;
-  return <section className="panel script-test-panel"><h2>运行测试</h2><p className="field-hint">使用已保存的 v{version.number}{version.status === "draft" ? ` 草稿修订 ${version.revision}` : ""}，测试会实际执行脚本。</p>
-    <label htmlFor="script-test-input">测试输入 JSON</label><Textarea id="script-test-input" rows={7} className="font-mono" value={input} onChange={event => setInput(event.target.value)} />
-    <Button disabled={disabled || busy} onClick={() => void run()}>{busy ? "正在提交…" : "运行测试"}</Button><ErrorNotice message={error} />
-    <label htmlFor="script-test-history">测试历史</label><select id="script-test-history" value={resultId ?? ""} onChange={event => setSelected(event.target.value)}>{!tests.length && <option value="">暂无测试</option>}{tests.map(test => <option key={test.id} value={test.id}>{new Date(test.createdAt).toLocaleString("zh-CN")} · {test.status} · {test.scriptVersionId ? `版本 ${test.scriptVersionId.slice(0, 8)}` : `草稿修订 ${test.draftRevision}`}</option>)}</select>
-    <div className="actions"><Button variant="outline" disabled={!offset} onClick={() => { setSelected(""); setOffset(Math.max(0, offset - 20)); }}>上一页</Button><span>{total} 条</span><Button variant="outline" disabled={offset + 20 >= total} onClick={() => { setSelected(""); setOffset(offset + 20); }}>下一页</Button></div>
-    <div className="script-test-results" role="region" aria-label="测试结果" tabIndex={0}>{resultId ? <ScriptTestResult key={resultId} scriptId={script.id} testId={resultId} onInput={value => setInput(pretty(value))} onChange={() => { setRefresh(value => value + 1); onTestsChanged(); }} /> : <div className="empty"><p>运行测试后，在这里查看输出和日志。</p></div>}</div>
-  </section>;
-}
-
-function ScriptTestResult({ scriptId, testId, onInput, onChange }: { scriptId: string; testId: string; onInput: (input: unknown) => void; onChange: () => void }) {
-  const resource = useResource<ScriptTest>(`/scripts/${scriptId}/tests/${testId}`), [error, setError] = useState("");
-  const result = resource.data;
-  const terminalNotified = useRef(false);
-  useEffect(() => {
-    if (!result) return;
-    if (!["queued", "running"].includes(result.status)) {
-      if (!terminalNotified.current) { terminalNotified.current = true; onChange(); }
-      return;
-    }
-    const timer = setTimeout(resource.reload, 750);
-    return () => clearTimeout(timer);
-  }, [result]);
-  if (!result) return <><ErrorNotice message={resource.error} /><Loading /></>;
-  const reuse = async () => {
-    try {
-      onInput(result.inputArtifactId ? await api(`/artifacts/${result.inputArtifactId}`) : result.input);
-    } catch (error) { setError((error as Error).message); }
-  };
-  return <><ErrorNotice message={error || resource.error} /><Status value={result.status} />{["queued", "running"].includes(result.status) && <Button variant="outline" onClick={() => void send(`/scripts/${scriptId}/tests/${testId}/cancel`).then(() => { resource.reload(); onChange(); }).catch(error => setError(error.message))}>取消测试</Button>}
-    <DictionaryExecutionMetadata value={result} /><p className="field-hint">退出码 {result.exitCode ?? "—"} · {result.durationMs ?? "—"} ms · {result.scriptVersionId ? `版本 ${result.scriptVersionId}` : `草稿修订 ${result.draftRevision}`}</p>
-    <ErrorNotice message={result.error && `${result.error.code}: ${result.error.message}`} /><label>输入</label><RedactedPayload redacted={result.inputRedacted} value={result.input} /><Button variant="outline" disabled={result.inputRedacted || isRedacted(result.input)} onClick={() => void reuse()}>复用此输入</Button><label>输出</label><RedactedPayload redacted={result.outputRedacted} value={result.output} /><label>stdout</label>{result.logsRedacted || isRedacted(result.stdout) ? <RedactedPayload redacted value={null} /> : typeof result.stdout === "string" ? <pre className="payload">{result.stdout || "—"}</pre> : <Payload value={result.stdout} />}<label>stderr</label>{result.logsRedacted || isRedacted(result.stderr) ? <RedactedPayload redacted value={null} /> : typeof result.stderr === "string" ? <pre className="payload">{result.stderr || "—"}</pre> : <Payload value={result.stderr} />}
-  </>;
 }

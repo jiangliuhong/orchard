@@ -15,6 +15,7 @@
 | `shell` | `script`，可选 `resultMode` / `timeoutMs` | 默认 `{stdout,stderr,exitCode}`；`json` 模式读取结果文件 |
 | `script` | `scriptId`、`scriptVersionId`，可选 `timeoutMs` | 固定脚本版本的输出；运行时校验该版本 Schema |
 | `switch` | `cases: [{label,value}]`、`defaultLabel` | `{edgeId,value,reason}` |
+| `web-bridge` | `application`、`tool`，可选 `environmentId` / `timeoutMs` / `credentialBindings` | 浏览器桥接工具的业务结果 |
 
 默认 Agent 引用位于 `defaults.agent.agentConfigId`，节点通过 `config.agentConfigId` 整体覆盖，缺省继承工作流默认配置。Agent 节点缺少有效配置来源时校验失败；不接受直接的 `providerId`、`modelId` 字段。发布保留配置 ID，新建运行时统一解析并保存配置修订和明确模型，详见[Agent 模型配置](../product/agent-model-configs.md)。
 
@@ -38,6 +39,10 @@
 还支持 `{source:"array",items:[...]}`。pointer 使用 JSON Pointer：空字符串为整个值，`/a~1b` 读取键 `a/b`，`~0` 表示 `~`。不会执行 JS 表达式或字符串命令替换。引用节点需支配当前节点，最终 result 需在所有终点可用；缺失值不会默认为 null。
 
 Schema 使用严格 JSON Schema 校验。声明 required 字段时同时在 properties 中定义，不支持异步 Schema。实际运行输入输出再次校验。
+
+工作流、节点、固定脚本版本的输入或输出 Schema，以及浏览器工具参数 Schema 中，只要声明 `"x-history": { "record": false }`，整次运行就使用敏感历史模式：原始运行输入仅保存在内存，运行和节点的输入、输出、日志及事件中的数据均隐藏，请求回执使用本机 HMAC。这样可以避免脚本变换、日志或后续节点再次记录敏感参数。取消或完成后清理内存；重启后缺少原始输入的排队任务失败并返回 `INTERRUPTED`，需要使用新的请求 ID 重新运行。该模式不清理此前已保存的历史，也不隐藏写进定义、源码或提示词中的常量。
+
+浏览器节点的 `config.credentialBindings` 将凭据名称映射为 `{ "source": "dictionary", "dictionaryId": "字典 UUID", "key": "字符串键" }`，独立于业务输入。节点配置只接受普通或加密字典引用，不接受手动凭据明文。显式引用在入队时固定字典版本；未配置的项继续使用工具默认凭据。可在节点配置面板选择字典，或清除覆盖以恢复工具默认值。凭据字典参与 Git 快照 v2 的依赖检查。
 
 ## 最终输出
 
@@ -93,6 +98,6 @@ printf 'received: %s\n' "$input"
 
 `script` 节点引用脚本库，不使用工作流内嵌文件路径。`config.scriptVersionId` 必须是指定脚本的已发布版本；超时可以比脚本版本更短，不能放宽版本的时限。库脚本的超时范围为 1 秒至 5 分钟。
 
-脚本发布新版本不会改变工作流的固定引用。归档禁止新引用，但已有发布工作流可继续执行原版本。脚本版本的源码、Schema、名称、说明及 Shell 输出协议保存在带摘要的不可变产物中；旧产物兼容原进程输出协议。
+脚本发布新版本不会改变工作流的固定引用。在编辑器中应用脚本版本时，会保留输入绑定和更短的超时，并同步该版本的输入、输出 Schema，替换旧节点约束。归档禁止新引用，但已有发布工作流可继续执行原版本。脚本版本的源码、Schema、名称、说明及 Shell 输出协议保存在带摘要的不可变产物中；旧产物兼容原进程输出协议。
 
 编辑和发布时检查可判定的输入绑定及 Schema 包含关系，明确不兼容会阻止发布；信息不足和复杂组合会提示无法静态判定，运行时同时校验脚本和节点的输入输出。使用方法见[脚本库说明](../product/script-library.md)。

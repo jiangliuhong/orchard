@@ -58,6 +58,8 @@ export interface ChatSession {
   stopping?: boolean;
   locked?: boolean;
   managementLocked?: boolean;
+  mode?: { value: "single" | "multi"; disabled: boolean; change: (value: "single" | "multi") => void };
+  connectionState?: import("../../domain/types.js").ConnectionState;
   hint?: string;
   historyHint?: string;
   notice?: ReactNode;

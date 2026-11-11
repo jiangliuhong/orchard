@@ -1,4 +1,5 @@
 import Ajv from "ajv";
+import { WORKFLOW_CREDENTIAL_BINDINGS_SCHEMA } from "../web-bridge/credential-inputs.js";
 import { dictionaryBindingsSchema, dictionaryIdSchema, dictionaryKeySchema, normalizeDictionaryBindings } from "./dictionaries.js";
 import { check, AppError } from "./errors.js";
 import type { Binding, JsonSchema, Workflow, WorkflowNode } from "./types.js";
@@ -61,7 +62,7 @@ function validateConfig(node: WorkflowNode) {
       : node.type === "script"
         ? { scriptId: { type: "string", pattern: "^[a-z][a-z0-9-]{0,99}$" }, scriptVersionId: { type: "string", minLength: 1 }, timeoutMs: { type: "integer", minimum: 1000, maximum: 300000 } }
         : node.type === "web-bridge"
-          ? { environmentId: { type: "string", minLength: 1, maxLength: 100 }, application: { type: "string", pattern: "^[a-z][a-z0-9-]{0,49}$" }, tool: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,99}$" }, timeoutMs: timeout, resultMode: { enum: ["result", "envelope"] } }
+          ? { credentialBindings: WORKFLOW_CREDENTIAL_BINDINGS_SCHEMA, environmentId: { type: "string", minLength: 1, maxLength: 100 }, application: { type: "string", pattern: "^[a-z][a-z0-9-]{0,49}$" }, tool: { type: "string", pattern: "^[a-z][a-z0-9_-]{0,99}$" }, timeoutMs: timeout, resultMode: { enum: ["result", "envelope"] } }
           : { script: { type: "string", pattern: "^scripts/" }, dictionaryBindings: dictionaryBindingsSchema, timeoutMs: timeout, ...(node.type === "shell" ? { resultMode: { enum: ["process", "json"] } } : {}) };
   const required = node.type === "agent" ? ["prompt"] : node.type === "switch" ? ["cases", "defaultLabel"] : node.type === "script" ? ["scriptId", "scriptVersionId"] : node.type === "web-bridge" ? ["application", "tool"] : ["script"];
   assertSchema(node.config, { type: "object", required, properties, additionalProperties: false }, `${node.id} 配置`);
