@@ -27,6 +27,8 @@ export interface SessionOpenRequest {
   /** 缺省沿用无工具策略；项目场景仅允许一次性会话。 */
   executionContext?: ExecutionContext;
   sessionDirectory?: string;
+  /** Explicit Provider-owned location supplied by the unified Runtime. */
+  managedStorageRoot?: string;
   /** 会话键（逻辑对话标识）；单次调用使用一次性匿名键。 */
   key: string;
   modelId: string;

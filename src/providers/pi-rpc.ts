@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, realpathSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { lstatSync, mkdirSync, realpathSync, rmdirSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { AppError, check } from "../domain/errors.js";
 import type { ProviderCapabilities, ProviderSetting } from "../domain/types.js";
@@ -10,6 +10,7 @@ import type { BackendRef, NativeAdapter, ProviderEvent, ProviderSessionHandle, S
 import { SessionManager, type SessionSlot } from "./session-manager.js";
 import { PendingRequests } from "./transport/pending.js";
 import { JsonlConnection } from "./transport/jsonl.js";
+import { ManagedSessionStore } from "./managed-session-store.js";
 import type { ProviderResult } from "./registry.js";
 
 /**
@@ -61,6 +62,7 @@ interface PiSession {
   modelId: string;
   cwd: string;
   sessionDirectory?: string;
+  managedStorageRoot?: string;
   sessionDir: string | null;
   generation: number;
   managerKey: string | null;
@@ -113,7 +115,7 @@ export class PiRpcProvider implements SessionProvider {
    * 校验恢复用的 Pi 会话文件：必须位于宿主管理目录内（realpath 层），
    * 拒绝越界 symlink、缺失文件、目录冒充文件与超出大小预算的文件。
    */
-  private validateSessionFile(file: string, managedRoot: string): string {
+  private validateSessionFile(file: string, managedRoot: string, strict = false): string {
     check(typeof file === "string" && file.length > 0 && isAbsolute(file), "PROTOCOL_STATE_INVALID", "Pi 会话文件必须是绝对路径");
     let real: string;
     try {
@@ -123,6 +125,7 @@ export class PiRpcProvider implements SessionProvider {
       throw new AppError("SESSION_REBUILD_REQUIRED", "Pi 会话文件不存在，不能恢复，需要重建上下文", 409);
     }
     const root = realpathSync(managedRoot);
+    check(!strict || (real === file && realpathSync(dirname(file)) === dirname(file)), "PROTOCOL_STATE_INVALID", "Pi 会话路径不能包含符号链接或非规范组件");
     check(real.startsWith(root + "/"), "PROTOCOL_STATE_INVALID", "Pi 会话文件超出宿主管理目录");
     const info = lstatSync(real);
     check(info.isFile() && !info.isSymbolicLink(), "PROTOCOL_STATE_INVALID", "Pi 会话文件不是常规文件");
@@ -154,11 +157,18 @@ export class PiRpcProvider implements SessionProvider {
 
   async openSession(setting: ProviderSetting, request: SessionOpenRequest): Promise<ProviderSessionHandle> {
     check(request.executionContext !== "project" || (!request.persistent && !request.resumeRef), "PROTOCOL_STATE_INVALID", "项目分析仅支持一次性会话");
+    const resume = request.resumeRef?.kind === "pi" ? request.resumeRef : undefined;
+    check(!request.resumeRef || resume, "PROTOCOL_STATE_INVALID", "恢复引用的 Provider 不一致");
+    check(!resume || (request.persistent && resume.cwd === request.cwd),
+      "PROTOCOL_STATE_INVALID", "恢复会话的 Provider 或工作目录与记录不一致");
+    if (request.managedStorageRoot) ManagedSessionStore.open(request.managedStorageRoot, setting.id).assert();
     const managerKey = request.persistent ? request.key : null;
     // 复用既有空闲连接：同一逻辑会话、同代次、同模型、连接健康。
     if (managerKey !== null) {
       const existing = this.sessions.get(managerKey);
       if (existing && !existing.broken && existing.modelId === request.modelId && this.manager.isCurrent(managerKey, existing.generation)) {
+        check(existing.cwd === request.cwd && existing.managedStorageRoot === request.managedStorageRoot && (!resume || (existing.sessionId === resume.sessionId && existing.sessionFile === resume.sessionFile)),
+          "BACKEND_BINDING_CONFLICT", "Pi 空闲连接与请求恢复的会话不一致", 409);
         const slot = await this.manager.acquire(managerKey, request.signal, "pi-reuse");
         if (slot.reused && !existing.broken) {
           slot.finish();
@@ -170,21 +180,27 @@ export class PiRpcProvider implements SessionProvider {
     }
     const slot = await this.manager.acquire(managerKey, request.signal, "pi-open");
     let session: PiSession | undefined;
+    let createdDirectory: { path: string; dev: number; ino: number } | undefined;
     let registered = false;
     try {
       const args = this.baseArgs(request.modelId, request.executionContext === "project");
       let sessionDir: string | null = null, sessionId: string = randomUUID(), resumeFile: string | undefined;
       if (request.persistent) {
-        if (request.resumeRef?.kind === "pi") {
-          check(request.resumeRef.cwd === request.cwd, "PROTOCOL_STATE_INVALID", "恢复会话的工作目录与记录不一致");
+        const storageRoot = request.managedStorageRoot ?? this.piSessionsRoot(request.cwd);
+        if (resume) {
           // 恢复使用已经验证的绝对 --session <file>，不使用“最新会话”或模糊 ID。
-          resumeFile = this.validateSessionFile(request.resumeRef.sessionFile, this.piSessionsRoot(request.cwd));
-          sessionId = request.resumeRef.sessionId;
+          resumeFile = this.validateSessionFile(resume.sessionFile, storageRoot, !!request.managedStorageRoot);
+          sessionId = resume.sessionId;
           args.push("--session", resumeFile);
         } else {
           // 新持久会话：受控 session 存储目录（0700）+ 宿主 UUID；cwd 为专属工作目录。
-          sessionDir = join(this.piSessionsRoot(request.cwd), request.key);
-          mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+          if (request.managedStorageRoot) check(/^[a-zA-Z0-9_-]{1,128}$/.test(request.key), "INVALID_STATE", "原生会话键无效");
+          sessionDir = join(storageRoot, request.key);
+          mkdirSync(sessionDir, { recursive: !request.managedStorageRoot, mode: 0o700 });
+          if (request.managedStorageRoot) {
+            const { dev, ino } = lstatSync(sessionDir);
+            createdDirectory = { path: sessionDir, dev, ino };
+          }
           args.push("--session-dir", sessionDir, "--session-id", sessionId);
         }
       } else {
@@ -192,11 +208,14 @@ export class PiRpcProvider implements SessionProvider {
       }
       session = {
         conn: undefined!, pending: undefined!, sessionId, sessionFile: resumeFile ?? null,
-        modelId: request.modelId, cwd: request.cwd, sessionDirectory: request.sessionDirectory, sessionDir, generation: slot.generation,
+        modelId: request.modelId, cwd: request.cwd, sessionDirectory: request.sessionDirectory, managedStorageRoot: request.managedStorageRoot, sessionDir, generation: slot.generation,
         managerKey, slot, slotFinished: false, broken: undefined, turn: null, needsStateRefresh: true, handle: null,
       };
       this.spawn(setting, session, args);
-      await this.verifyState(session);
+      await this.verifyState(session, resumeFile ? { sessionId, sessionFile: resumeFile } : undefined);
+      if (request.managedStorageRoot) {
+        check(session.sessionId === sessionId && session.sessionFile, "BACKEND_BINDING_CONFLICT", "Pi 未返回准确的新建/恢复会话身份", 409);
+      }
       if (managerKey !== null) {
         slot.register(() => session!.conn.close());
         registered = true;
@@ -207,9 +226,21 @@ export class PiRpcProvider implements SessionProvider {
       this.sessions.set(managerKey ?? request.key, session);
       return handle;
     } catch (error) {
-      if (session?.conn) await session.conn.close().catch(() => {});
+      let stopped = !session?.conn;
+      if (session?.conn) {
+        try { await session.conn.close(); stopped = true; } catch { /* No proven exit: retain all resources. */ }
+      }
       if (managerKey !== null && registered) await this.manager.closeSession(managerKey).catch(() => {});
       if (session) this.sessions.delete(managerKey ?? request.key);
+      if (stopped && createdDirectory) {
+        try {
+          const info = lstatSync(createdDirectory.path);
+          if (info.isDirectory() && !info.isSymbolicLink() && info.dev === createdDirectory.dev && info.ino === createdDirectory.ino) {
+            // Only this attempt's empty directory. Never remove persisted history or adopt leftovers.
+            rmdirSync(createdDirectory.path);
+          }
+        } catch { /* Nonempty, replaced or inaccessible: preserve it and the original failure. */ }
+      }
       slot.finish();
       throw error;
     }
@@ -232,7 +263,7 @@ export class PiRpcProvider implements SessionProvider {
   }
 
   /** 新进程与恢复后的第一件事：get_state 确认模型、sessionId 与 isStreaming=false。 */
-  private async verifyState(session: PiSession): Promise<void> {
+  private async verifyState(session: PiSession, expected?: { sessionId: string; sessionFile: string }): Promise<void> {
     const response = await this.command(session, "get_state", "get_state", this.limits.initializeTimeoutMs);
     const data = (response as { data?: Record<string, unknown> }).data;
     check(data && typeof data === "object", "PROTOCOL_STATE_INVALID", "Pi get_state 未返回状态");
@@ -244,13 +275,35 @@ export class PiRpcProvider implements SessionProvider {
     check(!model || typeof model.id !== "string" || model.id === session.modelId || actualModel === session.modelId,
       "PROTOCOL_STATE_INVALID", `Pi 实际模型与请求不一致: 请求 ${session.modelId}，实际 ${actualModel}`);
     check(data.isStreaming !== true, "PROTOCOL_STATE_INVALID", "Pi 新会话不能处于流式执行状态");
+    if (expected) {
+      check(data.sessionId === expected.sessionId && typeof data.sessionFile === "string",
+        "BACKEND_BINDING_CONFLICT", "Pi 返回了不同的原生会话", 409);
+      check(session.managedStorageRoot ? data.sessionFile === expected.sessionFile : realpathSync(data.sessionFile) === expected.sessionFile,
+        "BACKEND_BINDING_CONFLICT", "Pi 返回了不同的原生会话文件", 409);
+    }
     if (typeof data.sessionId === "string" && data.sessionId) session.sessionId = data.sessionId;
     if (typeof data.sessionFile === "string" && data.sessionFile) {
-      // 受控目录内的实际文件；越界路径不接受。
-      try {
-        const real = realpathSync(data.sessionFile);
-        if (session.sessionDir ? real.startsWith(realpathSync(session.sessionDir) + "/") : true) session.sessionFile = real;
-      } catch { /* 文件可能尚未生成 */ }
+      if (session.managedStorageRoot) {
+        // get_state declares the final path before the first assistant message persists it.
+        // Preserve that identity; never invent <sessionId>.jsonl (Pi uses a timestamp prefix).
+        const file = data.sessionFile;
+        const root = realpathSync(session.managedStorageRoot);
+        check(isAbsolute(file) && resolve(file) === file && file.startsWith(root + "/") && file.endsWith(".jsonl") &&
+          realpathSync(dirname(file)) === dirname(file) && (!session.sessionDir || dirname(file) === session.sessionDir),
+        "BACKEND_BINDING_CONFLICT", "Pi 返回的会话路径不属于准确受管目录", 409);
+        check(!session.sessionFile || session.sessionFile === file, "BACKEND_BINDING_CONFLICT", "Pi 改变了原生会话路径", 409);
+        try {
+          const info = lstatSync(file);
+          check(info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.size <= this.limits.maxSessionFileBytes,
+            "BACKEND_BINDING_CONFLICT", "Pi 会话文件身份或大小无效", 409);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        session.sessionFile = file;
+      } else {
+        try {
+          const real = realpathSync(data.sessionFile);
+          if (session.sessionDir ? real.startsWith(realpathSync(session.sessionDir) + "/") : true) session.sessionFile = real;
+        } catch { /* legacy sessions may not have persisted yet */ }
+      }
     }
   }
 
@@ -410,7 +463,10 @@ export class PiRpcProvider implements SessionProvider {
       }
       const last = turn.lastAssistant;
       // 首轮接受后通过 get_state 补充实际会话文件（Pi 延迟创建 sessionFile）。
-      if (session.needsStateRefresh) {
+      if (session.managedStorageRoot) {
+        await this.verifyState(session, { sessionId: session.sessionId, sessionFile: session.sessionFile! });
+        this.validateSessionFile(session.sessionFile!, session.managedStorageRoot, true);
+      } else if (session.needsStateRefresh) {
         session.needsStateRefresh = false;
         void this.refreshStateQuietly(session);
       }
@@ -440,7 +496,7 @@ export class PiRpcProvider implements SessionProvider {
 
   private async refreshStateQuietly(session: PiSession) {
     try {
-      await this.command(session, "get_state", "get_state-refresh", this.limits.requestAckTimeoutMs);
+      await this.verifyState(session);
       if (session.handle && session.managerKey !== null) session.handle.ref = this.refOf(session);
     } catch { /* 刷新失败不影响已完成的轮次 */ }
   }

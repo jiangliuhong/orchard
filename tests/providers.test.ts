@@ -1,11 +1,65 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { setup, until } from "./helpers.js";
 import { CliProvider, type ProviderEvent } from "../src/providers/registry.js";
 import { codexNativeAdapter } from "../src/providers/codex-app-server.js";
 import { piNativeAdapter } from "../src/providers/pi-rpc.js";
 import { SessionManager } from "../src/providers/session-manager.js";
 import { installFixture } from "./agent-fixtures.js";
+import { ManagedSessionStore } from "../src/providers/managed-session-store.js";
+
+test("native resume cannot reuse a connection bound to a different session", async t => {
+  const { root, store, providers } = setup(t);
+  t.after(() => store.close());
+  const cwd = join(root, "workspaces", "conversation");
+  mkdirSync(cwd, { recursive: true });
+  const manager = new SessionManager();
+  t.after(() => manager.close());
+  for (const id of ["codex-cli", "pi-cli"] as const) {
+    const codex = id === "codex-cli";
+    const { executable } = installFixture(t, codex ? "codex-server.mjs" : "pi-server.mjs", "default");
+    const native = codex ? codexNativeAdapter(manager, manager.limits) : piNativeAdapter(manager, manager.limits);
+    providers.register(new CliProvider(id, { native }), executable);
+    const request = { key: id, cwd, modelId: "fixture/small", persistent: true, signal: AbortSignal.timeout(10_000) };
+    const session = await native.sessionProvider.openSession(providers.setting(id), request);
+    try {
+      assert.ok(session.ref);
+      const wrong = session.ref.kind === "codex"
+        ? { ...session.ref, threadId: "different" }
+        : { ...session.ref, sessionId: "different" };
+      await assert.rejects(native.sessionProvider.openSession(providers.setting(id), { ...request, resumeRef: wrong }),
+        { code: "BACKEND_BINDING_CONFLICT" });
+    } finally { await native.sessionProvider.releaseSession(session); }
+  }
+});
+
+test("native adapters require owned storage and Pi keeps session files outside the shared workspace", async t => {
+  const { root, store, providers } = setup(t);
+  t.after(() => store.close());
+  const manager = new SessionManager();
+  t.after(() => manager.close());
+  for (const id of ["codex-cli", "pi-cli"] as const) {
+    const codex = id === "codex-cli";
+    const { executable } = installFixture(t, codex ? "codex-server.mjs" : "pi-server.mjs", codex ? "default" : "managed-native");
+    const native = codex ? codexNativeAdapter(manager, manager.limits) : piNativeAdapter(manager, manager.limits);
+    providers.register(new CliProvider(id, { native }), executable);
+    const storage = join(realpathSync(root), id);
+    mkdirSync(storage);
+    const request = { key: id, cwd: root, modelId: "fixture/small", persistent: true, managedStorageRoot: storage, signal: AbortSignal.timeout(10_000) };
+    await assert.rejects(native.sessionProvider.openSession(providers.setting(id), request), { code: "ENOENT" });
+    ManagedSessionStore.initialize(storage, id);
+    const session = await native.sessionProvider.openSession(providers.setting(id), request);
+    try {
+      assert.ok(session.ref);
+      if (session.ref.kind === "pi") {
+        assert.equal(existsSync(join(storage, id)), true);
+        assert.ok(session.ref.sessionFile.startsWith(join(storage, id) + "/"));
+      }
+    } finally { await native.sessionProvider.releaseSession(session); }
+  }
+});
 
 test("both CLI adapters default to native and validate final JSON without fallback", async t => {
   const { root, store, providers } = setup(t); t.after(() => store.close());

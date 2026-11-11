@@ -285,6 +285,20 @@ export class ProviderRegistry {
     });
   }
   private async dispatch(setting: ProviderSetting, request: TurnRequest): Promise<ProviderResult> {
+    return this.withSingleSession(setting, request, session =>
+      session.send(request, randomUUID(), async () => {}));
+  }
+
+  /** Shared native single-session path for existing callers and the unified Runtime. */
+  async withSingleSession<T>(
+    setting: ProviderSetting,
+    request: Omit<TurnRequest, "prompt" | "emit">,
+    action: (session: {
+      generation: number;
+      send(request: TurnRequest, turnId: string, accepted: () => Promise<void>): Promise<ProviderResult>;
+      close(): Promise<void>;
+    }) => Promise<T>,
+  ): Promise<T> {
     const adapter = this.adapter(setting.id);
     const sessionProvider = adapter.sessionProvider;
     transportOf(setting.config);
@@ -298,11 +312,18 @@ export class ProviderRegistry {
         key: `single:${randomUUID()}`, modelId: request.modelId, cwd: directory,
         persistent: false, signal: request.signal, executionContext: request.executionContext, sessionDirectory: request.sessionDirectory,
       });
+      let release: Promise<void> | undefined;
+      const close = () => release ??= sessionProvider.releaseSession(handle);
       try {
-        return await sessionProvider.sendTurn(handle, {
-          ...request, cwd: directory, hostTurnId: randomUUID(), onAccepted: async () => {},
+        return await action({
+          generation: handle.generation,
+          send: (turn, hostTurnId, onAccepted) => {
+            check(!release, "INVALID_STATE", "原生会话已关闭", 409);
+            return sessionProvider.sendTurn(handle, { ...turn, cwd: directory, hostTurnId, onAccepted });
+          },
+          close,
         });
-      } finally { await sessionProvider.releaseSession(handle); }
+      } finally { await close(); }
     } finally {
       // 项目快照由项目 lease 生命周期管理，Registry 不删除调用者目录。
       if (!project) rmSync(directory, { recursive: true, force: true });

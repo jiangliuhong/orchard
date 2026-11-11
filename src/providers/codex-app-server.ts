@@ -7,6 +7,7 @@ import type { NativeAdapter, ProviderEvent, ProviderSessionHandle, SessionOpenRe
 import { SessionManager, type SessionSlot } from "./session-manager.js";
 import { PendingRequests } from "./transport/pending.js";
 import { JsonlConnection } from "./transport/jsonl.js";
+import { ManagedSessionStore } from "./managed-session-store.js";
 import type { ProviderResult } from "./registry.js";
 
 /**
@@ -49,7 +50,8 @@ const PROJECT_POLICY_ARGS: string[] = [
   ...DISABLED_FEATURES.filter(feature => feature !== "shell_tool" && feature !== "unified_exec")
     .flatMap(feature => ["-c", `features.${feature}=false`]),
 ];
-const TOOL_POLICY_ARGS: string[] = [
+/** 无模型生命周期控制连接复用同一禁工具策略。 */
+export const TOOL_POLICY_ARGS: readonly string[] = [
   "-c", "mcp_servers={}",
   "-c", "notify=[]",
   "-c", 'web_search="disabled"',
@@ -102,6 +104,7 @@ interface CodexSession {
   modelId: string;
   cwd: string;
   sessionDirectory?: string;
+  managedStorageRoot?: string;
   generation: number;
   /** SessionManager 登记键；null 表示匿名单次进程（容量由 slot 持有至 release）。 */
   managerKey: string | null;
@@ -158,7 +161,10 @@ export class CodexAppServerProvider implements SessionProvider {
       args: ["app-server", ...(session.project ? PROJECT_POLICY_ARGS : TOOL_POLICY_ARGS)],
       cwd: session.cwd,
       processDirectory: session.sessionDirectory,
-      env: session.sessionDirectory ? { TMPDIR: session.sessionDirectory, TMP: session.sessionDirectory, TEMP: session.sessionDirectory } : undefined,
+      env: {
+        ...(session.sessionDirectory ? { TMPDIR: session.sessionDirectory, TMP: session.sessionDirectory, TEMP: session.sessionDirectory } : {}),
+        ...(session.managedStorageRoot ? { CODEX_HOME: session.managedStorageRoot } : {}),
+      },
       limits: this.limits,
       onRecord: record => this.routeRecord(session, record),
       onDiagnostic: text => this.captureDiagnostic(session, text),
@@ -182,11 +188,18 @@ export class CodexAppServerProvider implements SessionProvider {
 
   async openSession(setting: ProviderSetting, request: SessionOpenRequest): Promise<ProviderSessionHandle> {
     check(request.executionContext !== "project" || (!request.persistent && !request.resumeRef), "PROTOCOL_STATE_INVALID", "项目分析仅支持一次性会话");
+    const resume = request.resumeRef?.kind === "codex" ? request.resumeRef : undefined;
+    check(!request.resumeRef || resume, "PROTOCOL_STATE_INVALID", "恢复引用的 Provider 不一致");
+    check(!resume || (request.persistent && resume.cwd === request.cwd),
+      "PROTOCOL_STATE_INVALID", "恢复会话的 Provider 或工作目录与记录不一致");
+    if (request.managedStorageRoot) ManagedSessionStore.open(request.managedStorageRoot, setting.id).assert();
     const managerKey = request.persistent ? request.key : null;
     // 复用既有空闲连接：同一逻辑会话、同代次、同模型、连接健康。
     if (managerKey !== null) {
       const existing = this.sessions.get(managerKey);
       if (existing && !existing.broken && existing.modelId === request.modelId && this.manager.isCurrent(managerKey, existing.generation)) {
+        check(existing.cwd === request.cwd && existing.managedStorageRoot === request.managedStorageRoot && (!resume || existing.threadId === resume.threadId),
+          "BACKEND_BINDING_CONFLICT", "Codex 空闲连接与请求恢复的会话不一致", 409);
         const slot = await this.manager.acquire(managerKey, request.signal, "codex-reuse");
         if (slot.reused && !existing.broken) {
           slot.finish();
@@ -202,18 +215,18 @@ export class CodexAppServerProvider implements SessionProvider {
     try {
       session = {
         conn: undefined!, pending: undefined!, threadId: "", modelId: request.modelId, cwd: request.cwd,
-        project: request.executionContext === "project", sessionDirectory: request.sessionDirectory,
+        project: request.executionContext === "project", sessionDirectory: request.sessionDirectory, managedStorageRoot: request.managedStorageRoot,
         generation: slot.generation, managerKey, slot, slotFinished: false, broken: undefined, turn: null,
       };
       this.spawn(setting, session);
       await this.initialize(session);
       let threadId: string;
-      if (request.resumeRef?.kind === "codex") {
-        check(request.resumeRef.cwd === request.cwd, "PROTOCOL_STATE_INVALID", "恢复会话的工作目录与记录不一致");
+      if (resume) {
         threadId = this.threadIdOf(await this.request(session, "thread/resume", {
-          threadId: request.resumeRef.threadId, model: request.modelId, cwd: request.cwd,
+          threadId: resume.threadId, model: request.modelId, cwd: request.cwd,
           sandbox: "read-only", approvalPolicy: "never", excludeTurns: false,
         }, "thread/resume").catch(error => { throw classifyResumeError(error); }), "thread/resume");
+        check(threadId === resume.threadId, "BACKEND_BINDING_CONFLICT", "Codex 返回了不同的原生会话", 409);
       } else {
         threadId = this.threadIdOf(await this.request(session, "thread/start", {
           model: request.modelId, cwd: request.cwd, ephemeral: !request.persistent,

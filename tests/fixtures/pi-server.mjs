@@ -2,7 +2,8 @@
 // Fake `pi --mode rpc` for contract tests (设计文档 §24).
 // 场景通过 PI_FIXTURE_SCENARIO 选择；收到的每行 stdin 记录到 PI_FIXTURE_LOG（JSONL，
 // 首两行为 pid 与 argv），用于断言启动参数、clear_queue→abort 顺序与多轮同进程。
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const scenario = process.env.PI_FIXTURE_SCENARIO ?? "default";
 const logPath = process.env.PI_FIXTURE_LOG;
@@ -20,6 +21,11 @@ const args = process.argv.slice(2);
 const modelFlag = args[args.indexOf("--model") + 1] ?? "unknown-model";
 let prompts = 0;
 let aborted = false;
+const managed = scenario.startsWith("managed-");
+const resumePath = args.includes("--session") ? args[args.indexOf("--session") + 1] : undefined;
+const nativeId = managed ? (resumePath ? JSON.parse(readFileSync(resumePath, "utf8").split("\n")[0]).id : args[args.indexOf("--session-id") + 1]) : "s-fixture";
+const nativePath = managed ? resumePath ?? join(args[args.indexOf("--session-dir") + 1], `2026-11-11T00-00-00_${nativeId}.jsonl`) : undefined;
+if (resumePath && managed) prompts = readFileSync(resumePath, "utf8").trim().split("\n").length - 1;
 
 function finalAssistant(text) {
   send({ type: "message_update", assistantMessageEvent: { type: "text_start" } });
@@ -33,6 +39,10 @@ function settle(extra = {}) {
 
 function runReply(message) {
   prompts += 1;
+  if (managed) {
+    if (!existsSync(nativePath)) writeFileSync(nativePath, JSON.stringify({ type: "session", version: 3, id: nativeId, cwd: process.cwd() }) + "\n");
+    appendFileSync(nativePath, JSON.stringify({ type: "message", prompt: message }) + "\n");
+  }
   const reply = message.startsWith("RETURN:") ? message.slice(7) : JSON.stringify({ promptCount: prompts, echo: message.slice(0, 60), model: modelFlag });
   switch (scenario) {
     case "slow-settle":
@@ -68,8 +78,8 @@ function runReply(message) {
 function handle(msg) {
   if (msg.type === "get_state") {
     if (scenario === "state-model-mismatch") { send({ id: msg.id, type: "response", command: "get_state", success: true, data: { model: { id: "different/model" }, sessionId: "s-fixture", isStreaming: false } }); return; }
-    const sessionFile = process.env.PI_SESSION_FILE;
-    send({ id: msg.id, type: "response", command: "get_state", success: true, data: { model: scenario === "state-model" ? JSON.parse(process.env.PI_STATE_MODEL) : { id: modelFlag }, sessionId: "s-fixture", isStreaming: false, ...(sessionFile ? { sessionFile } : {}), messageCount: prompts } });
+    const sessionFile = managed ? scenario === "managed-missing-path" ? undefined : scenario === "managed-changed-path" && prompts ? nativePath + ".other.jsonl" : nativePath : resumePath;
+    send({ id: msg.id, type: "response", command: "get_state", success: true, data: { model: scenario === "state-model" ? JSON.parse(process.env.PI_STATE_MODEL) : { id: modelFlag }, sessionId: nativeId, isStreaming: false, ...(sessionFile ? { sessionFile } : {}), messageCount: prompts } });
     return;
   }
   if (msg.type === "prompt") {

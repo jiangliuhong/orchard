@@ -5,6 +5,7 @@ import { StorageUsageService } from "../storage/usage.js";
 import { BridgeExecutionHistory } from "../web-bridge/history.js";
 import { NotificationFeed } from "./notifications.js";
 import { defaultAgentPromptPreviews } from "../authoring/prompt-preview.js";
+import { agentKnowledgeSettings } from "../agent/settings.js";
 import staticPlugin from "@fastify/static";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -239,6 +240,10 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     return { message };
   });
   app.get("/api/settings/agent-prompts", async () => defaultAgentPromptPreviews());
+  app.get("/api/settings/agent-knowledge", async (_request, reply) => {
+    reply.header("Cache-Control", "no-store");
+    return agentKnowledgeSettings();
+  });
   app.get("/api/web-bridge/auth", async () => apiAuth.view());
   app.get("/api/web-bridge/extension", async () => ({ directory: extensionDirectory() }));
   app.get("/api/web-bridge/status", async () => bridge.status());

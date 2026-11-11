@@ -1,0 +1,15 @@
+{
+  "formatVersion": 1,
+  "policyVersion": "platform-read-v1",
+  "transport": "provider-managed",
+  "tools": [
+    "assets.search",
+    "workflows.get",
+    "scripts.get",
+    "assets.read_file",
+    "bridge_tools.get",
+    "assets.references",
+    "current.get",
+    "current.selected_test"
+  ]
+}

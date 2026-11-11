@@ -1,0 +1,21 @@
+{
+  "formatVersion": 1,
+  "status": "approved",
+  "reviewer": "user",
+  "evidence": {
+    "type": "conversation",
+    "message": "批准",
+    "request": "审核 schema-review.md 所列九表结构、索引、触发器及重置边界"
+  },
+  "reviewDocument": "docs/features/2026-11-11-unified-agent-runtime/schema-review.md",
+  "reviewedDocumentSha256": "5e96436f446ec51dfce7aee2cfda7c3cfe74f435db0c662fcda17ec89a60274a",
+  "scope": [
+    "nine unified Agent tables",
+    "specified fields, indexes and constraints",
+    "legacy Agent database reset boundary",
+    "business preservation, backup and rollback requirements"
+  ],
+  "authorization": "Implementation and tests only. Existing user data reset requires separate explicit confirmation.",
+  "activation": "Do not activate v11 migration/global schema before full runtime cutover. This approval does not rewrite historical release approvals.",
+  "reviewSnapshot": "docs/features/2026-11-11-unified-agent-runtime/schema-review-approved.md"
+}
