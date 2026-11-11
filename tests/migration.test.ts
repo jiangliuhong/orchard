@@ -135,11 +135,11 @@ test('v6 release ledgers keep their original migration identities when extending
  const migrations=declarations.filter(value=>value.kind==='database'&&value.from>=2&&value.to<=6);
  const ledger:Ledger={formatVersion:1,baseline:{database:2,webBridge:1,applicationId:1331110449,source:'previous release'},completed:[{jobId:randomUUID(),migrations,source:{database:2,webBridge:1},target:{database:6,webBridge:1}}]};
  writeJson(safe(root,'migrations/ledger.json'),ledger);
- assert.deepEqual(plan(root).steps.map(step=>step.id),['db.v6-v7','db.v7-v8','db.v8-v9']);
+ assert.deepEqual(plan(root).steps.map(step=>step.id),['db.v6-v7','db.v7-v8','db.v8-v9','db.v9-v10']);
  const job=execute(root,accept(root));assert.equal(job.phase,'committed',JSON.stringify(job.error));
  const updated=readJson<Ledger>(safe(root,'migrations/ledger.json'));
  assert.deepEqual(updated.completed[0],ledger.completed[0]);assert.equal(updated.completed.length,2);
- assert.equal(plan(root).steps.length,0);assert.equal(source(root).database,9);
+ assert.equal(plan(root).steps.length,0);assert.equal(source(root).database,currentVersion);
 });
 test('ledger accepts default config initialization between baseline and migration without rewriting history',async t=>{
  const root=fixture(t,8,null);

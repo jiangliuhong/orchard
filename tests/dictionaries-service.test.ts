@@ -422,7 +422,7 @@ test("密钥验证：缺失 keyId、认证失败与安全诊断", (t: TestContex
   const flipped = Buffer.from(tampered.ciphertext, "base64"); flipped[0] = flipped[0]! ^ 0xff;
   const now = Date.now(), hash = "a".repeat(64);
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES('tamper-dict','篡改字典','encrypted','tv1',1,?,?)", now, now);
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('tamper-dict','篡改字典','encrypted','tv1',1,?,?)", now, now);
     store.exec("INSERT INTO dictionary_versions VALUES('tv1','tamper-dict',1,'篡改字典','','encrypted',1,?,?,?)",
       JSON.stringify({ apiToken: { type: "string", encryptedValue: { ...tampered, ciphertext: flipped.toString("base64") } } }), hash, now);
   });
@@ -434,7 +434,7 @@ test("密钥验证：缺失 keyId、认证失败与安全诊断", (t: TestContex
   // 缺失 keyId：密文指向未保留的密钥，与认证失败分开报告。
   const foreign = encryptValue(generateKeyMaterial(), { keyId: "ghost-key", dictionaryId: created.dictionaryId, key: "apiToken" }, "unused");
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES('ghost-dict','缺钥字典','encrypted','gv1',1,?,?)", now, now);
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('ghost-dict','缺钥字典','encrypted','gv1',1,?,?)", now, now);
     store.exec("INSERT INTO dictionary_versions VALUES('gv1','ghost-dict',1,'缺钥字典','','encrypted',1,?,?,?)",
       JSON.stringify({ apiToken: { type: "string", encryptedValue: foreign } }), hash, now);
   });

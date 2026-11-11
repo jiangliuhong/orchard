@@ -76,6 +76,9 @@ test("composed prompts keep rules and reject the 512 KiB budget instead of trimm
   const context = buildAuthoringContext({ kind: "initial", draftId: "d", baseRevision: 0, files: { "workflow.json": "{}" }, providers, previousOutcome: null, userRequest: "hi" });
   const prompt = composeAuthoringPrompt(providers, context);
   for (const rule of AUTHORING_PROMPT_RULES) assert.ok(prompt.includes(rule));
+  const schemaText = prompt.split("Response schema (trusted platform contract):\n")[1]!.split("\nEach create/update")[0]!;
+  assert.deepEqual(JSON.parse(schemaText), AUTHORING_SCHEMA);
+  assert.ok(prompt.includes("complete file text, not a patch"));
   assert.ok(prompt.includes("Authoring context"));
   assert.ok(prompt.includes("hi"));
 

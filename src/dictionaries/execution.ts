@@ -81,7 +81,7 @@ export class DictionaryExecution {
   validate(requirements: readonly DictionaryDeclaration[]): { bindings: FixedDictionary[]; fingerprint: string | null } {
     const keys = this.keys(requirements.some(r => r.kind === "encrypted")), bindings: FixedDictionary[] = [];
     for (const requirement of requirements) {
-      const row = this.store.one<VersionRow>("SELECT v.* FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=?", requirement.dictionaryId);
+      const row = this.store.one<VersionRow>("SELECT v.* FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=? AND d.deleted_at IS NULL", requirement.dictionaryId);
       check(row, "DICTIONARY_NOT_FOUND", "字典不存在", 422);
       check(row.kind === requirement.kind, "DICTIONARY_KIND_MISMATCH", "字典类型与声明不符", 422);
       check(row.enabled === 1, "DICTIONARY_DISABLED", "字典已禁用", 422);

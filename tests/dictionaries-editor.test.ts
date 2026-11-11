@@ -37,6 +37,7 @@ test("desktop workspace filters keys without losing edits and protects unsaved c
   fireEvent.change(await screen.findByLabelText("alpha 的值"), { target: { value: "edited" } });
   assert.equal((screen.getByRole("button", { name: "禁用字典" }) as HTMLButtonElement).disabled, true);
   assert.equal((screen.getByRole("button", { name: "保存字典信息" }) as HTMLButtonElement).disabled, true);
+  assert.equal((screen.getByRole("button", { name: "删除字典 示例配置" }) as HTMLButtonElement).disabled, true);
   const unload = new dom.window.Event("beforeunload", { cancelable: true });
   window.dispatchEvent(unload);
   assert.equal(unload.defaultPrevented, true);
@@ -49,6 +50,21 @@ test("desktop workspace filters keys without losing edits and protects unsaved c
   fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
   assert.equal((screen.getByLabelText("alpha 的值") as HTMLInputElement).value, "a");
   assert.equal((screen.getByRole("button", { name: "禁用字典" }) as HTMLButtonElement).disabled, false);
+});
+
+test("deleted dictionary detail is read-only and exposes permanent deletion", async () => {
+  mock("plain", { alpha: { type: "string", value: "a" } });
+  const fetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const response = await fetch(url, init), body = await response.json();
+    return Response.json(String(url).endsWith("/d1") ? { ...body, deletedAt: 10 } : body);
+  };
+  render(createElement(DictionaryPage, { id: "d1" }));
+  const input = await screen.findByLabelText("alpha 的值");
+  assert.equal(input.matches(":disabled"), true);
+  assert.equal((screen.getByRole("button", { name: "保存字典信息" }) as HTMLButtonElement).disabled, true);
+  assert.equal((screen.getByRole("button", { name: "禁用字典" }) as HTMLButtonElement).disabled, true);
+  assert.ok(screen.getByRole("button", { name: "彻底删除 示例配置" }));
 });
 
 test("inspector tabs support keyboard navigation, empty history and incomplete references", async () => {

@@ -9,7 +9,7 @@ import { validateEntries, type DictionaryKind } from "./model.js";
 /** Static validation never decrypts, and never includes entry values in errors. */
 export function validateDictionaryRequirements(store: Store, requirements: readonly DictionaryDeclaration[]) {
   for (const requirement of requirements) {
-    const row = store.one<{ kind: DictionaryKind; enabled: number; entries_json: string }>("SELECT d.kind,v.enabled,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=?", requirement.dictionaryId);
+    const row = store.one<{ kind: DictionaryKind; enabled: number; entries_json: string }>("SELECT d.kind,v.enabled,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=? AND d.deleted_at IS NULL", requirement.dictionaryId);
     check(row, "DICTIONARY_NOT_FOUND", "依赖的字典不存在或当前修订不可用", 422);
     check(row!.kind === requirement.kind, requirement.kind === "plain" && row!.kind === "encrypted" ? "SECRET_BINDING_FORBIDDEN" : "DICTIONARY_KIND_MISMATCH", "字典类型与声明不一致", 422);
     check(row!.enabled === 1, "DICTIONARY_DISABLED", "依赖的字典已禁用", 422);
@@ -28,7 +28,7 @@ export function validateWorkflowDictionaries(store: Store, workflow: Workflow) {
   };
   validateDictionaryRequirements(store, workflowDictionaryRequirements(workflow, resolve));
   for (const node of workflow.nodes) if (node.type === "web-bridge") for (const ref of Object.values(node.config.credentialBindings ?? {})) {
-    const row = store.one<{ kind: DictionaryKind; entries_json: string; enabled: number }>("SELECT d.kind,v.entries_json,v.enabled FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=?", ref.dictionaryId);
+    const row = store.one<{ kind: DictionaryKind; entries_json: string; enabled: number }>("SELECT d.kind,v.entries_json,v.enabled FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=? AND d.deleted_at IS NULL", ref.dictionaryId);
     check(row, "DICTIONARY_NOT_FOUND", "凭据字典不存在", 422);
     check(row.enabled === 1, "DICTIONARY_DISABLED", "凭据字典已禁用", 422);
     const entry = validateEntries(row.kind, JSON.parse(row.entries_json))[ref.key];
@@ -37,7 +37,7 @@ export function validateWorkflowDictionaries(store: Store, workflow: Workflow) {
   }
   const inspect = (binding: Workflow["result"]) => walkBindings(binding, b => {
     if (b.source !== "dictionary") return;
-    const row = store.one<{ entries_json: string }>("SELECT v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=?", b.dictionaryId)!;
+    const row = store.one<{ entries_json: string }>("SELECT v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=? AND d.deleted_at IS NULL", b.dictionaryId)!;
     const entry = validateEntries("plain", JSON.parse(row.entries_json))[b.key]! as { value: unknown };
     try { pointer(entry.value, b.pointer); }
     catch { check(false, "DICTIONARY_POINTER_INVALID", "字典绑定的 JSON Pointer 不存在或无效", 422); }
@@ -48,7 +48,7 @@ export function validateWorkflowDictionaries(store: Store, workflow: Workflow) {
 
 /** Safe authoring metadata: no values, ciphertext, key IDs, or key material. */
 export function dictionaryDependencyMetadata(store: Store) {
-  return store.all<{ id: string; name: string; kind: DictionaryKind; enabled: number; entries_json: string }>("SELECT d.id,d.name,d.kind,v.enabled,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id ORDER BY d.name,d.id").map(row => {
+  return store.all<{ id: string; name: string; kind: DictionaryKind; enabled: number; entries_json: string }>("SELECT d.id,d.name,d.kind,v.enabled,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.deleted_at IS NULL ORDER BY d.name,d.id").map(row => {
     const entries = validateEntries(row.kind, JSON.parse(row.entries_json));
     return { id: row.id, name: row.name, kind: row.kind, enabled: row.enabled === 1, keys: Object.keys(entries).sort().map(key => ({ key, type: entries[key]!.type, set: true })) };
   });

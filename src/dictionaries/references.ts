@@ -50,6 +50,12 @@ export class DictionaryReferenceScanner {
         binding(node.input, nodeBase.nodeId);
         try {
           if (!object(node.config)) continue;
+          if (node.type === "web-bridge" && object(node.config.credentialBindings)) {
+            for (const ref of Object.values(node.config.credentialBindings)) {
+              if (object(ref) && ref.dictionaryId === dictionaryId && typeof ref.key === "string")
+                items.push({ ...nodeBase, via: "binding", keys: [ref.key] });
+            }
+          }
           if (node.type === "script") {
             check(typeof node.config.scriptId === "string" && typeof node.config.scriptVersionId === "string", "REFERENCE_UNREADABLE", "固定脚本版本缺失");
             const scriptId = node.config.scriptId as string, versionId = node.config.scriptVersionId as string;

@@ -58,6 +58,22 @@ test("handshake order, no-tool policy args, structured output and backend turn i
   }
 });
 
+for (const scenario of ["project-final", "project-final-legacy"]) {
+  test(`authoring ${scenario}: only the final message is parsed, with strict validation preserved`, async t => {
+    const { provider, setting } = nativeSetup(t, scenario);
+    const handle = await provider.openSession(setting, open(`authoring-${scenario}`));
+    const schema = { type: "object", required: ["summary"], properties: { summary: { type: "string" } } };
+    try {
+      const result = await provider.sendTurn(handle, turn('RETURN:{"summary":"请补充已发布资源的元数据"}', { schema }).request);
+      assert.deepEqual(result.output, { summary: "请补充已发布资源的元数据" });
+      const plain = await provider.sendTurn(handle, turn("RETURN:final answer").request);
+      assert.equal(plain.output, "final answer");
+      await assert.rejects(provider.sendTurn(handle, turn('RETURN:说明 {"summary":"invalid"}', { schema }).request), { code: "INVALID_AGENT_OUTPUT" });
+      await assert.rejects(provider.sendTurn(handle, turn('RETURN:{"other":true}', { schema }).request));
+    } finally { await provider.releaseSession(handle); }
+  });
+}
+
 test("notifications arriving before the turn/start response are buffered and attributed", async t => {
   const { provider, setting } = nativeSetup(t, "notify-first");
   const handle = await provider.openSession(setting, open("conv-notify"));

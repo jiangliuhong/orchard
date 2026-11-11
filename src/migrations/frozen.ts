@@ -1,6 +1,6 @@
 // Generated from the locked release manifest and historical declarative fixtures. Do not edit.
 import type { MigrationDeclaration } from './types.js';
-export const currentVersion = 9;
+export const currentVersion = 10;
 export const sql: Record<number,string> = {
   "1": "\n\nCREATE TABLE runs_v2 (\n id TEXT PRIMARY KEY, workflow_version_id TEXT REFERENCES workflow_versions(id),\n status TEXT NOT NULL CHECK(status IN ('queued','running','cancel_requested','succeeded','failed','cancelled','interrupted')),\n input_ref TEXT NOT NULL, output_ref TEXT, active_node_id TEXT, cancel_requested_at INTEGER, error_json TEXT,\n created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n draft_id TEXT REFERENCES drafts(id), draft_revision INTEGER, snapshot_path TEXT,\n CHECK (\n  (workflow_version_id IS NOT NULL AND draft_id IS NULL AND draft_revision IS NULL AND snapshot_path IS NULL)\n  OR (workflow_version_id IS NULL AND draft_id IS NOT NULL AND draft_revision IS NOT NULL AND draft_revision >= 0 AND snapshot_path IS NOT NULL)\n )\n);\n\nINSERT INTO runs_v2(id,workflow_version_id,status,input_ref,output_ref,active_node_id,cancel_requested_at,error_json,created_at,started_at,ended_at)\n SELECT id,workflow_version_id,status,input_ref,output_ref,active_node_id,cancel_requested_at,error_json,created_at,started_at,ended_at FROM runs;\nDROP TABLE runs;\nALTER TABLE runs_v2 RENAME TO runs;\nCREATE INDEX queued_runs ON runs(status,created_at);\nPRAGMA user_version = 2;\n",
   "2": "\nCREATE TABLE agent_conversations (\n id TEXT PRIMARY KEY,\n draft_id TEXT NOT NULL REFERENCES drafts(id),\n mode TEXT NOT NULL CHECK(mode IN ('single','multi')),\n context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native','reconstructed')),\n status TEXT NOT NULL CHECK(status IN ('current','archived','needs_rebuild')),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n model_id TEXT NOT NULL,\n transport TEXT NOT NULL CHECK(transport IN ('legacy','native')),\n connection_fingerprint TEXT NOT NULL,\n cli_version TEXT,\n backend_ref_json TEXT,\n backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),\n synced_revision INTEGER CHECK(synced_revision >= 0),\n rebuild_from_id TEXT REFERENCES agent_conversations(id),\n created_at INTEGER NOT NULL,\n updated_at INTEGER NOT NULL,\n last_used_at INTEGER,\n CHECK (\n  (mode='single' AND context_mode='isolated')\n  OR (mode='multi' AND transport='native' AND context_mode='native')\n  OR (mode='multi' AND transport='legacy' AND context_mode='reconstructed')\n )\n);\nCREATE UNIQUE INDEX one_current_conversation\n ON agent_conversations(draft_id)\n WHERE status IN ('current','needs_rebuild');\nCREATE INDEX conversations_by_draft\n ON agent_conversations(draft_id,created_at,id);\nALTER TABLE authoring_turns ADD COLUMN conversation_id TEXT REFERENCES agent_conversations(id);\nALTER TABLE authoring_turns ADD COLUMN backend_turn_id TEXT;\nALTER TABLE authoring_turns ADD COLUMN connection_generation INTEGER;\nALTER TABLE authoring_turns ADD COLUMN submission_state TEXT NOT NULL DEFAULT 'not_sent'\n CHECK(submission_state IN ('not_sent','sending','accepted','settled'));\nALTER TABLE authoring_turns ADD COLUMN input_ref TEXT;\nALTER TABLE authoring_turns ADD COLUMN result_ref TEXT;\nALTER TABLE authoring_messages ADD COLUMN conversation_id TEXT REFERENCES agent_conversations(id);\nDROP INDEX one_active_turn;\nCREATE UNIQUE INDEX one_active_turn\n ON authoring_turns(draft_id)\n WHERE status IN ('queued','running','cancel_requested');\nCREATE INDEX turns_by_conversation ON authoring_turns(conversation_id,created_at,id);\nCREATE INDEX messages_by_conversation ON authoring_messages(conversation_id,sequence);\nPRAGMA user_version = 3;\n",
@@ -9,9 +9,10 @@ export const sql: Record<number,string> = {
   "5": "\nALTER TABLE script_versions ADD COLUMN timeout_ms INTEGER NOT NULL DEFAULT 300000 CHECK(timeout_ms BETWEEN 1000 AND 300000);\nPRAGMA user_version = 6;\n",
   "6": "\nCREATE TABLE agent_conversations_v7 (\n id TEXT PRIMARY KEY,\n draft_id TEXT NOT NULL REFERENCES drafts(id),\n mode TEXT NOT NULL CHECK(mode IN ('single','multi')),\n context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native')),\n status TEXT NOT NULL CHECK(status IN ('current','idle','archived','needs_rebuild')),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n model_id TEXT NOT NULL,\n transport TEXT NOT NULL CHECK(transport = 'native'),\n connection_fingerprint TEXT NOT NULL,\n cli_version TEXT,\n backend_ref_json TEXT,\n backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),\n synced_revision INTEGER CHECK(synced_revision >= 0),\n rebuild_from_id TEXT REFERENCES agent_conversations_v7(id),\n title TEXT CHECK(title IS NULL OR (length(title) BETWEEN 1 AND 200)),\n archived_at INTEGER,\n created_at INTEGER NOT NULL,\n updated_at INTEGER NOT NULL,\n last_used_at INTEGER,\n CHECK (\n  (mode='single' AND context_mode='isolated')\n  OR (mode='multi' AND context_mode='native')\n ),\n CHECK (status != 'archived' OR archived_at IS NOT NULL)\n);\nINSERT INTO agent_conversations_v7\n SELECT id,draft_id,mode,\n   CASE mode WHEN 'single' THEN 'isolated' ELSE 'native' END,\n   CASE WHEN transport='legacy' AND mode='multi' AND status!='archived'\n     THEN 'needs_rebuild' ELSE status END,\n   provider_id,provider_revision,model_id,'native',\n   CASE WHEN transport='legacy' THEN '' ELSE connection_fingerprint END,\n   cli_version,\n   CASE WHEN transport='legacy' THEN NULL ELSE backend_ref_json END,\n   backend_generation + CASE WHEN transport='legacy' THEN 1 ELSE 0 END,\n   CASE WHEN transport='legacy' THEN NULL ELSE synced_revision END,\n   rebuild_from_id,title,archived_at,created_at,updated_at,last_used_at\n FROM agent_conversations;\nDROP TABLE agent_conversations;\nALTER TABLE agent_conversations_v7 RENAME TO agent_conversations;\nCREATE UNIQUE INDEX one_current_conversation\n ON agent_conversations(draft_id) WHERE status='current';\nCREATE INDEX conversations_by_draft\n ON agent_conversations(draft_id,created_at,id);\nCREATE INDEX conversations_by_activity\n ON agent_conversations(draft_id,updated_at DESC,id);\nUPDATE provider_settings\n SET config_json=json_set(config_json,'$.transport','native'),\n     revision=revision+1\n WHERE id IN ('codex-cli','pi-cli')\n   AND (json_extract(config_json,'$.transport') IS NULL\n     OR json_extract(config_json,'$.transport')!='native');\nPRAGMA user_version = 7;\n",
   "7": "\nCREATE TABLE agent_model_configs (\n id TEXT PRIMARY KEY,\n name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision > 0),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE INDEX agent_model_configs_by_provider ON agent_model_configs(provider_id);\nCREATE TABLE agent_model_config_revisions (\n config_id TEXT NOT NULL REFERENCES agent_model_configs(id),\n revision INTEGER NOT NULL CHECK(revision > 0),\n name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(config_id,revision)\n);\nCREATE TABLE run_agent_bindings (\n run_id TEXT NOT NULL, node_id TEXT NOT NULL,\n config_id TEXT NOT NULL, config_revision INTEGER NOT NULL CHECK(config_revision > 0),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(run_id,node_id),\n FOREIGN KEY(run_id,node_id) REFERENCES node_runs(run_id,node_id) ON DELETE CASCADE,\n FOREIGN KEY(config_id,config_revision) REFERENCES agent_model_config_revisions(config_id,revision)\n);\nCREATE INDEX run_agent_bindings_by_config ON run_agent_bindings(config_id,config_revision);\n PRAGMA user_version = 8;",
-  "8": "\nCREATE TABLE dictionaries (\n  id TEXT NOT NULL PRIMARY KEY,\n  name TEXT NOT NULL COLLATE NOCASE UNIQUE\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  current_version_id TEXT NOT NULL,\n  revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision > 0),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  UNIQUE(id, kind),\n  FOREIGN KEY(id, current_version_id, name, kind)\n    REFERENCES dictionary_versions(dictionary_id, id, name, kind)\n    DEFERRABLE INITIALLY DEFERRED\n);\nCREATE TABLE dictionary_versions (\n  id TEXT NOT NULL PRIMARY KEY,\n  dictionary_id TEXT NOT NULL,\n  version_no INTEGER NOT NULL CHECK(typeof(version_no) = 'integer' AND version_no > 0),\n  name TEXT NOT NULL\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  description TEXT NOT NULL CHECK(length(description) <= 2000),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n  entries_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(entries_json) THEN json_type(entries_json) = 'object' ELSE 0 END),\n  content_hash TEXT NOT NULL\n    CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),\n  created_at INTEGER NOT NULL,\n  UNIQUE(dictionary_id, version_no),\n  UNIQUE(dictionary_id, id),\n  UNIQUE(dictionary_id, id, name, kind),\n  FOREIGN KEY(dictionary_id, kind) REFERENCES dictionaries(id, kind)\n);\nCREATE TABLE run_dictionary_bindings (\n  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(run_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX run_dictionary_bindings_by_version\n  ON run_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TABLE script_test_dictionary_bindings (\n  test_id TEXT NOT NULL REFERENCES script_tests(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(test_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX script_test_dictionary_bindings_by_version\n  ON script_test_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TRIGGER dictionary_versions_no_update\nBEFORE UPDATE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionaries_identity_immutable\nBEFORE UPDATE OF id, kind ON dictionaries\nWHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_IDENTITY_IMMUTABLE');\nEND;\n PRAGMA user_version = 9;"
+  "8": "\nCREATE TABLE dictionaries (\n  id TEXT NOT NULL PRIMARY KEY,\n  name TEXT NOT NULL COLLATE NOCASE UNIQUE\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  current_version_id TEXT NOT NULL,\n  revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision > 0),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  UNIQUE(id, kind),\n  FOREIGN KEY(id, current_version_id, name, kind)\n    REFERENCES dictionary_versions(dictionary_id, id, name, kind)\n    DEFERRABLE INITIALLY DEFERRED\n);\nCREATE TABLE dictionary_versions (\n  id TEXT NOT NULL PRIMARY KEY,\n  dictionary_id TEXT NOT NULL,\n  version_no INTEGER NOT NULL CHECK(typeof(version_no) = 'integer' AND version_no > 0),\n  name TEXT NOT NULL\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  description TEXT NOT NULL CHECK(length(description) <= 2000),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n  entries_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(entries_json) THEN json_type(entries_json) = 'object' ELSE 0 END),\n  content_hash TEXT NOT NULL\n    CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),\n  created_at INTEGER NOT NULL,\n  UNIQUE(dictionary_id, version_no),\n  UNIQUE(dictionary_id, id),\n  UNIQUE(dictionary_id, id, name, kind),\n  FOREIGN KEY(dictionary_id, kind) REFERENCES dictionaries(id, kind)\n);\nCREATE TABLE run_dictionary_bindings (\n  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(run_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX run_dictionary_bindings_by_version\n  ON run_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TABLE script_test_dictionary_bindings (\n  test_id TEXT NOT NULL REFERENCES script_tests(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(test_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX script_test_dictionary_bindings_by_version\n  ON script_test_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TRIGGER dictionary_versions_no_update\nBEFORE UPDATE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionaries_identity_immutable\nBEFORE UPDATE OF id, kind ON dictionaries\nWHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_IDENTITY_IMMUTABLE');\nEND;\n PRAGMA user_version = 9;",
+  "9": "\nALTER TABLE dictionaries ADD COLUMN deleted_at INTEGER\n  CHECK(deleted_at IS NULL OR (typeof(deleted_at) = 'integer' AND deleted_at > 0));\nDROP TRIGGER dictionary_versions_no_delete;\nCREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nWHEN NOT EXISTS (SELECT 1 FROM dictionaries WHERE id=OLD.dictionary_id AND deleted_at IS NOT NULL)\n OR EXISTS (SELECT 1 FROM run_dictionary_bindings WHERE dictionary_id=OLD.dictionary_id)\n OR EXISTS (SELECT 1 FROM script_test_dictionary_bindings WHERE dictionary_id=OLD.dictionary_id)\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nPRAGMA user_version = 10;\n"
 };
-export const initializationSql = "\nCREATE TABLE provider_settings (\n id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), config_json TEXT NOT NULL,\n models_json TEXT NOT NULL, default_model TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), updated_at INTEGER NOT NULL\n);\nCREATE TABLE workflows (\n id TEXT PRIMARY KEY, name TEXT NOT NULL, current_version_id TEXT REFERENCES workflow_versions(id),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE TABLE workflow_versions (\n id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), version_no INTEGER NOT NULL,\n definition_json TEXT NOT NULL, layout_json TEXT NOT NULL, artifact_path TEXT NOT NULL, content_hash TEXT NOT NULL,\n created_at INTEGER NOT NULL, UNIQUE(workflow_id,version_no)\n);\nCREATE TRIGGER version_immutable BEFORE UPDATE ON workflow_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END;\nCREATE TRIGGER current_version_owner BEFORE UPDATE OF current_version_id ON workflows\n WHEN NEW.current_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM workflow_versions WHERE id=NEW.current_version_id AND workflow_id=NEW.id)\n BEGIN SELECT RAISE(ABORT,'version owner mismatch'); END;\nCREATE TABLE drafts (\n id TEXT PRIMARY KEY, workflow_id TEXT REFERENCES workflows(id), base_version_id TEXT REFERENCES workflow_versions(id),\n revision INTEGER NOT NULL, artifact_path TEXT NOT NULL, validation_json TEXT NOT NULL,\n published_version_id TEXT REFERENCES workflow_versions(id), status TEXT NOT NULL,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE TABLE authoring_turns (\n id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES drafts(id), provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL, provider_revision INTEGER NOT NULL, native_session_id TEXT, status TEXT NOT NULL,\n base_revision INTEGER NOT NULL, error_json TEXT, created_at INTEGER NOT NULL, ended_at INTEGER,\n conversation_id TEXT REFERENCES agent_conversations(id), backend_turn_id TEXT, connection_generation INTEGER,\n submission_state TEXT NOT NULL DEFAULT 'not_sent'\n  CHECK(submission_state IN ('not_sent','sending','accepted','settled')),\n input_ref TEXT, result_ref TEXT\n);\nCREATE TABLE authoring_messages (\n id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES drafts(id), turn_id TEXT REFERENCES authoring_turns(id),\n sequence INTEGER NOT NULL, role TEXT NOT NULL, content_json TEXT NOT NULL, created_at INTEGER NOT NULL,\n conversation_id TEXT REFERENCES agent_conversations(id),\n UNIQUE(draft_id,sequence)\n);\nCREATE TABLE agent_conversations (\n id TEXT PRIMARY KEY,\n draft_id TEXT NOT NULL REFERENCES drafts(id),\n mode TEXT NOT NULL CHECK(mode IN ('single','multi')),\n context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native')),\n status TEXT NOT NULL CHECK(status IN ('current','idle','archived','needs_rebuild')),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n model_id TEXT NOT NULL,\n transport TEXT NOT NULL CHECK(transport = 'native'),\n connection_fingerprint TEXT NOT NULL,\n cli_version TEXT,\n backend_ref_json TEXT,\n backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),\n synced_revision INTEGER CHECK(synced_revision >= 0),\n rebuild_from_id TEXT REFERENCES agent_conversations(id),\n title TEXT CHECK(title IS NULL OR (length(title) BETWEEN 1 AND 200)),\n archived_at INTEGER,\n created_at INTEGER NOT NULL,\n updated_at INTEGER NOT NULL,\n last_used_at INTEGER,\n CHECK (\n  (mode='single' AND context_mode='isolated')\n  OR (mode='multi' AND context_mode='native')\n ),\n CHECK (status != 'archived' OR archived_at IS NOT NULL)\n);\nCREATE UNIQUE INDEX one_current_conversation\n ON agent_conversations(draft_id)\n WHERE status = 'current';\nCREATE INDEX conversations_by_draft\n ON agent_conversations(draft_id,created_at,id);\nCREATE INDEX conversations_by_activity\n ON agent_conversations(draft_id,updated_at DESC,id);\nCREATE UNIQUE INDEX one_active_turn\n ON authoring_turns(draft_id)\n WHERE status IN ('queued','running','cancel_requested');\nCREATE INDEX turns_by_conversation ON authoring_turns(conversation_id,created_at,id);\nCREATE INDEX messages_by_conversation ON authoring_messages(conversation_id,sequence);\n\nCREATE TABLE runs (\n id TEXT PRIMARY KEY, workflow_version_id TEXT REFERENCES workflow_versions(id),\n status TEXT NOT NULL CHECK(status IN ('queued','running','cancel_requested','succeeded','failed','cancelled','interrupted')),\n input_ref TEXT NOT NULL, output_ref TEXT, active_node_id TEXT, cancel_requested_at INTEGER, error_json TEXT,\n created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n draft_id TEXT REFERENCES drafts(id), draft_revision INTEGER, snapshot_path TEXT,\n CHECK (\n  (workflow_version_id IS NOT NULL AND draft_id IS NULL AND draft_revision IS NULL AND snapshot_path IS NULL)\n  OR (workflow_version_id IS NULL AND draft_id IS NOT NULL AND draft_revision IS NOT NULL AND draft_revision >= 0 AND snapshot_path IS NOT NULL)\n )\n);\n\nCREATE INDEX queued_runs ON runs(status,created_at);\nCREATE TABLE node_runs (\n id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), node_id TEXT NOT NULL, type TEXT NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled','skipped','interrupted')),\n input_ref TEXT, output_ref TEXT, route_json TEXT, skip_reason TEXT, error_json TEXT,\n started_at INTEGER, ended_at INTEGER, UNIQUE(run_id,node_id)\n);\nCREATE TABLE node_attempts (\n id TEXT PRIMARY KEY, node_run_id TEXT NOT NULL REFERENCES node_runs(id), attempt_no INTEGER NOT NULL,\n status TEXT NOT NULL, execution_json TEXT NOT NULL, input_ref TEXT, output_ref TEXT, error_json TEXT,\n started_at INTEGER NOT NULL, ended_at INTEGER, UNIQUE(node_run_id,attempt_no)\n);\n\nCREATE TABLE agent_model_configs (\n id TEXT PRIMARY KEY,\n name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision > 0),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE INDEX agent_model_configs_by_provider ON agent_model_configs(provider_id);\nCREATE TABLE agent_model_config_revisions (\n config_id TEXT NOT NULL REFERENCES agent_model_configs(id),\n revision INTEGER NOT NULL CHECK(revision > 0),\n name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(config_id,revision)\n);\nCREATE TABLE run_agent_bindings (\n run_id TEXT NOT NULL, node_id TEXT NOT NULL,\n config_id TEXT NOT NULL, config_revision INTEGER NOT NULL CHECK(config_revision > 0),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(run_id,node_id),\n FOREIGN KEY(run_id,node_id) REFERENCES node_runs(run_id,node_id) ON DELETE CASCADE,\n FOREIGN KEY(config_id,config_revision) REFERENCES agent_model_config_revisions(config_id,revision)\n);\nCREATE INDEX run_agent_bindings_by_config ON run_agent_bindings(config_id,config_revision);\n\nCREATE TABLE stream_events (\n stream_type TEXT NOT NULL CHECK(stream_type IN ('run','authoring_turn')), stream_id TEXT NOT NULL, sequence INTEGER NOT NULL,\n event_type TEXT NOT NULL, node_id TEXT, attempt_id TEXT, payload_ref TEXT NOT NULL, created_at INTEGER NOT NULL,\n PRIMARY KEY(stream_type,stream_id,sequence)\n);\nCREATE TABLE artifacts (\n id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL,\n byte_size INTEGER NOT NULL, media_type TEXT NOT NULL, created_at INTEGER NOT NULL\n);\nCREATE TABLE command_receipts (\n scope TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL, result_json TEXT NOT NULL,\n created_at INTEGER NOT NULL, PRIMARY KEY(scope,request_id)\n);\nCREATE TABLE scripts (\n id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',\n runtime TEXT NOT NULL CHECK(runtime IN ('nodejs','shell')),\n status TEXT NOT NULL CHECK(status IN ('draft','published','archived')),\n current_draft_version_id TEXT, current_published_version_id TEXT,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER\n);\nCREATE TABLE script_versions (\n id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES scripts(id), version_no INTEGER NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('draft','published')), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),\n entry_file TEXT NOT NULL, timeout_ms INTEGER NOT NULL DEFAULT 300000 CHECK(timeout_ms BETWEEN 1000 AND 300000), input_schema_json TEXT NOT NULL, output_schema_json TEXT NOT NULL,\n source_ref TEXT NOT NULL, content_hash TEXT NOT NULL, validation_json TEXT NOT NULL,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, published_at INTEGER,\n UNIQUE(script_id,version_no)\n);\nCREATE UNIQUE INDEX one_script_draft ON script_versions(script_id) WHERE status='draft';\nCREATE TABLE script_tests (\n id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES scripts(id), script_version_id TEXT REFERENCES script_versions(id),\n draft_revision INTEGER, status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','cancelled')),\n input_ref TEXT NOT NULL, output_ref TEXT, error_json TEXT, stdout_ref TEXT, stderr_ref TEXT, exit_code INTEGER,\n duration_ms INTEGER, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n CHECK ((script_version_id IS NULL AND draft_revision IS NOT NULL AND draft_revision >= 0)\n   OR (script_version_id IS NOT NULL AND draft_revision IS NULL))\n);\nCREATE INDEX script_versions_by_script ON script_versions(script_id,version_no DESC);\nCREATE INDEX script_tests_by_script ON script_tests(script_id,created_at DESC);\nCREATE TRIGGER script_draft_owner_insert BEFORE INSERT ON scripts\nWHEN NEW.current_draft_version_id IS NOT NULL\n AND NOT EXISTS(SELECT 1 FROM script_versions WHERE id=NEW.current_draft_version_id AND script_id=NEW.id)\nBEGIN SELECT RAISE(ABORT,'script draft owner mismatch'); END;\nCREATE TRIGGER script_published_version_immutable BEFORE UPDATE ON script_versions\nWHEN OLD.status='published'\nBEGIN SELECT RAISE(ABORT,'published script version is immutable'); END;\n\nCREATE TABLE dictionaries (\n  id TEXT NOT NULL PRIMARY KEY,\n  name TEXT NOT NULL COLLATE NOCASE UNIQUE\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  current_version_id TEXT NOT NULL,\n  revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision > 0),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  UNIQUE(id, kind),\n  FOREIGN KEY(id, current_version_id, name, kind)\n    REFERENCES dictionary_versions(dictionary_id, id, name, kind)\n    DEFERRABLE INITIALLY DEFERRED\n);\nCREATE TABLE dictionary_versions (\n  id TEXT NOT NULL PRIMARY KEY,\n  dictionary_id TEXT NOT NULL,\n  version_no INTEGER NOT NULL CHECK(typeof(version_no) = 'integer' AND version_no > 0),\n  name TEXT NOT NULL\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  description TEXT NOT NULL CHECK(length(description) <= 2000),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n  entries_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(entries_json) THEN json_type(entries_json) = 'object' ELSE 0 END),\n  content_hash TEXT NOT NULL\n    CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),\n  created_at INTEGER NOT NULL,\n  UNIQUE(dictionary_id, version_no),\n  UNIQUE(dictionary_id, id),\n  UNIQUE(dictionary_id, id, name, kind),\n  FOREIGN KEY(dictionary_id, kind) REFERENCES dictionaries(id, kind)\n);\nCREATE TABLE run_dictionary_bindings (\n  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(run_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX run_dictionary_bindings_by_version\n  ON run_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TABLE script_test_dictionary_bindings (\n  test_id TEXT NOT NULL REFERENCES script_tests(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(test_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX script_test_dictionary_bindings_by_version\n  ON script_test_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TRIGGER dictionary_versions_no_update\nBEFORE UPDATE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionaries_identity_immutable\nBEFORE UPDATE OF id, kind ON dictionaries\nWHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_IDENTITY_IMMUTABLE');\nEND;\n\nPRAGMA application_id = 1331110449;\nPRAGMA user_version = 9;\n";
+export const initializationSql = "\nCREATE TABLE provider_settings (\n id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), config_json TEXT NOT NULL,\n models_json TEXT NOT NULL, default_model TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), updated_at INTEGER NOT NULL\n);\nCREATE TABLE workflows (\n id TEXT PRIMARY KEY, name TEXT NOT NULL, current_version_id TEXT REFERENCES workflow_versions(id),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE TABLE workflow_versions (\n id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), version_no INTEGER NOT NULL,\n definition_json TEXT NOT NULL, layout_json TEXT NOT NULL, artifact_path TEXT NOT NULL, content_hash TEXT NOT NULL,\n created_at INTEGER NOT NULL, UNIQUE(workflow_id,version_no)\n);\nCREATE TRIGGER version_immutable BEFORE UPDATE ON workflow_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END;\nCREATE TRIGGER current_version_owner BEFORE UPDATE OF current_version_id ON workflows\n WHEN NEW.current_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM workflow_versions WHERE id=NEW.current_version_id AND workflow_id=NEW.id)\n BEGIN SELECT RAISE(ABORT,'version owner mismatch'); END;\nCREATE TABLE drafts (\n id TEXT PRIMARY KEY, workflow_id TEXT REFERENCES workflows(id), base_version_id TEXT REFERENCES workflow_versions(id),\n revision INTEGER NOT NULL, artifact_path TEXT NOT NULL, validation_json TEXT NOT NULL,\n published_version_id TEXT REFERENCES workflow_versions(id), status TEXT NOT NULL,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE TABLE authoring_turns (\n id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES drafts(id), provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL, provider_revision INTEGER NOT NULL, native_session_id TEXT, status TEXT NOT NULL,\n base_revision INTEGER NOT NULL, error_json TEXT, created_at INTEGER NOT NULL, ended_at INTEGER,\n conversation_id TEXT REFERENCES agent_conversations(id), backend_turn_id TEXT, connection_generation INTEGER,\n submission_state TEXT NOT NULL DEFAULT 'not_sent'\n  CHECK(submission_state IN ('not_sent','sending','accepted','settled')),\n input_ref TEXT, result_ref TEXT\n);\nCREATE TABLE authoring_messages (\n id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES drafts(id), turn_id TEXT REFERENCES authoring_turns(id),\n sequence INTEGER NOT NULL, role TEXT NOT NULL, content_json TEXT NOT NULL, created_at INTEGER NOT NULL,\n conversation_id TEXT REFERENCES agent_conversations(id),\n UNIQUE(draft_id,sequence)\n);\nCREATE TABLE agent_conversations (\n id TEXT PRIMARY KEY,\n draft_id TEXT NOT NULL REFERENCES drafts(id),\n mode TEXT NOT NULL CHECK(mode IN ('single','multi')),\n context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native')),\n status TEXT NOT NULL CHECK(status IN ('current','idle','archived','needs_rebuild')),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n model_id TEXT NOT NULL,\n transport TEXT NOT NULL CHECK(transport = 'native'),\n connection_fingerprint TEXT NOT NULL,\n cli_version TEXT,\n backend_ref_json TEXT,\n backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),\n synced_revision INTEGER CHECK(synced_revision >= 0),\n rebuild_from_id TEXT REFERENCES agent_conversations(id),\n title TEXT CHECK(title IS NULL OR (length(title) BETWEEN 1 AND 200)),\n archived_at INTEGER,\n created_at INTEGER NOT NULL,\n updated_at INTEGER NOT NULL,\n last_used_at INTEGER,\n CHECK (\n  (mode='single' AND context_mode='isolated')\n  OR (mode='multi' AND context_mode='native')\n ),\n CHECK (status != 'archived' OR archived_at IS NOT NULL)\n);\nCREATE UNIQUE INDEX one_current_conversation\n ON agent_conversations(draft_id)\n WHERE status = 'current';\nCREATE INDEX conversations_by_draft\n ON agent_conversations(draft_id,created_at,id);\nCREATE INDEX conversations_by_activity\n ON agent_conversations(draft_id,updated_at DESC,id);\nCREATE UNIQUE INDEX one_active_turn\n ON authoring_turns(draft_id)\n WHERE status IN ('queued','running','cancel_requested');\nCREATE INDEX turns_by_conversation ON authoring_turns(conversation_id,created_at,id);\nCREATE INDEX messages_by_conversation ON authoring_messages(conversation_id,sequence);\n\nCREATE TABLE runs (\n id TEXT PRIMARY KEY, workflow_version_id TEXT REFERENCES workflow_versions(id),\n status TEXT NOT NULL CHECK(status IN ('queued','running','cancel_requested','succeeded','failed','cancelled','interrupted')),\n input_ref TEXT NOT NULL, output_ref TEXT, active_node_id TEXT, cancel_requested_at INTEGER, error_json TEXT,\n created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n draft_id TEXT REFERENCES drafts(id), draft_revision INTEGER, snapshot_path TEXT,\n CHECK (\n  (workflow_version_id IS NOT NULL AND draft_id IS NULL AND draft_revision IS NULL AND snapshot_path IS NULL)\n  OR (workflow_version_id IS NULL AND draft_id IS NOT NULL AND draft_revision IS NOT NULL AND draft_revision >= 0 AND snapshot_path IS NOT NULL)\n )\n);\n\nCREATE INDEX queued_runs ON runs(status,created_at);\nCREATE TABLE node_runs (\n id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), node_id TEXT NOT NULL, type TEXT NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled','skipped','interrupted')),\n input_ref TEXT, output_ref TEXT, route_json TEXT, skip_reason TEXT, error_json TEXT,\n started_at INTEGER, ended_at INTEGER, UNIQUE(run_id,node_id)\n);\nCREATE TABLE node_attempts (\n id TEXT PRIMARY KEY, node_run_id TEXT NOT NULL REFERENCES node_runs(id), attempt_no INTEGER NOT NULL,\n status TEXT NOT NULL, execution_json TEXT NOT NULL, input_ref TEXT, output_ref TEXT, error_json TEXT,\n started_at INTEGER NOT NULL, ended_at INTEGER, UNIQUE(node_run_id,attempt_no)\n);\n\nCREATE TABLE agent_model_configs (\n id TEXT PRIMARY KEY,\n name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision > 0),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n);\nCREATE INDEX agent_model_configs_by_provider ON agent_model_configs(provider_id);\nCREATE TABLE agent_model_config_revisions (\n config_id TEXT NOT NULL REFERENCES agent_model_configs(id),\n revision INTEGER NOT NULL CHECK(revision > 0),\n name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(config_id,revision)\n);\nCREATE TABLE run_agent_bindings (\n run_id TEXT NOT NULL, node_id TEXT NOT NULL,\n config_id TEXT NOT NULL, config_revision INTEGER NOT NULL CHECK(config_revision > 0),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(run_id,node_id),\n FOREIGN KEY(run_id,node_id) REFERENCES node_runs(run_id,node_id) ON DELETE CASCADE,\n FOREIGN KEY(config_id,config_revision) REFERENCES agent_model_config_revisions(config_id,revision)\n);\nCREATE INDEX run_agent_bindings_by_config ON run_agent_bindings(config_id,config_revision);\n\nCREATE TABLE stream_events (\n stream_type TEXT NOT NULL CHECK(stream_type IN ('run','authoring_turn')), stream_id TEXT NOT NULL, sequence INTEGER NOT NULL,\n event_type TEXT NOT NULL, node_id TEXT, attempt_id TEXT, payload_ref TEXT NOT NULL, created_at INTEGER NOT NULL,\n PRIMARY KEY(stream_type,stream_id,sequence)\n);\nCREATE TABLE artifacts (\n id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL,\n byte_size INTEGER NOT NULL, media_type TEXT NOT NULL, created_at INTEGER NOT NULL\n);\nCREATE TABLE command_receipts (\n scope TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL, result_json TEXT NOT NULL,\n created_at INTEGER NOT NULL, PRIMARY KEY(scope,request_id)\n);\nCREATE TABLE scripts (\n id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',\n runtime TEXT NOT NULL CHECK(runtime IN ('nodejs','shell')),\n status TEXT NOT NULL CHECK(status IN ('draft','published','archived')),\n current_draft_version_id TEXT, current_published_version_id TEXT,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER\n);\nCREATE TABLE script_versions (\n id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES scripts(id), version_no INTEGER NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('draft','published')), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),\n entry_file TEXT NOT NULL, timeout_ms INTEGER NOT NULL DEFAULT 300000 CHECK(timeout_ms BETWEEN 1000 AND 300000), input_schema_json TEXT NOT NULL, output_schema_json TEXT NOT NULL,\n source_ref TEXT NOT NULL, content_hash TEXT NOT NULL, validation_json TEXT NOT NULL,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, published_at INTEGER,\n UNIQUE(script_id,version_no)\n);\nCREATE UNIQUE INDEX one_script_draft ON script_versions(script_id) WHERE status='draft';\nCREATE TABLE script_tests (\n id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES scripts(id), script_version_id TEXT REFERENCES script_versions(id),\n draft_revision INTEGER, status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','cancelled')),\n input_ref TEXT NOT NULL, output_ref TEXT, error_json TEXT, stdout_ref TEXT, stderr_ref TEXT, exit_code INTEGER,\n duration_ms INTEGER, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n CHECK ((script_version_id IS NULL AND draft_revision IS NOT NULL AND draft_revision >= 0)\n   OR (script_version_id IS NOT NULL AND draft_revision IS NULL))\n);\nCREATE INDEX script_versions_by_script ON script_versions(script_id,version_no DESC);\nCREATE INDEX script_tests_by_script ON script_tests(script_id,created_at DESC);\nCREATE TRIGGER script_draft_owner_insert BEFORE INSERT ON scripts\nWHEN NEW.current_draft_version_id IS NOT NULL\n AND NOT EXISTS(SELECT 1 FROM script_versions WHERE id=NEW.current_draft_version_id AND script_id=NEW.id)\nBEGIN SELECT RAISE(ABORT,'script draft owner mismatch'); END;\nCREATE TRIGGER script_published_version_immutable BEFORE UPDATE ON script_versions\nWHEN OLD.status='published'\nBEGIN SELECT RAISE(ABORT,'published script version is immutable'); END;\n\nCREATE TABLE dictionaries (\n  id TEXT NOT NULL PRIMARY KEY,\n  name TEXT NOT NULL COLLATE NOCASE UNIQUE\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  current_version_id TEXT NOT NULL,\n  revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision > 0),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL,\n  UNIQUE(id, kind),\n  FOREIGN KEY(id, current_version_id, name, kind)\n    REFERENCES dictionary_versions(dictionary_id, id, name, kind)\n    DEFERRABLE INITIALLY DEFERRED\n);\nCREATE TABLE dictionary_versions (\n  id TEXT NOT NULL PRIMARY KEY,\n  dictionary_id TEXT NOT NULL,\n  version_no INTEGER NOT NULL CHECK(typeof(version_no) = 'integer' AND version_no > 0),\n  name TEXT NOT NULL\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  description TEXT NOT NULL CHECK(length(description) <= 2000),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n  entries_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(entries_json) THEN json_type(entries_json) = 'object' ELSE 0 END),\n  content_hash TEXT NOT NULL\n    CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),\n  created_at INTEGER NOT NULL,\n  UNIQUE(dictionary_id, version_no),\n  UNIQUE(dictionary_id, id),\n  UNIQUE(dictionary_id, id, name, kind),\n  FOREIGN KEY(dictionary_id, kind) REFERENCES dictionaries(id, kind)\n);\nCREATE TABLE run_dictionary_bindings (\n  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(run_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX run_dictionary_bindings_by_version\n  ON run_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TABLE script_test_dictionary_bindings (\n  test_id TEXT NOT NULL REFERENCES script_tests(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(test_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n);\nCREATE INDEX script_test_dictionary_bindings_by_version\n  ON script_test_dictionary_bindings(dictionary_id, dictionary_version_id);\nCREATE TRIGGER dictionary_versions_no_update\nBEFORE UPDATE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nCREATE TRIGGER dictionaries_identity_immutable\nBEFORE UPDATE OF id, kind ON dictionaries\nWHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_IDENTITY_IMMUTABLE');\nEND;\n\n\nALTER TABLE dictionaries ADD COLUMN deleted_at INTEGER\n  CHECK(deleted_at IS NULL OR (typeof(deleted_at) = 'integer' AND deleted_at > 0));\nDROP TRIGGER dictionary_versions_no_delete;\nCREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nWHEN NOT EXISTS (SELECT 1 FROM dictionaries WHERE id=OLD.dictionary_id AND deleted_at IS NOT NULL)\n OR EXISTS (SELECT 1 FROM run_dictionary_bindings WHERE dictionary_id=OLD.dictionary_id)\n OR EXISTS (SELECT 1 FROM script_test_dictionary_bindings WHERE dictionary_id=OLD.dictionary_id)\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND;\nPRAGMA user_version = 10;\n\nPRAGMA application_id = 1331110449;\nPRAGMA user_version = 10;\n";
 export const baselines: Record<number,{objects: Record<string,unknown>[]}> = {
   "1": {
     "objects": [
@@ -1512,6 +1513,274 @@ export const baselines: Record<number,{objects: Record<string,unknown>[]}> = {
         "sql": "CREATE TRIGGER version_immutable BEFORE UPDATE ON workflow_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END"
       }
     ]
+  },
+  "10": {
+    "objects": [
+      {
+        "type": "index",
+        "name": "agent_model_configs_by_provider",
+        "tbl_name": "agent_model_configs",
+        "sql": "CREATE INDEX agent_model_configs_by_provider ON agent_model_configs(provider_id)"
+      },
+      {
+        "type": "index",
+        "name": "conversations_by_activity",
+        "tbl_name": "agent_conversations",
+        "sql": "CREATE INDEX conversations_by_activity\n ON agent_conversations(draft_id,updated_at DESC,id)"
+      },
+      {
+        "type": "index",
+        "name": "conversations_by_draft",
+        "tbl_name": "agent_conversations",
+        "sql": "CREATE INDEX conversations_by_draft\n ON agent_conversations(draft_id,created_at,id)"
+      },
+      {
+        "type": "index",
+        "name": "messages_by_conversation",
+        "tbl_name": "authoring_messages",
+        "sql": "CREATE INDEX messages_by_conversation ON authoring_messages(conversation_id,sequence)"
+      },
+      {
+        "type": "index",
+        "name": "one_active_turn",
+        "tbl_name": "authoring_turns",
+        "sql": "CREATE UNIQUE INDEX one_active_turn\n ON authoring_turns(draft_id)\n WHERE status IN ('queued','running','cancel_requested')"
+      },
+      {
+        "type": "index",
+        "name": "one_current_conversation",
+        "tbl_name": "agent_conversations",
+        "sql": "CREATE UNIQUE INDEX one_current_conversation\n ON agent_conversations(draft_id) WHERE status='current'"
+      },
+      {
+        "type": "index",
+        "name": "one_script_draft",
+        "tbl_name": "script_versions",
+        "sql": "CREATE UNIQUE INDEX one_script_draft ON script_versions(script_id) WHERE status='draft'"
+      },
+      {
+        "type": "index",
+        "name": "queued_runs",
+        "tbl_name": "runs",
+        "sql": "CREATE INDEX queued_runs ON runs(status,created_at)"
+      },
+      {
+        "type": "index",
+        "name": "run_agent_bindings_by_config",
+        "tbl_name": "run_agent_bindings",
+        "sql": "CREATE INDEX run_agent_bindings_by_config ON run_agent_bindings(config_id,config_revision)"
+      },
+      {
+        "type": "index",
+        "name": "run_dictionary_bindings_by_version",
+        "tbl_name": "run_dictionary_bindings",
+        "sql": "CREATE INDEX run_dictionary_bindings_by_version\n  ON run_dictionary_bindings(dictionary_id, dictionary_version_id)"
+      },
+      {
+        "type": "index",
+        "name": "script_test_dictionary_bindings_by_version",
+        "tbl_name": "script_test_dictionary_bindings",
+        "sql": "CREATE INDEX script_test_dictionary_bindings_by_version\n  ON script_test_dictionary_bindings(dictionary_id, dictionary_version_id)"
+      },
+      {
+        "type": "index",
+        "name": "script_tests_by_script",
+        "tbl_name": "script_tests",
+        "sql": "CREATE INDEX script_tests_by_script ON script_tests(script_id,created_at DESC)"
+      },
+      {
+        "type": "index",
+        "name": "script_versions_by_script",
+        "tbl_name": "script_versions",
+        "sql": "CREATE INDEX script_versions_by_script ON script_versions(script_id,version_no DESC)"
+      },
+      {
+        "type": "index",
+        "name": "turns_by_conversation",
+        "tbl_name": "authoring_turns",
+        "sql": "CREATE INDEX turns_by_conversation ON authoring_turns(conversation_id,created_at,id)"
+      },
+      {
+        "type": "table",
+        "name": "agent_conversations",
+        "tbl_name": "agent_conversations",
+        "sql": "CREATE TABLE \"agent_conversations\" (\n id TEXT PRIMARY KEY,\n draft_id TEXT NOT NULL REFERENCES drafts(id),\n mode TEXT NOT NULL CHECK(mode IN ('single','multi')),\n context_mode TEXT NOT NULL CHECK(context_mode IN ('isolated','native')),\n status TEXT NOT NULL CHECK(status IN ('current','idle','archived','needs_rebuild')),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n model_id TEXT NOT NULL,\n transport TEXT NOT NULL CHECK(transport = 'native'),\n connection_fingerprint TEXT NOT NULL,\n cli_version TEXT,\n backend_ref_json TEXT,\n backend_generation INTEGER NOT NULL DEFAULT 0 CHECK(backend_generation >= 0),\n synced_revision INTEGER CHECK(synced_revision >= 0),\n rebuild_from_id TEXT REFERENCES \"agent_conversations\"(id),\n title TEXT CHECK(title IS NULL OR (length(title) BETWEEN 1 AND 200)),\n archived_at INTEGER,\n created_at INTEGER NOT NULL,\n updated_at INTEGER NOT NULL,\n last_used_at INTEGER,\n CHECK (\n  (mode='single' AND context_mode='isolated')\n  OR (mode='multi' AND context_mode='native')\n ),\n CHECK (status != 'archived' OR archived_at IS NOT NULL)\n)"
+      },
+      {
+        "type": "table",
+        "name": "agent_model_config_revisions",
+        "tbl_name": "agent_model_config_revisions",
+        "sql": "CREATE TABLE agent_model_config_revisions (\n config_id TEXT NOT NULL REFERENCES agent_model_configs(id),\n revision INTEGER NOT NULL CHECK(revision > 0),\n name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(config_id,revision)\n)"
+      },
+      {
+        "type": "table",
+        "name": "agent_model_configs",
+        "tbl_name": "agent_model_configs",
+        "sql": "CREATE TABLE agent_model_configs (\n id TEXT PRIMARY KEY,\n name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK(length(trim(name)) BETWEEN 1 AND 100),\n description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 2000),\n provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL CHECK(length(trim(model_id)) BETWEEN 1 AND 200),\n enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),\n revision INTEGER NOT NULL CHECK(revision > 0),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n)"
+      },
+      {
+        "type": "table",
+        "name": "artifacts",
+        "tbl_name": "artifacts",
+        "sql": "CREATE TABLE artifacts (\n id TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL,\n byte_size INTEGER NOT NULL, media_type TEXT NOT NULL, created_at INTEGER NOT NULL\n)"
+      },
+      {
+        "type": "table",
+        "name": "authoring_messages",
+        "tbl_name": "authoring_messages",
+        "sql": "CREATE TABLE authoring_messages (\n id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES drafts(id), turn_id TEXT REFERENCES authoring_turns(id),\n sequence INTEGER NOT NULL, role TEXT NOT NULL, content_json TEXT NOT NULL, created_at INTEGER NOT NULL,\n conversation_id TEXT REFERENCES agent_conversations(id),\n UNIQUE(draft_id,sequence)\n)"
+      },
+      {
+        "type": "table",
+        "name": "authoring_turns",
+        "tbl_name": "authoring_turns",
+        "sql": "CREATE TABLE authoring_turns (\n id TEXT PRIMARY KEY, draft_id TEXT NOT NULL REFERENCES drafts(id), provider_id TEXT NOT NULL REFERENCES provider_settings(id),\n model_id TEXT NOT NULL, provider_revision INTEGER NOT NULL, native_session_id TEXT, status TEXT NOT NULL,\n base_revision INTEGER NOT NULL, error_json TEXT, created_at INTEGER NOT NULL, ended_at INTEGER,\n conversation_id TEXT REFERENCES agent_conversations(id), backend_turn_id TEXT, connection_generation INTEGER,\n submission_state TEXT NOT NULL DEFAULT 'not_sent'\n  CHECK(submission_state IN ('not_sent','sending','accepted','settled')),\n input_ref TEXT, result_ref TEXT\n)"
+      },
+      {
+        "type": "table",
+        "name": "command_receipts",
+        "tbl_name": "command_receipts",
+        "sql": "CREATE TABLE command_receipts (\n scope TEXT NOT NULL, request_id TEXT NOT NULL, request_hash TEXT NOT NULL, result_json TEXT NOT NULL,\n created_at INTEGER NOT NULL, PRIMARY KEY(scope,request_id)\n)"
+      },
+      {
+        "type": "table",
+        "name": "dictionaries",
+        "tbl_name": "dictionaries",
+        "sql": "CREATE TABLE dictionaries (\n  id TEXT NOT NULL PRIMARY KEY,\n  name TEXT NOT NULL COLLATE NOCASE UNIQUE\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  current_version_id TEXT NOT NULL,\n  revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision > 0),\n  created_at INTEGER NOT NULL,\n  updated_at INTEGER NOT NULL, deleted_at INTEGER\n  CHECK(deleted_at IS NULL OR (typeof(deleted_at) = 'integer' AND deleted_at > 0)),\n  UNIQUE(id, kind),\n  FOREIGN KEY(id, current_version_id, name, kind)\n    REFERENCES dictionary_versions(dictionary_id, id, name, kind)\n    DEFERRABLE INITIALLY DEFERRED\n)"
+      },
+      {
+        "type": "table",
+        "name": "dictionary_versions",
+        "tbl_name": "dictionary_versions",
+        "sql": "CREATE TABLE dictionary_versions (\n  id TEXT NOT NULL PRIMARY KEY,\n  dictionary_id TEXT NOT NULL,\n  version_no INTEGER NOT NULL CHECK(typeof(version_no) = 'integer' AND version_no > 0),\n  name TEXT NOT NULL\n    CHECK(name = trim(name) AND length(name) BETWEEN 1 AND 100),\n  description TEXT NOT NULL CHECK(length(description) <= 2000),\n  kind TEXT NOT NULL CHECK(kind IN ('plain','encrypted')),\n  enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),\n  entries_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(entries_json) THEN json_type(entries_json) = 'object' ELSE 0 END),\n  content_hash TEXT NOT NULL\n    CHECK(length(content_hash) = 64 AND content_hash NOT GLOB '*[^0-9a-f]*'),\n  created_at INTEGER NOT NULL,\n  UNIQUE(dictionary_id, version_no),\n  UNIQUE(dictionary_id, id),\n  UNIQUE(dictionary_id, id, name, kind),\n  FOREIGN KEY(dictionary_id, kind) REFERENCES dictionaries(id, kind)\n)"
+      },
+      {
+        "type": "table",
+        "name": "drafts",
+        "tbl_name": "drafts",
+        "sql": "CREATE TABLE drafts (\n id TEXT PRIMARY KEY, workflow_id TEXT REFERENCES workflows(id), base_version_id TEXT REFERENCES workflow_versions(id),\n revision INTEGER NOT NULL, artifact_path TEXT NOT NULL, validation_json TEXT NOT NULL,\n published_version_id TEXT REFERENCES workflow_versions(id), status TEXT NOT NULL,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n)"
+      },
+      {
+        "type": "table",
+        "name": "node_attempts",
+        "tbl_name": "node_attempts",
+        "sql": "CREATE TABLE node_attempts (\n id TEXT PRIMARY KEY, node_run_id TEXT NOT NULL REFERENCES node_runs(id), attempt_no INTEGER NOT NULL,\n status TEXT NOT NULL, execution_json TEXT NOT NULL, input_ref TEXT, output_ref TEXT, error_json TEXT,\n started_at INTEGER NOT NULL, ended_at INTEGER, UNIQUE(node_run_id,attempt_no)\n)"
+      },
+      {
+        "type": "table",
+        "name": "node_runs",
+        "tbl_name": "node_runs",
+        "sql": "CREATE TABLE node_runs (\n id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), node_id TEXT NOT NULL, type TEXT NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled','skipped','interrupted')),\n input_ref TEXT, output_ref TEXT, route_json TEXT, skip_reason TEXT, error_json TEXT,\n started_at INTEGER, ended_at INTEGER, UNIQUE(run_id,node_id)\n)"
+      },
+      {
+        "type": "table",
+        "name": "provider_settings",
+        "tbl_name": "provider_settings",
+        "sql": "CREATE TABLE provider_settings (\n id TEXT PRIMARY KEY, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), config_json TEXT NOT NULL,\n models_json TEXT NOT NULL, default_model TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>0), updated_at INTEGER NOT NULL\n)"
+      },
+      {
+        "type": "table",
+        "name": "run_agent_bindings",
+        "tbl_name": "run_agent_bindings",
+        "sql": "CREATE TABLE run_agent_bindings (\n run_id TEXT NOT NULL, node_id TEXT NOT NULL,\n config_id TEXT NOT NULL, config_revision INTEGER NOT NULL CHECK(config_revision > 0),\n provider_revision INTEGER NOT NULL CHECK(provider_revision > 0),\n created_at INTEGER NOT NULL,\n PRIMARY KEY(run_id,node_id),\n FOREIGN KEY(run_id,node_id) REFERENCES node_runs(run_id,node_id) ON DELETE CASCADE,\n FOREIGN KEY(config_id,config_revision) REFERENCES agent_model_config_revisions(config_id,revision)\n)"
+      },
+      {
+        "type": "table",
+        "name": "run_dictionary_bindings",
+        "tbl_name": "run_dictionary_bindings",
+        "sql": "CREATE TABLE run_dictionary_bindings (\n  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(run_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n)"
+      },
+      {
+        "type": "table",
+        "name": "runs",
+        "tbl_name": "runs",
+        "sql": "CREATE TABLE runs (\n id TEXT PRIMARY KEY, workflow_version_id TEXT REFERENCES workflow_versions(id),\n status TEXT NOT NULL CHECK(status IN ('queued','running','cancel_requested','succeeded','failed','cancelled','interrupted')),\n input_ref TEXT NOT NULL, output_ref TEXT, active_node_id TEXT, cancel_requested_at INTEGER, error_json TEXT,\n created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n draft_id TEXT REFERENCES drafts(id), draft_revision INTEGER, snapshot_path TEXT,\n CHECK (\n  (workflow_version_id IS NOT NULL AND draft_id IS NULL AND draft_revision IS NULL AND snapshot_path IS NULL)\n  OR (workflow_version_id IS NULL AND draft_id IS NOT NULL AND draft_revision IS NOT NULL AND draft_revision >= 0 AND snapshot_path IS NOT NULL)\n )\n)"
+      },
+      {
+        "type": "table",
+        "name": "script_test_dictionary_bindings",
+        "tbl_name": "script_test_dictionary_bindings",
+        "sql": "CREATE TABLE script_test_dictionary_bindings (\n  test_id TEXT NOT NULL REFERENCES script_tests(id) ON DELETE CASCADE,\n  dictionary_id TEXT NOT NULL,\n  dictionary_version_id TEXT NOT NULL,\n  keys_json TEXT NOT NULL\n    CHECK(CASE WHEN json_valid(keys_json)\n      THEN json_type(keys_json) = 'array' AND json_array_length(keys_json) > 0 ELSE 0 END),\n  created_at INTEGER NOT NULL,\n  PRIMARY KEY(test_id, dictionary_id),\n  FOREIGN KEY(dictionary_id, dictionary_version_id)\n    REFERENCES dictionary_versions(dictionary_id, id)\n)"
+      },
+      {
+        "type": "table",
+        "name": "script_tests",
+        "tbl_name": "script_tests",
+        "sql": "CREATE TABLE script_tests (\n id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES scripts(id), script_version_id TEXT REFERENCES script_versions(id),\n draft_revision INTEGER, status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','cancelled')),\n input_ref TEXT NOT NULL, output_ref TEXT, error_json TEXT, stdout_ref TEXT, stderr_ref TEXT, exit_code INTEGER,\n duration_ms INTEGER, created_at INTEGER NOT NULL, started_at INTEGER, ended_at INTEGER,\n CHECK ((script_version_id IS NULL AND draft_revision IS NOT NULL AND draft_revision >= 0)\n   OR (script_version_id IS NOT NULL AND draft_revision IS NULL))\n)"
+      },
+      {
+        "type": "table",
+        "name": "script_versions",
+        "tbl_name": "script_versions",
+        "sql": "CREATE TABLE script_versions (\n id TEXT PRIMARY KEY, script_id TEXT NOT NULL REFERENCES scripts(id), version_no INTEGER NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('draft','published')), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),\n entry_file TEXT NOT NULL, timeout_ms INTEGER NOT NULL DEFAULT 300000 CHECK(timeout_ms BETWEEN 1000 AND 300000), input_schema_json TEXT NOT NULL, output_schema_json TEXT NOT NULL,\n source_ref TEXT NOT NULL, content_hash TEXT NOT NULL, validation_json TEXT NOT NULL,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, published_at INTEGER,\n UNIQUE(script_id,version_no)\n)"
+      },
+      {
+        "type": "table",
+        "name": "scripts",
+        "tbl_name": "scripts",
+        "sql": "CREATE TABLE scripts (\n id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',\n runtime TEXT NOT NULL CHECK(runtime IN ('nodejs','shell')),\n status TEXT NOT NULL CHECK(status IN ('draft','published','archived')),\n current_draft_version_id TEXT, current_published_version_id TEXT,\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER\n)"
+      },
+      {
+        "type": "table",
+        "name": "stream_events",
+        "tbl_name": "stream_events",
+        "sql": "CREATE TABLE stream_events (\n stream_type TEXT NOT NULL CHECK(stream_type IN ('run','authoring_turn')), stream_id TEXT NOT NULL, sequence INTEGER NOT NULL,\n event_type TEXT NOT NULL, node_id TEXT, attempt_id TEXT, payload_ref TEXT NOT NULL, created_at INTEGER NOT NULL,\n PRIMARY KEY(stream_type,stream_id,sequence)\n)"
+      },
+      {
+        "type": "table",
+        "name": "workflow_versions",
+        "tbl_name": "workflow_versions",
+        "sql": "CREATE TABLE workflow_versions (\n id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id), version_no INTEGER NOT NULL,\n definition_json TEXT NOT NULL, layout_json TEXT NOT NULL, artifact_path TEXT NOT NULL, content_hash TEXT NOT NULL,\n created_at INTEGER NOT NULL, UNIQUE(workflow_id,version_no)\n)"
+      },
+      {
+        "type": "table",
+        "name": "workflows",
+        "tbl_name": "workflows",
+        "sql": "CREATE TABLE workflows (\n id TEXT PRIMARY KEY, name TEXT NOT NULL, current_version_id TEXT REFERENCES workflow_versions(id),\n created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\n)"
+      },
+      {
+        "type": "trigger",
+        "name": "current_version_owner",
+        "tbl_name": "workflows",
+        "sql": "CREATE TRIGGER current_version_owner BEFORE UPDATE OF current_version_id ON workflows\n WHEN NEW.current_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM workflow_versions WHERE id=NEW.current_version_id AND workflow_id=NEW.id)\n BEGIN SELECT RAISE(ABORT,'version owner mismatch'); END"
+      },
+      {
+        "type": "trigger",
+        "name": "dictionaries_identity_immutable",
+        "tbl_name": "dictionaries",
+        "sql": "CREATE TRIGGER dictionaries_identity_immutable\nBEFORE UPDATE OF id, kind ON dictionaries\nWHEN NEW.id IS NOT OLD.id OR NEW.kind IS NOT OLD.kind\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_IDENTITY_IMMUTABLE');\nEND"
+      },
+      {
+        "type": "trigger",
+        "name": "dictionary_versions_no_delete",
+        "tbl_name": "dictionary_versions",
+        "sql": "CREATE TRIGGER dictionary_versions_no_delete\nBEFORE DELETE ON dictionary_versions\nWHEN NOT EXISTS (SELECT 1 FROM dictionaries WHERE id=OLD.dictionary_id AND deleted_at IS NOT NULL)\n OR EXISTS (SELECT 1 FROM run_dictionary_bindings WHERE dictionary_id=OLD.dictionary_id)\n OR EXISTS (SELECT 1 FROM script_test_dictionary_bindings WHERE dictionary_id=OLD.dictionary_id)\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND"
+      },
+      {
+        "type": "trigger",
+        "name": "dictionary_versions_no_update",
+        "tbl_name": "dictionary_versions",
+        "sql": "CREATE TRIGGER dictionary_versions_no_update\nBEFORE UPDATE ON dictionary_versions\nBEGIN\n  SELECT RAISE(ABORT, 'DICTIONARY_VERSION_IMMUTABLE');\nEND"
+      },
+      {
+        "type": "trigger",
+        "name": "script_draft_owner_insert",
+        "tbl_name": "scripts",
+        "sql": "CREATE TRIGGER script_draft_owner_insert BEFORE INSERT ON scripts\nWHEN NEW.current_draft_version_id IS NOT NULL\n AND NOT EXISTS(SELECT 1 FROM script_versions WHERE id=NEW.current_draft_version_id AND script_id=NEW.id)\nBEGIN SELECT RAISE(ABORT,'script draft owner mismatch'); END"
+      },
+      {
+        "type": "trigger",
+        "name": "script_published_version_immutable",
+        "tbl_name": "script_versions",
+        "sql": "CREATE TRIGGER script_published_version_immutable BEFORE UPDATE ON script_versions\nWHEN OLD.status='published'\nBEGIN SELECT RAISE(ABORT,'published script version is immutable'); END"
+      },
+      {
+        "type": "trigger",
+        "name": "version_immutable",
+        "tbl_name": "workflow_versions",
+        "sql": "CREATE TRIGGER version_immutable BEFORE UPDATE ON workflow_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END"
+      }
+    ]
   }
 };
 export const declarations: MigrationDeclaration[] = [
@@ -1634,6 +1903,21 @@ export const declarations: MigrationDeclaration[] = [
     "questions": []
   },
   {
+    "id": "db.v9-v10",
+    "kind": "database",
+    "from": 9,
+    "to": 10,
+    "requires": [
+      "db.v8-v9"
+    ],
+    "checksum": "3d9800ee0795eab23045285dcb4fcab0e0f1d0a9a3245bd67a2dc4849735b6bb",
+    "summary": "字典软删除标记及受保护的历史版本彻底删除",
+    "affectedResources": [
+      "workbench.db"
+    ],
+    "questions": []
+  },
+  {
     "id": "config.web-bridge.v0-v1",
     "kind": "configuration",
     "from": 0,
@@ -1647,9 +1931,9 @@ export const declarations: MigrationDeclaration[] = [
     "questions": []
   }
 ];
-export const approval = {"status":"approved","reviewer":"用户","date":"2026-11-09","contentDigest":"a9a29eb3bd97386758c0be28012e5cf13b49c7bb44eae3786ed75882af916f58"};
-export const releaseDigest = "4f936ff810c39424d1f99aa7dec4a512561d9d3a724ac47579864ef886e7d9b1";
-export const manifestChecksum = "f23f40e495891f26a405e8f3bd863217c5f416db9c9478cc1a2af67ac1880165";
+export const approval = {"status":"approved","reviewer":"用户","date":"2026-11-11","contentDigest":"b601207d49203b7855f396c82fa653f9674dc5d02764088cb2050cf35aeb565d"};
+export const releaseDigest = "f59b947484f4c93fbeb6be2e7f05df4e3f0ef472408e6ef59d5dab0717dc531e";
+export const manifestChecksum = "5e52b816a648c09161d0ffbed12dcf59b3fc7441ca2896e5668d1ecd3c6b30c9";
 export const releaseFiles: Record<string,string> = {
   "docs/features/2026-11-06-data-migration/execution-protocol.md": "d19242b2745323f1b2d76a23eab5118a990612d02fb6286ccac802632457f67e",
   "docs/features/2026-11-06-data-migration/release-v6.json": "e3560640299e3d0da4b5c5fa6d15c1a29abd9ad15a976b4cf16467bd6a236b8c",
@@ -1657,6 +1941,7 @@ export const releaseFiles: Record<string,string> = {
   "docs/features/2026-11-06-data-migration/schema-approval-v8.json": "598a716d8e7fd04ef5a480254e3f512be5a1095336ddcc9428e3dba8e8c9e604",
   "docs/features/2026-11-06-data-migration/schema-approval.json": "58cbfca6bc7edac4a2a6d3f69d2ccd030241218dbdfc93c05811bc8d845dd099",
   "docs/features/2026-11-06-data-migration/schema-review.md": "d455fb7a86371ceb09b195933c49453db9dee2d7bb932572220aac8c827785b0",
+  "docs/features/2026-11-06-data-migration/sql/db.initialize-v10.sql": "f4d81ddb90de6bc956febee35d082e2dcd7a837001f234068f36f1d798bc6ffa",
   "docs/features/2026-11-06-data-migration/sql/db.initialize-v6.sql": "caa959c5e00a3c70bdd8f5814f28e4c8e7a20697d6c4d74ac14a58d549f2de71",
   "docs/features/2026-11-06-data-migration/sql/db.initialize-v8.sql": "d780513fe40fbd1a52dbf349d93ac747b110e64d9fd0e30f2e9882fce0eaf6b8",
   "docs/features/2026-11-06-data-migration/sql/db.initialize-v9.sql": "bb6f015ac35ac532174871e9acda0fd7eec504fe0e9836c3984e7da2e0245c34",
@@ -1668,9 +1953,11 @@ export const releaseFiles: Record<string,string> = {
   "docs/features/2026-11-06-data-migration/sql/db.v6-v7.sql": "d332b6e9d8db89685066aebb4a0ba0c8532c94ea76c38452a34f4ea280bebfbe",
   "docs/features/2026-11-06-data-migration/sql/db.v7-v8.sql": "8c28338af05c13615e6dccb5c2f69c0536832cb6dccb453018cc31ea4e5bb0ce",
   "docs/features/2026-11-06-data-migration/sql/db.v8-v9.sql": "dbf0019988dad1826bb291091f4750c3afe06273b2b8279d2cb33e3b938f9411",
+  "docs/features/2026-11-06-data-migration/sql/db.v9-v10.sql": "8b56ab63593bf435a0a6ab6b29340a81ac0d23363302e0db8acf9c0dbd12be8e",
   "docs/features/2026-11-06-native-only/design.md": "60e670ce9d75d0f1e3e34820566901b224086c6597bf6b313712cefb61c3ca50",
   "docs/features/2026-11-07-agent-model-configs/design.md": "2235775c1108416f87750cead9b713d3d9ecfc7cddab60c80eeb8f5948c803c0",
-  "docs/features/2026-11-09-dictionaries/schema-approval-v9.json": "c1993a3c420a0037085497d5f35b452bcd749e1ca5be987ed93321a62b760db3",
+  "docs/features/2026-11-09-dictionaries/schema-approval-v10.json": "5541e2ab16e0f800e528afb0434377cca3473c7b87674e4fc3aa660d6df27351",
+  "docs/features/2026-11-09-dictionaries/schema-review-v10.md": "d901e418af4045bff4eee5487f8ea837451db8031abcb46a651a04bafdacfa38",
   "docs/features/2026-11-09-dictionaries/schema-review-v9.md": "6b874c8b082ec71645ed2bc50a6ede9387f446a7b11c84df0169873b6cd569a9",
   "index.html": "2ccf341b5cae427d99b57d4bdbfb30f4d7bf07983b73ef53f358febaf0444f10",
   "package.json": "62e6a332982e5f19bb455f51eef2a48e5f3ac99599c1ab08558f359737ad8138",
@@ -1679,7 +1966,7 @@ export const releaseFiles: Record<string,string> = {
   "scripts/create-migration-integrity.mjs": "2cab61886a21ad9fc401c3cbe7825f3c13d67c00ad96c67358f6f94428accd5c",
   "scripts/dev.mjs": "ccb2207256ae2268a157f05f08f9e3f084eeb06515cc11e6c4a1206507cbfe38",
   "scripts/generate-migration-bundle.mjs": "2f5af42776ba024f4525b150f50f2550f9329b47b393fbd8afee2c0916284679",
-  "scripts/lock-migration-release.mjs": "acb70a43dafa47d589d6d1a10234003e62b25da417508c2c5f33737022386b04",
+  "scripts/lock-migration-release.mjs": "70c96b1051a478895dc9deb63d79faecfa1567d6e5693f248960ad6f05218743",
   "src/authoring/agent-model-configs.ts": "76654c4197a26979fa7c002d1e92e9e4ee97bff75e76f4ff830ff7419b1a7b85",
   "src/authoring/context.ts": "385b7d5271679b03c7bc978f73b70e57986af15309758d9eaad8b422dd50625e",
   "src/authoring/conversations.ts": "b01415085b340f87e0b6354c6004f06ac35b1ddb7b8ecbb0afc961c09399a406",
@@ -1692,7 +1979,7 @@ export const releaseFiles: Record<string,string> = {
   "src/cli/index.ts": "440474d73e3c6d87dda73657a837dedd00f4f99a4ff462fc6c471147394d7f6c",
   "src/config-git/cli.ts": "551d7916360d850e9b28fd3df261e5f8f79f88a48bc82307781b5e87e2d65bc6",
   "src/config-git/coordinator.ts": "70e2c943d81ea78971ee1505fa0b4bb72218bc74491ed884c5694ad53e46e6ac",
-  "src/config-git/dictionaries.ts": "54c4c6f5dbac15522c837632983ebd937d9a27fc5c054eb7e5ca379da9bc7e3c",
+  "src/config-git/dictionaries.ts": "bda007857986a11d650bbc9a7b69334cdce32c88fc7fef3fc4e18962b3042f4a",
   "src/config-git/operations.ts": "63340513d6b9ff31356fc93e6743ce3fbcfb256882967c1e587663f4670ab098",
   "src/config-git/repository.ts": "27ef26433cc6f22f73418db4a946ca3cddf27292edabc1cd406192aa458d35ae",
   "src/config-git/restore-files.ts": "48cf1ed79339e6ef5d70b14207c6f08d575c6f1060d2f1c48fc23b16124b1d1f",
@@ -1705,12 +1992,12 @@ export const releaseFiles: Record<string,string> = {
   "src/config-git/snapshot-validation.ts": "dc2507fd14034d0dd458ba7d33295beb659a885e4ea376e0f47cbe06f5c56bb0",
   "src/config-git/snapshot.ts": "44e3e4a1feaaa8ec4a3c17827e4182ca9758040d47ea427c64801b20fb669857",
   "src/dictionaries/canonical.ts": "68026a2ccf6415c92a969f16a66aae9f34b6a35e6d2432a04870554ede5a7fd7",
-  "src/dictionaries/execution.ts": "f3df95d160aba9f18262b2791aa3e3898bc2603c33f4cbdca0ac70cad305b52b",
+  "src/dictionaries/execution.ts": "f7ae0658779025e66c5fba47dc0c012726c567356f4eb6f439f75a49fcd3206f",
   "src/dictionaries/model.ts": "028fe51dc1e0af00cce5af45fddf992f74643d9677a84f4c6b7533c2eb88531f",
-  "src/dictionaries/references.ts": "6ca7318f56995c1e18c09101d8322a8390c0fdfa080f8caab2a127fbaf3ebc01",
-  "src/dictionaries/routes.ts": "ebaaf4815fba189adf6dfc4e1779b815367890a2b72f290d5f651cebecfdf244",
-  "src/dictionaries/service.ts": "67e753b749154f3d7530721f59dc45cece06d93d909b0c099c3b9c3b4198fdbf",
-  "src/dictionaries/validation.ts": "dae80be85ab01a61b0d67c762c31afe3671a05425d8f04c8e04652853f766acb",
+  "src/dictionaries/references.ts": "b6d7845628e217c3bc5aeecacf7d9e3e4d57c3b3a18d4432a0a5d6dbf80b4aab",
+  "src/dictionaries/routes.ts": "650d2715f68830a96bbc137a06e1c7368c8f4518f51504f03faf94752a148974",
+  "src/dictionaries/service.ts": "1ddfd9f92c5664fcc2db46fa47fa795cfd54135dd34c23cd92e2a9ebc1342f82",
+  "src/dictionaries/validation.ts": "22676450343981be8936c2d17093090fc4a99885bcefca46cc0042949712a2a6",
   "src/domain/dictionaries.ts": "1d3e9e3a4b3620308fa6710d4ebeffb221dbe8221d8ff30612bbb92540949d6c",
   "src/domain/errors.ts": "bc2c4950e109eba16caf62231c321c61f4689c9d54c0e0b4e81a8aaeffa5c7a1",
   "src/domain/models.ts": "3947f43c3212d2770471f008a809d5c79ea99362fd6c1c8169ac74adab855b4e",
@@ -1726,7 +2013,7 @@ export const releaseFiles: Record<string,string> = {
   "src/migrations/definitions.ts": "6a46dcc41808b4b61578f7b70e05de9ca037d7c9357b9845991a7ae31d2ead3d",
   "src/migrations/journal.ts": "cfa41b539c32b6b4c39ee8d60394194c9ace4ffb88d5511c326442e463bc606b",
   "src/migrations/lock.ts": "63f6818b13aee27350e6961dbd6efbf52924477f0c37834aedbd516035b04ac5",
-  "src/migrations/mapping.ts": "6d741a59d75c396957258803c08eb12d70db1da7023a4e11cc17d27c77dcf7fc",
+  "src/migrations/mapping.ts": "e42afeaae6ecb0eb50a8dbc9c16e2ff4f637b228ccf7648ca81040575be4290b",
   "src/migrations/planner.ts": "d3ef6d8c12998f2092105cd4caab3debff4bbbf60c7902430fabf6738296baeb",
   "src/migrations/preview.ts": "130c7eb237a0297ad7c159334e847349d6e441607af9be95b4f396de0853143e",
   "src/migrations/questions.ts": "d2981be8ecd70f69b140f783c2db8fe9af46b7805e3d55fe2dd8d74ac4abc040",
@@ -1736,7 +2023,7 @@ export const releaseFiles: Record<string,string> = {
   "src/migrations/validators.ts": "611ea7c0caef4dae3a98d9c67fe9f4f488567d99bb78c48693af75b538b58354",
   "src/migrations/worker.ts": "abbb9442390c4d4184a134c43e4967551273c2a27f2b228e6f812c986de6ce65",
   "src/persistence/files.ts": "c17a26cceaa7a2aabcda95c20b5fad5eb082213f6afe3bc7aacf513c87b537f3",
-  "src/persistence/schema.ts": "6ffee6c12ccc90ff6b2db02abf120e41aae808689e5d1fc9faddc6bf22affe87",
+  "src/persistence/schema.ts": "9ff9d1b8cfb13b6b6f178d06a220c7ae4b4ab321b7a34b109b43fb9b6a822d7f",
   "src/persistence/script-journal.ts": "d916b54c1997d55532b0384641e81f9059d078d7ccc6ead8168a58fba30954a7",
   "src/persistence/script-maintenance.ts": "9b57195afa356ffc6963c1398295c4512e59e5fa350e289afc8a74be532a00d6",
   "src/persistence/store.ts": "23110286d173e9492f166fd600eb1e1e8fd5716a5fc69182f3699940a3a29346",
@@ -1759,7 +2046,7 @@ export const releaseFiles: Record<string,string> = {
   "src/providers/transport/pending.ts": "c9eecf152a5952ef97e9bbd1ba3179d0aaf5f83222e3a248c836da7164acac28",
   "src/runtime/dictionary-context.ts": "f19ef88f8f672183bf1747f746dd8b8b546f6918f2e714ad8ec5095ddf7f1ead",
   "src/runtime/process.ts": "49845e3313352c3cc55900bb4b8e82a61767e63724f40101eeeacc15242fbdef",
-  "src/runtime/runner.ts": "b085570856b3b9f3ece9e4fada72f7b610880faced7c698ba0bc3063575e1029",
+  "src/runtime/runner.ts": "0b8808c5d45cdd4ba51d11bc3e5361c463128fdf7d0435235d8b33d89d95d031",
   "src/runtime/script-tests.ts": "f0e9d3d4a00892345f650ba2cbed2d01a1486357f57ab8f6b34d1f954616da77",
   "src/runtime/script.ts": "136fa17ba7068cdcea78738b90791c14828f365b068f436a27ef49ce2a1de6c5",
   "src/runtime/workflow-history.ts": "c9d170b979ff4cef1d9dff8c81e4a04e18e3b1c6b02ea54d3d66f463c7fc5e18",
@@ -1787,7 +2074,7 @@ export const releaseFiles: Record<string,string> = {
   "src/web-bridge/config.ts": "c5160335e85cded56a73a5e6bf0ff2b666985de5f0e03c645fe6660d3c615293",
   "src/web-bridge/credential-inputs.ts": "26976dc75e00328c9d14d82c4a950db0d376c01be6fe82225da53ad870775551",
   "src/web-bridge/credential-schema.ts": "146008b27224e2f5e7c53177ee0cfd38b7a4a9b6e00507acc98c04a6bcd33e1f",
-  "src/web-bridge/credentials.ts": "2180feb650b4548d83b5ebd598dbb5db9cd1508b439dcc4a1df351d0f8384428",
+  "src/web-bridge/credentials.ts": "1593af732403058076c1ad0c43e0ec8a5f0455f7a61fdc5a11a584028c468f10",
   "src/web-bridge/execution.ts": "2abf4b936109ab699a4734feec245d32f50316dc0c534b183098b090f152de3f",
   "src/web-bridge/extension/background.js": "e2f358837f01c0b7b0fa2daf4dce0791979c4b9e995c0df3edabe9d874f342e7",
   "src/web-bridge/extension/manifest.json": "8e383e542fcec7c8a0b6fbe97ec6e404c56b4b4d319c8ec128b31a41eabfacd8",
@@ -1831,7 +2118,7 @@ export const releaseFiles: Record<string,string> = {
   "src/web/features/AgentPromptPreview.tsx": "be84b68d7c02437f421278670f61dcf1ed965120304ca74b2db120011a3ce663",
   "src/web/features/ArchiveConversationButton.tsx": "a8b0b293239a779f183d1e45273c0b5aaf445076c10c2495945a088d8d482d63",
   "src/web/features/BridgeAgentPanel.tsx": "75b336d667e1b504e341142de436a394ad6a2abe724f2066c005e27ae86b8443",
-  "src/web/features/BridgeCredentialInputs.tsx": "fdbcaa62d22210d58b6d6c800b3d9d7481fa6965bc8b87c13fbd631418f9648e",
+  "src/web/features/BridgeCredentialInputs.tsx": "279eb748fb4df3689747e43fe0797e72593e788fb8cde9d5f5b480d01bf1ce5e",
   "src/web/features/BridgeExecutionHistory.tsx": "c3997a02996b03501fe38f34f97d7024ca2eb15eb8ea980fe0f17eaa45d91562",
   "src/web/features/BridgeNodeCredentials.tsx": "ba32c1ebe9597501cf3b507566a05ab4e684c77412bd10ee364f76631c93ec5f",
   "src/web/features/BridgeParameterInputs.tsx": "224a17f051a5beebcc47c3816de6232996d8e8343a2b10c759b3a568c0057e02",
@@ -1840,9 +2127,10 @@ export const releaseFiles: Record<string,string> = {
   "src/web/features/ConfigGitMessageAgentSettings.tsx": "ef55f509bf064b50375aa859d1cedc78ef7046ebc703540394fb0d45d45da648",
   "src/web/features/ConfigGitSettings.tsx": "694e3ce09260140fdf3246588b419bc2ef31d102940ee237905d6184e31df0d6",
   "src/web/features/ConversationDrawer.tsx": "f5f777bd31e45f39ff0b4f405386793197bfcbda0d4e72d87cb66c6b59a0fe2a",
+  "src/web/features/DeleteDictionaryButton.tsx": "65526abe69df3b1b720d5b483e30f091aaaff70f382a801ebae896ab1cfe8849",
   "src/web/features/DeleteScriptButton.tsx": "37b91e388366f3b05ebf572dae7db42c4c334507967a6546c43c42ee9931a503",
   "src/web/features/DeleteWorkflowButton.tsx": "c98b76855e29881c92dae1ee5560ed66accc55978265c455516e69be388efeff",
-  "src/web/features/DictionariesPage.tsx": "c51461ced344748dee10a4a53ce9e97f7d92dc75a4be1ab6f64bb769f1cbc0e6",
+  "src/web/features/DictionariesPage.tsx": "afc141a137cffd404c9b52d8400e8a79adb444ee18ebdeffda259ec093ea37c0",
   "src/web/features/DictionaryEditors.tsx": "4d750465ff522254f9f8ff3495ea84cbbdcb53d8d6349fc4dc57fd7317598552",
   "src/web/features/DraftPage.tsx": "f72b21137f35397464d2818d7960a14b64bff8c93ad5ab2b504b8a1dfc339d62",
   "src/web/features/FinalResult.tsx": "178ae2f3d12d481e0d33eb1e7db253786c2ebd554b8fc4a993570b73fe389d32",
@@ -1886,6 +2174,7 @@ export const releaseFiles: Record<string,string> = {
   "tests/fixtures/migrations/config/v1-full.json": "008abcd9e07602a8be426ace85532f1e0fb280a7817825a9acdf53c1f370f9c6",
   "tests/fixtures/migrations/database/provenance.json": "5cd4d9e38c9f45026d11c96da710961b157c22f5d3f8a7434cc4fac53fa8f1ec",
   "tests/fixtures/migrations/database/v1.sql": "3fb10171ffa8f3331bd944e141f20cda01088f944debee353cedc5e49e4dab09",
+  "tests/fixtures/migrations/database/v10.sql": "3a54c945412ca01ee09804acee984b1b00f71af2da99783b70bab2470f6f4a91",
   "tests/fixtures/migrations/database/v2.sql": "af50487c0ffc1b937a0aa71bcb59431878e0f93cc936bae1441037fc9b10cb97",
   "tests/fixtures/migrations/database/v3.sql": "b605ab49bb22d4e32ef626bd9f9b2b21fe8a2a641517dcd62cb5fe270e082b69",
   "tests/fixtures/migrations/database/v4.sql": "6b7422952ffb9dcee55c5dccfbf55b7c501f937cfb721f4717a2720638282c0b",

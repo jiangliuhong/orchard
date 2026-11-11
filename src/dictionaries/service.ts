@@ -43,6 +43,7 @@ interface DictionaryRow {
   revision: number;
   created_at: number;
   updated_at: number;
+  deleted_at: number | null;
 }
 
 interface VersionRow {
@@ -71,6 +72,7 @@ export interface DictionaryListView {
   keyCount: number;
   readiness: DictionaryReadiness;
   missingKeyIds: string[];
+  deletedAt: number | null;
 }
 
 export interface DictionaryDetailView extends DictionaryListView {
@@ -163,6 +165,42 @@ export class DictionaryService {
     return new DictionaryReferenceScanner(this.store).list(id, input);
   }
 
+  /** 删除命令不含条目值，无需解密或访问密钥环。 */
+  remove(id: string, input: { requestId: string; expectedRevision: number; permanent?: boolean; confirmationName?: string }) {
+    check(Number.isInteger(input.expectedRevision) && input.expectedRevision > 0, "INVALID_DICTIONARY", "expectedRevision 必须是正整数", 422);
+    const permanent = input.permanent === true;
+    const request = { dictionaryId: id, expectedRevision: input.expectedRevision, permanent, confirmationName: input.confirmationName ?? null };
+    return this.coordinator.withWrite(() => this.store.command("dictionaries:delete", input.requestId, request, () => {
+      const row = this.requireDictionary(id);
+      check(row.revision === input.expectedRevision, "REVISION_CONFLICT", "字典已被修改，请刷新后重试", 409);
+      check(permanent ? row.deleted_at !== null : row.deleted_at === null, "DICTIONARY_DELETE_STATE", permanent ? "请先将字典移入已删除列表" : "字典已删除", 409);
+      if (permanent) check(input.confirmationName === row.name, "CONFIRMATION_REQUIRED", "请输入完整字典名称以确认彻底删除", 409);
+      const scan = new DictionaryReferenceScanner(this.store).scan(id);
+      check(scan.complete, "REFERENCE_SCAN_INCOMPLETE", "引用扫描不完整，请修复不可读取的工作流或脚本后重试", 409);
+      check(!scan.items.some(item => permanent || item.state !== "history"), "DICTIONARY_REFERENCED",
+        permanent ? "仍有当前或历史工作流、脚本引用，无法彻底删除" : "仍有当前工作流、草稿或脚本引用，请先移除引用", 409);
+      if (permanent) {
+        check(!this.store.one("SELECT 1 FROM run_dictionary_bindings WHERE dictionary_id=? LIMIT 1", id)
+          && !this.store.one("SELECT 1 FROM script_test_dictionary_bindings WHERE dictionary_id=? LIMIT 1", id),
+          "DICTIONARY_BOUND", "仍有运行或测试记录绑定，无法彻底删除", 409);
+        // 双向外键仅在本事务内延迟检查；不关闭外键或移除保护触发器。
+        this.store.exec("PRAGMA defer_foreign_keys = ON");
+        this.store.exec("DELETE FROM dictionary_versions WHERE dictionary_id=?", id);
+        this.store.exec("DELETE FROM dictionaries WHERE id=?", id);
+      } else {
+        const now = Date.now();
+        this.store.exec("UPDATE dictionaries SET deleted_at=?,updated_at=?,revision=revision+1 WHERE id=?", now, now, id);
+      }
+      return { dictionaryId: id, permanent, deleted: true };
+    }));
+  }
+
+  private requireActiveDictionary(id: string): DictionaryRow {
+    const row = this.requireDictionary(id);
+    check(row.deleted_at === null, "DICTIONARY_DELETED", "字典已删除，不能修改或新增引用", 409);
+    return row;
+  }
+
   // ---- 写入 ----
 
   create(input: { requestId: string; name: string; description: string; kind: DictionaryKind; enabled: boolean; operations: unknown }): DictionaryWriteResult {
@@ -184,7 +222,7 @@ export class DictionaryService {
   }
 
   update(id: string, input: { requestId: string; expectedRevision: number; name?: string; description?: string; enabled?: boolean; operations: unknown; confirmationToken?: string }): DictionaryWriteResult {
-    const row = this.requireDictionary(id);
+    const row = this.requireActiveDictionary(id);
     check(Number.isInteger(input.expectedRevision) && input.expectedRevision > 0, "INVALID_DICTIONARY", "expectedRevision 必须是正整数", 422);
     if (input.name !== undefined) validateDictionaryName(input.name);
     if (input.description !== undefined) validateDictionaryDescription(input.description);
@@ -196,7 +234,7 @@ export class DictionaryService {
   }
 
   private applyUpdate(id: string, input: { requestId: string; expectedRevision: number; name?: string; description?: string; enabled?: boolean; operations: unknown; confirmationToken?: string }, operations: DictionaryOperation[]): DictionaryWriteResult {
-    const row = this.requireDictionary(id);
+    const row = this.requireActiveDictionary(id);
     check(row.revision === input.expectedRevision, "REVISION_CONFLICT", "字典已被并发修改，请刷新后重试", 409);
     const version = this.requireVersion(id, row.current_version_id);
     const entries = this.buildEntries(row.kind, id, parseEntries(row.kind, version.entries_json), operations);
@@ -277,7 +315,7 @@ export class DictionaryService {
   reEncryptionPreview(id: string, input: { expectedRevision: number }): ReEncryptionPreviewView {
     // 只读预览：不进入 withWrite，避免自身递增配置代次导致 token 自失效；
     // token 绑定读取时的基线，预览后任何配置写入或密钥变化都会使执行侧校验失败。
-    const row = this.requireDictionary(id);
+    const row = this.requireActiveDictionary(id);
     check(row.kind === "encrypted", "DICTIONARY_KIND_MISMATCH", "仅加密字典支持重新加密", 422);
     check(row.revision === input.expectedRevision, "REVISION_CONFLICT", "字典已被并发修改，请刷新后重试", 409);
     const version = this.requireVersion(id, row.current_version_id);
@@ -307,7 +345,7 @@ export class DictionaryService {
     return this.coordinator.withWrite(() => {
       const requestHmac = this.secrets.sensitiveDigest("dictionary-secret:re-encrypt", { dictionaryId: id, expectedRevision: input.expectedRevision, token: input.token });
       return this.store.sensitiveCommand("dictionary-secret:re-encrypt", input.requestId, requestHmac, () => {
-        const row = this.requireDictionary(id);
+        const row = this.requireActiveDictionary(id);
         check(row.kind === "encrypted", "DICTIONARY_KIND_MISMATCH", "仅加密字典支持重新加密", 422);
         check(row.revision === input.expectedRevision, "REVISION_CONFLICT", "字典已被并发修改，请刷新后重试", 409);
         const version = this.requireVersion(id, row.current_version_id);
@@ -347,7 +385,7 @@ export class DictionaryService {
 
   // ---- 读取与视图 ----
 
-  list(input: { kind?: DictionaryKind; enabled?: boolean; readiness?: DictionaryReadiness; limit?: number; cursor?: string } = {}): { items: DictionaryListView[]; nextCursor: string | null } {
+  list(input: { deleted?: boolean; kind?: DictionaryKind; enabled?: boolean; readiness?: DictionaryReadiness; limit?: number; cursor?: string } = {}): { items: DictionaryListView[]; nextCursor: string | null } {
     const limit = input.limit === undefined ? PAGE_DEFAULT_LIMIT : input.limit;
     check(Number.isInteger(limit) && limit >= 1 && limit <= PAGE_MAX_LIMIT, "INVALID_DICTIONARY", "limit 必须在 1 到 100 之间", 422);
     let cursor: { updatedAt: number; id: string } | null = null;
@@ -356,7 +394,7 @@ export class DictionaryService {
       check(Number.isSafeInteger(decoded.updatedAt) && typeof decoded.id === "string", "INVALID_CURSOR", "分页游标无效", 400);
       cursor = { updatedAt: decoded.updatedAt as number, id: decoded.id };
     }
-    const conditions: string[] = [];
+    const conditions: string[] = [input.deleted ? "d.deleted_at IS NOT NULL" : "d.deleted_at IS NULL"];
     const params: (string | number)[] = [];
     if (input.kind !== undefined) { conditions.push("d.kind = ?"); params.push(validateDictionaryKind(input.kind)); }
     if (input.enabled !== undefined) { conditions.push("v.enabled = ?"); params.push(input.enabled ? 1 : 0); }
@@ -424,7 +462,7 @@ export class DictionaryService {
     return {
       id: row.id, name: row.name, description: version.description, kind: row.kind, enabled: version.enabled === 1,
       revision: row.revision, currentVersionId: version.id, createdAt: row.created_at, updatedAt: row.updated_at,
-      keyCount: Object.keys(entries).length, ...availability,
+      keyCount: Object.keys(entries).length, deletedAt: row.deleted_at, ...availability,
     };
   }
 

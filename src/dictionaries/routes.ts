@@ -49,7 +49,7 @@ export function registerDictionaryRoutes(app: FastifyInstance, dictionaries: Dic
   });
   app.addHook("preValidation", async request => {
     const allowed = request.routeOptions.url === "/api/dictionaries" && request.method === "GET"
-      ? ["kind", "enabled", "readiness", "limit", "cursor"]
+      ? ["kind", "enabled", "readiness", "limit", "cursor", "deleted"]
       : request.routeOptions.url === "/api/dictionaries/:id/versions" ? ["limit", "cursor"]
       : request.routeOptions.url === "/api/dictionaries/:id/references" ? ["view", "limit", "cursor"] : [];
     check(Object.keys(request.query as object).every(key => allowed.includes(key)), "INVALID_REQUEST", "不支持的查询参数", 400);
@@ -70,12 +70,14 @@ export function registerDictionaryRoutes(app: FastifyInstance, dictionaries: Dic
   const operationItem = { type: "object", properties: { op: { type: "string", enum: ["set", "remove"] }, key: { type: "string" }, type: { type: "string", enum: ["string", "number", "boolean", "json"] }, value: {} }, additionalProperties: false };
   const expectedGeneration = { type: "integer", minimum: 0 };
   const operationsSchema = { type: "array", maxItems: 600, items: operationItem };
-  app.get<{ Querystring: { kind?: string; enabled?: string; readiness?: string; limit?: string; cursor?: string } }>("/api/dictionaries", async request => {
-    const { kind, enabled, readiness, limit, cursor: page } = request.query;
+  app.get<{ Querystring: { deleted?: string; kind?: string; enabled?: string; readiness?: string; limit?: string; cursor?: string } }>("/api/dictionaries", async request => {
+    const { kind, enabled, readiness, limit, cursor: page, deleted } = request.query;
+    check(deleted === undefined || ["true", "false"].includes(deleted), "INVALID_REQUEST", "删除状态无效");
     check(kind === undefined || ["plain", "encrypted"].includes(kind), "INVALID_REQUEST", "字典类型无效");
     check(enabled === undefined || ["true", "false"].includes(enabled), "INVALID_REQUEST", "启用状态无效");
     check(readiness === undefined || ["ready", "missing-key", "authentication-failed", "keyring-unavailable"].includes(readiness), "INVALID_REQUEST", "就绪状态无效");
     return dictionaries.list({
+      deleted: deleted === "true",
       kind: kind as "plain" | "encrypted" | undefined,
       enabled: enabled === undefined ? undefined : enabled === "true",
       readiness: readiness as DictionaryReadiness | undefined,
@@ -93,6 +95,14 @@ export function registerDictionaryRoutes(app: FastifyInstance, dictionaries: Dic
     const view = dictionaries.get(request.params.id);
     check(view, "NOT_FOUND", "字典不存在", 404);
     return view;
+  });
+  app.delete<{ Params: { id: string } }>("/api/dictionaries/:id", async request => {
+    requireSensitiveOrigin(request, apiAuth);
+    const input = body<{ requestId: string; expectedRevision: number; permanent?: boolean; confirmationName?: string }>(request.body, {
+      requestId, expectedRevision: { type: "integer", minimum: 1 }, permanent: { type: "boolean" },
+      confirmationName: { type: "string", maxLength: 100 },
+    }, ["requestId", "expectedRevision"]);
+    return dictionaries.remove(request.params.id, input);
   });
   app.patch<{ Params: { id: string } }>("/api/dictionaries/:id", async (request, reply) => {
     const input = body<{ requestId: string; expectedRevision: number; name?: string; description?: string; enabled?: boolean; operations?: unknown; confirmationToken?: string }>(request.body, {

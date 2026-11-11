@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sql, initializationSql } from "../src/migrations/frozen.js";
-import { MIGRATE_V8_TO_V9, SCHEMA } from "../src/persistence/schema.js";
+import { MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_VERSION, SCHEMA } from "../src/persistence/schema.js";
 import { TestStore } from "./helpers.js";
 import type { TestContext } from "node:test";
 
@@ -14,9 +14,10 @@ const DICTIONARY_TABLES = ["dictionaries", "dictionary_versions", "run_dictionar
 
 test("registered dictionary migration SQL and initialization match the reviewed constants", () => {
   assert.equal(sql[8], MIGRATE_V8_TO_V9);
+  assert.equal(sql[9], MIGRATE_V9_TO_V10);
   assert.equal(initializationSql, SCHEMA);
   assert.equal(SCHEMA.includes("run_dictionary_bindings"), true);
-  assert.match(SCHEMA, /PRAGMA user_version = 9;/);
+  assert.match(SCHEMA, /PRAGMA user_version = 10;/);
 });
 
 test("fresh v9 database keeps new tables empty with active integrity triggers", (t: TestContext) => {
@@ -24,11 +25,11 @@ test("fresh v9 database keeps new tables empty with active integrity triggers", 
   t.after(() => rmSync(root, { force: true, recursive: true }));
   const store = new TestStore(root);
   t.after(() => store.close());
-  assert.equal(Number(store.one("PRAGMA user_version")!.user_version), 9);
+  assert.equal(Number(store.one("PRAGMA user_version")!.user_version), SCHEMA_VERSION);
   for (const table of DICTIONARY_TABLES) assert.equal(Number(store.one(`SELECT count(*) AS n FROM ${table}`)!.n), 0);
   // 指针回切：新增版本后仅 UPDATE 对象并递增 revision，不改动旧版本 version_no。
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES(?,?,?,'v1',1,?,?)", "dict-1", "订单服务", "plain", 1000, 1000);
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES(?,?,?,'v1',1,?,?)", "dict-1", "订单服务", "plain", 1000, 1000);
     store.exec("INSERT INTO dictionary_versions VALUES('v1','dict-1',1,'订单服务','','plain',1,'{}',?,1000)", "a".repeat(64));
   });
   store.transaction(() => {
@@ -46,15 +47,15 @@ test("fresh v9 database keeps new tables empty with active integrity triggers", 
   expectAbort("UPDATE dictionaries SET id='dict-x' WHERE id='dict-1'", "DICTIONARY_IDENTITY_IMMUTABLE");
   // NOCASE 命名冲突：重命名与插入均拒绝；未 trim 名称拒绝。
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES(?,?,?,'v3',1,?,?)", "dict-2", "QIDAN", "plain", 3000, 3000);
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES(?,?,?,'v3',1,?,?)", "dict-2", "QIDAN", "plain", 3000, 3000);
     store.exec("INSERT INTO dictionary_versions VALUES('v3','dict-2',1,'QIDAN','','plain',1,'{}',?,3000)", "c".repeat(64));
   });
   const expectReject = (statement: string) => {
     assert.throws(() => store.exec(statement), /constraint failed/i);
   };
   expectReject("UPDATE dictionaries SET name='订单服务' WHERE id='dict-2'");
-  expectReject("INSERT INTO dictionaries VALUES('dict-3','订单服务','plain','v9',1,1,1)");
-  expectReject("INSERT INTO dictionaries VALUES('dict-4',' 前导空格','plain','v4',1,1,1)");
+  expectReject("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('dict-3','订单服务','plain','v9',1,1,1)");
+  expectReject("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('dict-4',' 前导空格','plain','v4',1,1,1)");
   // 跨表 kind 一致外键。
   expectReject("INSERT INTO dictionary_versions VALUES('v4','dict-2',2,'QIDAN','','encrypted',1,'{}',?,3000)".replace("?,3000", `'${"d".repeat(64)}',3000`));
   assert.equal(store.db.prepare("PRAGMA integrity_check").get()!.integrity_check, "ok");
@@ -68,14 +69,14 @@ test("deferred current pointer foreign key allows same-transaction creation and 
   t.after(() => store.close());
   // 同一事务创建对象与首版，提交时延迟外键满足。
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES(?,?,?,'v-ok',1,?,?)", randomUUID(), "同时创建", "plain", Date.now(), Date.now());
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES(?,?,?,'v-ok',1,?,?)", randomUUID(), "同时创建", "plain", Date.now(), Date.now());
     store.exec("INSERT INTO dictionary_versions VALUES('v-ok',?,?,?,?,'plain',1,'{}',?,?)",
       store.one<{ id: string }>("SELECT id FROM dictionaries WHERE name='同时创建'")!.id, 1, "同时创建", "", "e".repeat(64), Date.now());
   });
   assert.equal(store.one("SELECT id FROM dictionary_versions WHERE id='v-ok'")!.id, "v-ok");
   // 悬空指针回滚且不残留。
   assert.throws(() => store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES('dangling','悬空','plain','vx',1,1,1)");
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('dangling','悬空','plain','vx',1,1,1)");
   }), /FOREIGN KEY/);
   assert.equal(store.one("SELECT id FROM dictionaries WHERE id='dangling'"), undefined);
   // 对象名称与版本名称不一致在提交时拒绝（事务内不得改写版本，触发器先行保护）。
@@ -98,7 +99,7 @@ test("v8 databases upgrade in place to v9 preserving rows and keeping new tables
   db.close();
   const store = new TestStore(root);
   t.after(() => store.close());
-  assert.equal(Number(store.one("PRAGMA user_version")!.user_version), 9);
+  assert.equal(Number(store.one("PRAGMA user_version")!.user_version), SCHEMA_VERSION);
   const provider = store.one<{ id: string; revision: number }>("SELECT id, revision FROM provider_settings WHERE id='legacy-provider'");
   assert.equal(provider!.id, "legacy-provider");
   assert.equal(provider!.revision, 1);
@@ -108,7 +109,7 @@ test("v8 databases upgrade in place to v9 preserving rows and keeping new tables
   assert.equal(store.all("PRAGMA foreign_key_check").length, 0);
   // 升级后的库可立即写入字典并通过触发器保护。
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES('post-upgrade','升级后','encrypted','pv1',1,?,?)", now, now);
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('post-upgrade','升级后','encrypted','pv1',1,?,?)", now, now);
     store.exec("INSERT INTO dictionary_versions VALUES('pv1','post-upgrade',1,'升级后','','encrypted',1,'{}',?,?)", "f".repeat(64), now);
   });
   assert.throws(() => store.exec("DELETE FROM dictionary_versions WHERE id='pv1'"), /DICTIONARY_VERSION_IMMUTABLE/);
@@ -121,7 +122,7 @@ test("binding tables enforce run/test ownership and cascade on test deletion", (
   t.after(() => store.close());
   const now = Date.now();
   store.transaction(() => {
-    store.exec("INSERT INTO dictionaries VALUES('dict-c','凭据字典','encrypted','cv1',1,?,?)", now, now);
+    store.exec("INSERT INTO dictionaries(id,name,kind,current_version_id,revision,created_at,updated_at) VALUES('dict-c','凭据字典','encrypted','cv1',1,?,?)", now, now);
     store.exec("INSERT INTO dictionary_versions VALUES('cv1','dict-c',1,'凭据字典','','encrypted',1,'{}',?,?)", "9".repeat(64), now);
     store.exec("INSERT INTO scripts VALUES('script-c','级联脚本','','nodejs','draft',NULL,NULL,?,?,NULL)", now, now);
     store.exec("INSERT INTO script_tests VALUES('test-c','script-c',NULL,0,'queued','{}',NULL,NULL,NULL,NULL,NULL,NULL,?,NULL,NULL)", now);

@@ -15,12 +15,9 @@ import { ConversationService, titleFromPrompt } from "./conversations.js";
 import { ACTIVE_TURN_STATUSES } from "../domain/turns.js";
 import { buildAuthoringContext, composeAuthoringPrompt, type ContextHistoryMessage } from "./context.js";
 
-export const AUTHORING_SCHEMA = {
-  type: "object", required: ["summary", "changes"], properties: {
-    summary: { type: "string", maxLength: 10000 },
-    changes: { type: "array", maxItems: 100, items: { type: "object", required: ["operation", "path"], properties: { operation: { enum: ["create", "update", "delete"] }, path: { type: "string" }, content: { type: "string" } }, additionalProperties: false } },
-  }, additionalProperties: false,
-};
+import { AUTHORING_SCHEMA } from "./schema.js";
+import { workflowResourceMetadata } from "./resources.js";
+export { AUTHORING_SCHEMA } from "./schema.js";
 
 /** AUTHORING_SCHEMA 的 changes 项形状。 */
 export interface AuthoringChange { operation: string; path: string; content?: string }
@@ -186,10 +183,15 @@ export class AuthoringService {
         });
         const snapshot = this.snapshot(id);
         const previous = this.store.turnsOfConversation(conversation.id).at(-1);
+        const previousEvent = previous?.status === "succeeded"
+          ? this.store.stream("authoring_turn", previous.id, this.store.lastSequence("authoring_turn", previous.id) - 1)[0]
+          : undefined;
+        const appliedRevision = previousEvent?.type === "turn.succeeded"
+          ? (previousEvent.payload as { appliedRevision?: number }).appliedRevision ?? null : null;
         const previousOutcome = previous ? {
           turnId: previous.id,
           status: previous.status as import("../domain/types.js").AuthoringTurnStatus,
-          appliedRevision: previous.status === "succeeded" ? (previous.baseRevision === this.store.draft(id).revision ? this.store.draft(id).revision : null) : null,
+          appliedRevision,
           errorCode: previous.error?.code ?? null,
         } : null;
         const rebuilding = conversation.mode === "multi" && conversation.rebuildFromId !== null && conversation.backendRef === null;
@@ -199,6 +201,7 @@ export class AuthoringService {
         const context = buildAuthoringContext({
           kind: conversation.backendRef === null ? "initial" : "continuation", draftId: id, baseRevision: input.expectedRevision,
           files: snapshot.files, availableDictionaries: dictionaryDependencyMetadata(this.store), providers: this.providers.views(), modelConfigs: this.providers.modelConfigs.list(true).items, previousOutcome,
+          ...workflowResourceMetadata(this.store),
           history, historySource: rebuilding ? "explicit_rebuild" : undefined, userRequest: input.prompt,
         });
         prepared = { prompt: composeAuthoringPrompt(this.providers.views(), context), files: snapshot.files };

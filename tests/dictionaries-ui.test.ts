@@ -54,6 +54,48 @@ test("字典列表：有无备注均展示字典类型和键数量", async () =>
   }
 });
 
+test("字典删除交互：取消不发请求，失败保留弹窗，成功刷新并可彻底删除", async () => {
+  let deleted = false, purged = false, fail = true;
+  const requests: Record<string, unknown>[] = [];
+  const item = { id: "dict", name: "测试配置", kind: "plain", description: "", keyCount: 0, enabled: true, updatedAt: 1 };
+  globalThis.fetch = (async (url, options) => {
+    if (options?.method === "DELETE") {
+      const body = JSON.parse(String(options.body)); requests.push(body);
+      if (fail) return Response.json({ message: "仍有当前工作流引用" }, { status: 409 });
+      if (body.permanent) purged = true; else deleted = true;
+      return Response.json({ deleted: true });
+    }
+    const inTrash = String(url).includes("deleted=true");
+    return Response.json({ items: !purged && deleted === inTrash ? [{ ...item, revision: deleted ? 2 : 1, deletedAt: deleted ? 10 : null }] : [], nextCursor: null });
+  }) as typeof fetch;
+  render(createElement(DictionariesPage));
+  fireEvent.click(await screen.findByRole("button", { name: "删除字典 测试配置" }));
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  assert.equal(requests.length, 0);
+  fireEvent.click(screen.getByRole("button", { name: "删除字典 测试配置" }));
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await screen.findByText("仍有当前工作流引用");
+  assert.ok(screen.getByRole("dialog"));
+  fail = false;
+  fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => assert.ok(!screen.queryByRole("dialog")));
+  await screen.findByText("还没有字典");
+  assert.equal(requests[0]!.requestId, requests[1]!.requestId);
+  assert.equal(requests[1]!.expectedRevision, 1);
+  fireEvent.click(screen.getByRole("button", { name: "已删除" }));
+  fireEvent.click(await screen.findByRole("button", { name: "彻底删除 测试配置" }));
+  const confirm = screen.getByRole("button", { name: "确认彻底删除" }) as HTMLButtonElement;
+  assert.equal(confirm.disabled, true);
+  fireEvent.change(screen.getByLabelText("输入完整字典名称确认"), { target: { value: "错误" } });
+  assert.equal(confirm.disabled, true);
+  fireEvent.change(screen.getByLabelText("输入完整字典名称确认"), { target: { value: "测试配置" } });
+  fireEvent.click(confirm);
+  await screen.findByText("没有已删除字典");
+  assert.equal(requests[2]!.permanent, true);
+  assert.equal(requests[2]!.confirmationName, "测试配置");
+  assert.equal(requests[2]!.expectedRevision, 2);
+});
+
 const unconfigured = { configured: false, generation: 0, activeKeyId: null, readOnly: false, keys: [], encryptedDictionaries: 0, missingKeyIds: [] };
 const configured = (generation = 1, activeKeyId = "key-aaaaaaaa") => ({
   configured: true, generation, activeKeyId, readOnly: false,

@@ -11,7 +11,7 @@ export function dictionaryCredentials(store: Store, secrets: SecretsService): Cr
     try {
       const row = store.one<{ kind: string; enabled: number; entries_json: string }>(
         `SELECT d.kind, v.enabled, v.entries_json FROM dictionaries d
-         JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=?`, dictionaryId,
+         JOIN dictionary_versions v ON v.id=d.current_version_id AND v.dictionary_id=d.id WHERE d.id=? AND d.deleted_at IS NULL`, dictionaryId,
       );
       check(row && (row.kind === "plain" || row.kind === "encrypted") && row.enabled === 1, "CREDENTIAL_UNAVAILABLE", "凭据字典不存在或已停用");
       const entries = JSON.parse(row.entries_json) as DictionaryEntries;

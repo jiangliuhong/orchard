@@ -39,4 +39,6 @@
 
 - [Git 项目工作区、Agent 分析与设置存储空间查看（已实现，验证记录见 feature）](../features/2026-11-10-git-project-agent/design.md)
 
+- [统一 Agent 单轮/多轮、知识与工作区（设计中，待评审）](../features/2026-11-11-unified-agent-runtime/design.md)
+
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

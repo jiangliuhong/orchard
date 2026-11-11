@@ -10,7 +10,7 @@ import { object, array, string, bool, encodeSnapshotId, parseSnapshotJson } from
 
 type Row = Record<string, any>;
 export function exportDictionaries(store: Store): PortableDictionary[] {
-  return store.all<Row>("SELECT * FROM dictionaries ORDER BY id").map(d => {
+  return store.all<Row>("SELECT * FROM dictionaries WHERE deleted_at IS NULL ORDER BY id").map(d => {
     const v = store.one<Row>("SELECT * FROM dictionary_versions WHERE dictionary_id=? AND id=?", d.id, d.current_version_id)!;
     return { id: d.id, kind: d.kind, currentVersionId: v.id, versions: [{ id: v.id, dictionaryId: d.id, name: v.name, description: v.description, kind: v.kind, enabled: !!v.enabled, entries: JSON.parse(v.entries_json) }] };
   });
@@ -94,6 +94,7 @@ export function dictionaryChanged(store: Store, d: PortableDictionary) {
 export function prepareDictionaries(store: Store, dictionaries: PortableDictionary[]) {
   for (const d of dictionaries) {
     const previous = store.one<Row>("SELECT * FROM dictionaries WHERE id=?", d.id);
+    check(!previous || previous.deleted_at === null, "DICTIONARY_DELETED", "字典已删除，不能通过导入静默恢复；请先处理已删除字典", 409);
     check(!previous || previous.kind === d.kind, "DICTIONARY_KIND_MISMATCH", "字典类型不可变", 409);
     check(!store.one("SELECT id FROM scripts WHERE id=?", d.id) && !store.one("SELECT id FROM workflows WHERE id=?", d.id) && !store.one("SELECT id FROM provider_settings WHERE id=?", d.id) && !store.one("SELECT id FROM agent_model_configs WHERE id=?", d.id), "IDENTITY_CONFLICT", "字典对象身份冲突", 409);
     const current = d.versions.find(v => v.id === d.currentVersionId)!;

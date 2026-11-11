@@ -22,7 +22,7 @@ function DictionaryKeys({ dictionaryId, disabled, onSelect, acceptedTypes = ["st
       <ErrorNotice message={error} />
       {error && <Button variant="outline" onClick={reload}>重试</Button>}
       {!data && !error && <Loading />}
-      {data && (!data.enabled || data.readiness !== "ready") ? <p role="alert">字典已禁用或不可用，请检查字典设置。</p> : data && <>
+      {data && (data.deletedAt != null || !data.enabled || data.readiness !== "ready") ? <p role="alert">{data.deletedAt != null ? "字典已删除，无法选择引用。" : "字典已禁用或不可用，请检查字典设置。"}</p> : data && <>
         {keys.map(([key, entry]) => <button type="button" className="bridge-dictionary-item" key={key}
           disabled={disabled || !acceptedTypes.includes(entry.type)} onClick={() => onSelect(key)}>
           <span>{key}</span>{!acceptedTypes.includes(entry.type) && <small>{acceptedTypes.length === 1 && acceptedTypes[0] === "string" ? "仅支持字符串" : `类型不符（${entry.type}）`}</small>}

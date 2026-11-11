@@ -4,7 +4,7 @@ import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {canonical,entryChecksum,contentDigest,sha256,manifestPath,migrationFiles,releaseFiles,historicalRelease} from './check-migration-manifest.mjs';
 import {generateBundle} from './generate-migration-bundle.mjs';
-const root=fileURLToPath(new URL('../',import.meta.url)),approvalPath='docs/features/2026-11-09-dictionaries/schema-approval-v9.json';
+const root=fileURLToPath(new URL('../',import.meta.url)),approvalPath='docs/features/2026-11-09-dictionaries/schema-approval-v10.json';
 const old=JSON.parse(readFileSync(resolve(root,manifestPath),'utf8'));
 if(old.status==='release_locked'&&!process.argv.includes('--refresh-unpublished'))throw new Error('Release is locked; unpublished development refresh requires --refresh-unpublished');
 const approved=JSON.parse(readFileSync(resolve(root,approvalPath),'utf8'));

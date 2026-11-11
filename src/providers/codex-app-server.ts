@@ -389,7 +389,7 @@ export class CodexAppServerProvider implements SessionProvider {
             if (typeof item.phase === "string") buffer.phase = item.phase;
           }
         }
-        if (status === "completed") { turn.finish(undefined, this.assembleFinalText(turn, session.project)); return; }
+        if (status === "completed") { turn.finish(undefined, this.assembleFinalText(turn)); return; }
         if (status === "failed") {
           const message = typeof backendTurn?.error === "string" ? backendTurn.error : String(backendTurn?.error?.message ?? "Codex 轮次失败");
           turn.finish(new AppError("PROVIDER_FAILED", message));
@@ -409,15 +409,12 @@ export class CodexAppServerProvider implements SessionProvider {
   }
 
   /** 从当前轮的最终 assistant 消息组装结果；不从推理摘要或 stderr 抽取 JSON。 */
-  private assembleFinalText(turn: TurnState, project: boolean): string {
+  private assembleFinalText(turn: TurnState): string {
     const items = [...turn.items.values()].sort((a, b) => a.order - b.order);
-    if (project) {
-      // 工具前的 commentary 不属于最终 JSON；旧协议无 phase 时取最后一条消息。
-      const final = items.filter(item => item.phase === "final_answer").at(-1)
-        ?? items.filter(item => item.phase !== "commentary").at(-1);
-      return final ? final.final ?? final.deltas : "";
-    }
-    return items.map(item => item.final ?? item.deltas).join("");
+    // 所有场景的 commentary 都仅用于展示，不属于最终结果；旧协议无 phase 时取最后一条消息。
+    const final = items.filter(item => item.phase === "final_answer").at(-1)
+      ?? items.filter(item => item.phase !== "commentary").at(-1);
+    return final ? final.final ?? final.deltas : "";
   }
 
   async sendTurn(handle: ProviderSessionHandle, request: SessionTurnRequest): Promise<ProviderResult> {

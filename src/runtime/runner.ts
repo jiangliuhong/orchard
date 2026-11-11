@@ -32,7 +32,7 @@ export class GraphRunner {
     const fixed = runId ? new DictionaryExecution(this.store).metadata("run", runId) : undefined;
     for (const node of workflow.nodes) if (node.type === "web-bridge") for (const ref of Object.values(node.config.credentialBindings ?? {})) {
       const current = fixed ? undefined : this.store.one<{ kind: "plain" | "encrypted"; entries_json: string }>(
-        "SELECT d.kind,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=?", ref.dictionaryId);
+        "SELECT d.kind,v.entries_json FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=? AND d.deleted_at IS NULL", ref.dictionaryId);
       const kind = fixed ? fixed.find(b => b.dictionaryId === ref.dictionaryId)?.kind : current?.kind;
       check(kind, "DICTIONARY_NOT_FOUND", "凭据字典不存在", 422);
       if (current) {

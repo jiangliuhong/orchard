@@ -17,6 +17,7 @@ export function verifyMapping(db:DatabaseSync,before:ReturnType<typeof captureRo
   const original=before[table]??[];
   const expected=original.map(row=>{
    const target={...row};
+   if(table==='dictionaries'&&version<10&&targetVersion>=10)target.deleted_at=null;
    if(table==='runs'&&version===1&&targetVersion>=2)Object.assign(target,{draft_id:null,draft_revision:null,snapshot_path:null});
    if(['authoring_turns','authoring_messages'].includes(table)&&version<3&&targetVersion>=3)target.conversation_id=null;
    if(table==='authoring_turns'&&version<3&&targetVersion>=3)Object.assign(target,{backend_turn_id:null,connection_generation:null,submission_state:'not_sent',input_ref:null,result_ref:null});
