@@ -1,4 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { WORKSPACE_MAINTENANCE_SCHEMA } from "../src/agent/workspace-schema.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -8,6 +10,7 @@ import { DirectoryLease } from "../src/migrations/lock.js";
 import { initializeData, execute, baseline } from "../src/migrations/runner.js";
 import { plan } from "../src/migrations/planner.js";
 import { present, safe, writeJson, readJson } from "../src/migrations/journal.js";
+import { defaultBridgeConfig } from "../src/migrations/config.js";
 import type { Job } from "../src/migrations/types.js";
 export class TestStore extends BusinessStore {
   private lease: DirectoryLease;
@@ -31,6 +34,30 @@ export class TestStore extends BusinessStore {
     } catch (error) { lease.release(); throw error; }
   }
   override close() { super.close(); if (present(safe(this.root, "workbench.lock"))) this.lease.release(); }
+}
+
+/** Exercises the preserved pre-upgrade routes against their actual v10 schema. */
+export class LegacyTestStore extends BusinessStore {
+  protected override get expectedSchemaVersion(): number { return 10; }
+  constructor(root: string) {
+    const lease = DirectoryLease.acquire(root);
+    try {
+      const file = safe(root, "workbench.db");
+      if (!present(file)) {
+        const db = new DatabaseSync(file);
+        try { db.exec(readFileSync(new URL("./fixtures/migrations/database/v10.sql", import.meta.url), "utf8")); }
+        finally { db.close(); }
+        writeJson(safe(root, "config/web-bridge.json"), defaultBridgeConfig());
+      }
+      super(root, lease);
+      this.recoverBusiness();
+    } catch (error) { lease.release(); throw error; }
+  }
+  override close() {
+    if (!this.db.isOpen) return;
+    super.close();
+    if (present(safe(this.root, "workbench.lock"))) this.directoryLease.release();
+  }
 }
 import { ProviderRegistry, type AgentProvider, type TurnRequest, type ProviderResult } from "../src/providers/registry.js";
 import { AuthoringService } from "../src/authoring/service.js";
@@ -88,14 +115,20 @@ export function exampleFiles(id = "example"): SourceFiles {
     "scripts/c.sh": "#!/bin/bash\nread -r input\nprintf 'executed\\n'\n",
   };
 }
-export function setup(t: TestContext, options: { models?: boolean } = {}) {
-  const root = temporary(t), store = new TestStore(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
+function setupWithFixture<T extends BusinessStore>(t: TestContext, options: { models?: boolean }, Fixture: new (root: string) => T) {
+  const root = temporary(t), store = new Fixture(root), provider = new TestProvider(), providers = new ProviderRegistry(store).register(provider, process.execPath);
   providers.update(provider.id, { enabled: true, defaultModel: "test-model", ...(options.models === false ? {} : { models: [{ id: "test-model", name: "Test", source: "configured", enabled: true }] }) });
   const now = Date.now();
   store.exec("INSERT INTO agent_model_configs VALUES('test-agent-config','测试分析','',?,'test-model',1,1,?,?)", provider.id, now, now);
   store.exec("INSERT INTO agent_model_config_revisions VALUES('test-agent-config',1,'测试分析','',?,'test-model',1,?)", provider.id, now);
   const authoring = new AuthoringService(store, providers);
   return { root, store, provider, providers, authoring };
+}
+export function setup(t: TestContext, options: { models?: boolean } = {}) {
+  return setupWithFixture(t, options, TestStore);
+}
+export function setupLegacy(t: TestContext, options: { models?: boolean } = {}) {
+  return setupWithFixture(t, options, LegacyTestStore);
 }
 export async function publishExample(authoring: AuthoringService) {
   const draft = await authoring.create(undefined, randomUUID());
@@ -107,4 +140,13 @@ export async function until<T>(check: () => T | Promise<T>, timeout = 5000): Pro
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { const value = await check(); if (value) return value as Exclude<T, false | null | undefined>; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error("Timed out");
+}
+
+/** Prepare isolated maintenance fixtures that seed their own declaration and projection rows. */
+export function prepareMaintenanceFixture(store: BusinessStore) {
+  if (!store.one("SELECT name FROM sqlite_master WHERE name='bridge_configuration' AND type='table'")) {
+    store.db.exec(WORKSPACE_MAINTENANCE_SCHEMA);
+    return;
+  }
+  store.db.exec("DELETE FROM agent_workspace_workflow_bindings; DELETE FROM agent_workspace_projection_state; DELETE FROM bridge_configuration;");
 }

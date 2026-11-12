@@ -2,6 +2,7 @@ import { requirements, dictionaryFingerprint } from "./dictionaries.js";
 import { randomUUID } from "node:crypto";
 import type { Store } from "../persistence/store.js";
 import type { WebBridgeConfig } from "../web-bridge/config.js";
+import { readConfiguredBridge } from "../web-bridge/configured.js";
 import { AppError, check } from "../domain/errors.js";
 import { canonicalJson, digest } from "../persistence/files.js";
 import { configCoordinator } from "./coordinator.js";
@@ -90,7 +91,7 @@ export class ConfigGitService {
   private localSecrets(): string[] {
     const values = Object.values(this.savedMappings());
     for (const row of this.store.all<{ id: string }>("SELECT id FROM provider_settings")) { const config = this.store.provider(row.id)!.config; for (const value of Object.values(config)) if (typeof value === "string" && value !== "legacy" && value !== "native") values.push(value); }
-    const bridge = JSON.parse(readOptional(this.store, "config/web-bridge.json") ?? '{}');
+    const bridge = readConfiguredBridge(this.store, true);
     for (const envs of Object.values(bridge.environments ?? {}) as Record<string, unknown>[][]) for (const env of envs) for (const field of ["profileId", "extensionId"]) if (typeof env[field] === "string") values.push(env[field] as string);
     return values;
   }

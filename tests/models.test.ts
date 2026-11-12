@@ -1,6 +1,7 @@
+import { currentVersion } from "../src/migrations/frozen.js";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { setup as setupProviders, TestProvider, until } from "./helpers.js";
+import { setup as setupProviders, TestProvider, until, setupLegacy } from "./helpers.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
 import { TestStore as Store } from "./helpers.js";
 import { createApp } from "../src/server/app.js";
@@ -59,7 +60,7 @@ test("model state persists in the existing JSON column across restart", context 
   assert.equal(registry.modelList(provider.id).find(model => model.id === "disabled")!.enabled, false);
   assert.equal(registry.modelList(provider.id).some(model => model.id === "deleted"), false);
   assert.equal(registry.setting(provider.id).models.find(model => model.id === "deleted")!.deleted, true);
-  assert.equal(reopened.all("SELECT name FROM sqlite_master WHERE type='table'").length, 23);
+  assert.equal(reopened.all("SELECT name FROM sqlite_master WHERE type='table'").length, Number(currentVersion) === 11 ? 31 : 23);
 });
 
 test("model changes fence a pending catalog refresh and do not interrupt an active call", async context => {
@@ -112,7 +113,7 @@ test("HTTP model CRUD handles slash IDs, default clearing and idempotent deletio
 });
 
 test("workflow authoring advertises only enabled models", async context => {
-  const { store, providers, provider, authoring } = setup(context);
+  const { store, providers, provider, authoring } = setupLegacy(context, { models: false });
   context.after(async () => { await authoring.close(); store.close(); });
   providers.addModel(provider.id, { id: "test-model" });
   providers.addModel(provider.id, { id: "hidden-model", enabled: false });

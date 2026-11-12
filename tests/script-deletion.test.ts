@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createApp } from "../src/server/app.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 import type { ScriptDefinition } from "../src/domain/scripts.js";
 
 const definition = (id = "delete-script"): ScriptDefinition => ({ id, name: "待删除脚本", description: "", runtime: "nodejs", entryFile: "main.ts", inputSchema: true, outputSchema: true, files: { "main.ts": "export default input => input" } });

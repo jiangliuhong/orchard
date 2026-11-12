@@ -39,6 +39,7 @@
 
 - [Git 项目工作区、Agent 分析与设置存储空间查看（已实现，验证记录见 feature）](../features/2026-11-10-git-project-agent/design.md)
 
-- [统一 Agent 对话、内置知识与原生会话生命周期（实施中，尚未生产切换）](../features/2026-11-11-unified-agent-runtime/README.md)
+- [统一 Agent 对话、内置知识与原生会话生命周期（既有实现，后续简化设计见下一项）](../features/2026-11-11-unified-agent-runtime/README.md)
+- [Agent 只读项目工作区与平台统一应用（设计中）](../features/2026-11-12-agent-workspace-projection/design.md)
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。

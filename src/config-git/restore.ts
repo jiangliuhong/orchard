@@ -5,6 +5,7 @@ import { check } from "../domain/errors.js";
 import type { Store } from "../persistence/store.js";
 import { canonicalJson, digest } from "../persistence/files.js";
 import { configCoordinator, registerConfigCoordinator, type ConfigWriteCoordinator } from "./coordinator.js";
+import { workspaceSchemaInstalled, assertNoMaintenanceTask } from "../agent/workspace-business-hooks.js";
 import type { PortableSnapshot, SnapshotCategory, SnapshotTheme } from "./snapshot-types.js";
 import { durableJson, durableWrite, readJson, readOptional, syncFile } from "./restore-files.js";
 import { captureSnapshot, prepareImport, importDefinitions, targetFingerprint, databaseFingerprint, assertIdle, type PreparedImport } from "./restore-import.js";
@@ -126,6 +127,7 @@ export class ConfigRestoreService {
   private async finish(operation: RestoreOperation) {
     const receipt = this.receipt(operation); check(receipt, "RECOVERY_REQUIRED", "恢复回执缺失", 503);
     check(databaseFingerprint(this.store) === receipt.databaseHash, "RECOVERY_REQUIRED", "恢复数据库或源码最终摘要不匹配", 503);
+    check(!workspaceSchemaInstalled(this.store) || !operation.files.some(file => file.target === "config/web-bridge.json"), "WORKSPACE_LEGACY_RESTORE_PENDING", "旧浏览器文件恢复与数据库事实源不兼容，须先完成迁移恢复审核", 503);
     for (const file of operation.files) {
       check(["config/web-bridge.json", "config-git/general.json", "config-git/local-mappings.json"].includes(file.target), "RECOVERY_REQUIRED", "恢复文件目标无效", 503);
       const content = readOptional(this.store, file.staged);
@@ -145,7 +147,8 @@ export class ConfigRestoreService {
   }
   /** Must run before Store.recoverBusiness(), service cache construction and queue startup. */
   async recover(operationId?: string): Promise<RestoreOperation[]> {
-    return this.coordinator.withExclusive(async () => {
+    return this.coordinator.withRecovery(async () => {
+      if (workspaceSchemaInstalled(this.store)) assertNoMaintenanceTask(this.store);
       this.coordinator.setMaintenance("正在恢复配置一致性");
       try {
         const operations = this.operations();
@@ -162,7 +165,7 @@ export class ConfigRestoreService {
         if (!this.operations().some(item => !["completed", "failed"].includes(item.phase))) this.coordinator.setMaintenance(null);
         return this.operations();
       } catch (error) { this.coordinator.setMaintenance("配置恢复需要修复"); throw error; }
-    }, true);
+    });
   }
   private save(operation: RestoreOperation) { durableJson(this.store, `config-git/operations/${operation.operationId}.json`, operation); }
   operations(): RestoreOperation[] {

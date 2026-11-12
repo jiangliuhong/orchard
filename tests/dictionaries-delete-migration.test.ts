@@ -20,7 +20,7 @@ test("v9→v10 preserves populated dictionaries and history; initialization matc
     assert.equal(verifyDatabase(db), 10);
     assert.equal(db.prepare("SELECT deleted_at FROM dictionaries").get()!.deleted_at, null);
     assert.throws(() => db.exec("DELETE FROM dictionary_versions"), /DICTIONARY_VERSION_IMMUTABLE/);
-    fresh.exec(SCHEMA);
+    fresh.exec(SCHEMA.replace(/PRAGMA user_version = \d+;\n$/, "PRAGMA user_version = 10;\n"));
     assert.equal(verifyDatabase(fresh), 10);
     const objects = "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
     // The shared verifier compares normalized SQL; historical table formatting may differ.

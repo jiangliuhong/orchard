@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { setup, exampleFiles, publishExample, until } from "./helpers.js";
+import { setupLegacy as setup, exampleFiles, publishExample, until } from "./helpers.js";
 
 test("authoring applies files, persists conversation and publishes explicitly with idempotency", async t => {
   const { store, provider, authoring } = setup(t); t.after(async () => { await authoring.close(); store.close(); });

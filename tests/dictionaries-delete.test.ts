@@ -55,7 +55,9 @@ test("字典删除：当前/历史凭据引用与不完整扫描均受保护", a
   w.nodes[0].type = "web-bridge";
   w.nodes[0].config = { application: "app", tool: "read", credentialBindings: { auth: { source: "dictionary", dictionaryId: id, key: "token" } } };
   store.exec("INSERT INTO workflows VALUES('consumer','consumer',NULL,1,1)");
-  store.exec("INSERT INTO workflow_versions VALUES('wv','consumer',1,?,'{}','unused','hash',1)", JSON.stringify(w));
+  const files = { ...exampleFiles("consumer"), "workflow.json": JSON.stringify(w) };
+  const tree = store.files.saveTree(files);
+  store.exec("INSERT INTO workflow_versions VALUES('wv','consumer',1,?,'{}',?,?,1)", JSON.stringify(w), tree.path, tree.hash);
   store.exec("UPDATE workflows SET current_version_id='wv' WHERE id='consumer'");
   assert.equal(service.referenceList(id).complete, true);
   assert.throws(() => remove(id, 1), { code: "DICTIONARY_REFERENCED" });
@@ -63,7 +65,7 @@ test("字典删除：当前/历史凭据引用与不完整扫描均受保护", a
   remove(id, 1);
   assert.throws(() => remove(id, 2, { permanent: true, confirmationName: service.get(id)!.name }), { code: "DICTIONARY_REFERENCED" });
   const second = create().dictionaryId;
-  store.exec("INSERT INTO drafts(id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('broken',0,'not/a/tree','{}','draft',1,1)");
+  store.db.exec("INSERT INTO drafts(id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES('broken',0,'not/a/tree','{}','draft',1,1)");
   assert.throws(() => remove(second, 1), { code: "REFERENCE_SCAN_INCOMPLETE" });
   assert.equal(service.get(second)!.deletedAt, null);
 });

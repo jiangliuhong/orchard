@@ -1,0 +1,548 @@
+{
+  "formatVersion": 1,
+  "status": "review_candidate",
+  "applicationId": 1331110449,
+  "targetDatabaseVersion": 11,
+  "entries": [
+    {
+      "id": "db.v1-v2",
+      "kind": "database",
+      "from": 1,
+      "to": 2,
+      "requires": [],
+      "summary": "重建 runs，支持草稿运行",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "docs/features/2026-11-06-data-migration/sql/db.v1-v2.sql",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "runs 行数及旧列逐值相同；新列均为 NULL；node_runs 等既有引用仍有效；queued_runs 存在；版本 2。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "0e3af68f093b2db5cffe5b7aadaab5f3db97c9c9ab859ee606d3e69211212567"
+    },
+    {
+      "id": "db.v2-v3",
+      "kind": "database",
+      "from": 2,
+      "to": 3,
+      "requires": [
+        "db.v1-v2"
+      ],
+      "summary": "新增对话及轮次、消息关联",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "docs/features/2026-11-06-data-migration/sql/db.v2-v3.sql",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "所有既有表行数及既有列相同；旧关联保持 NULL；submission_state 为 not_sent；新增对话表为空；唯一索引和关联索引准确；版本 3。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "452bda5a3b737b32d2821964722e81b00d2aa21d6798bb9a4f51642472c99510"
+    },
+    {
+      "id": "db.v3-v4",
+      "kind": "database",
+      "from": 3,
+      "to": 4,
+      "requires": [
+        "db.v2-v3"
+      ],
+      "summary": "历史对话状态与归档信息",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "docs/features/2026-11-06-data-migration/sql/db.v3-v4.sql",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "对话行数和主键相同；验证全部状态映射、时间映射、title 和其他列不变；自引用和轮次/消息外键有效；索引条件准确；版本 4。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "0ffbc2736993e58b7d13772c3203803124672cb3bc59564b2b2e5936036298e6"
+    },
+    {
+      "id": "db.v4-v5",
+      "kind": "database",
+      "from": 4,
+      "to": 5,
+      "requires": [
+        "db.v3-v4"
+      ],
+      "summary": "新增脚本库、脚本版本及测试结构",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "docs/features/2026-11-06-data-migration/sql/db.v4-v5.sql",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "既有表逐值、逐行不变；三个新表为空；唯一草稿索引、归属插入触发器和发布版本不可变触发器存在且定义匹配；版本 5。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "fa49b41a0172f2d7fbedaa83cf26c5dc30949f7d57625e7fc0724d1b98ed2ae8"
+    },
+    {
+      "id": "db.v5-v6",
+      "kind": "database",
+      "from": 5,
+      "to": 6,
+      "requires": [
+        "db.v4-v5"
+      ],
+      "summary": "版本化脚本执行时限",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "docs/features/2026-11-06-data-migration/sql/db.v5-v6.sql",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "所有旧表行数和既有列相同；每个旧 script_versions.timeout_ms 为 300000；目标约束准确；发布内容保持不变；版本 6。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "29ed4405fc9ed97683f7a3b8dee9b235cd4cd67028a99e164da1b88cf2422649"
+    },
+    {
+      "id": "db.initialize-v6",
+      "kind": "initialization",
+      "from": null,
+      "to": 6,
+      "requires": [],
+      "summary": "已确认空目录的新库初始化",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v6.sql",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "application_id 1331110449、user_version 6、全部表/索引/触发器精确匹配冻结结构；integrity_check 为 ok，foreign_key_check 无结果；中断按 initialization.json 幂等收敛。",
+      "reviewReference": "docs/features/2026-11-06-data-migration/schema-review.md#审核记录",
+      "checksum": "51b15c35b457288fd3d8920240566391b8ae8ba88b036f5d46ee1d38761a15bc"
+    },
+    {
+      "id": "config.web-bridge.v0-v1",
+      "kind": "configuration",
+      "from": 0,
+      "to": 1,
+      "requires": [],
+      "summary": "桥接配置增加格式版本并补齐缺失顶层映射",
+      "affectedResources": [
+        "config/web-bridge.json"
+      ],
+      "questions": [],
+      "requiresSchemaReview": false,
+      "files": [
+        "docs/features/2026-11-06-data-migration/execution-protocol.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "共享目标校验器通过；已存在已知值和各层未知 JSON 值逐值相同；仅新增 schemaVersion 和缺失的四个顶层映射。",
+      "reviewReference": null,
+      "checksum": "ae9c0662450c7217866ebf6f70cce232118f2acd44370aff01339a788510242b"
+    },
+    {
+      "id": "db.v6-v7",
+      "kind": "database",
+      "from": 6,
+      "to": 7,
+      "requires": [
+        "db.v5-v6"
+      ],
+      "summary": "仅保留原生 Agent 会话协议",
+      "reviewReference": "docs/features/2026-11-06-native-only/design.md#审核结论",
+      "verification": "保留历史及外键；旧会话清空后端引用并失效；旧多轮必须重建；内置 Provider 修订递增。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v6-v7.sql",
+        "docs/features/2026-11-06-native-only/design.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "checksum": "4116c003f2bd70057bb9a3b08f150cdd707bb861cd3c70728a3b0c2e1f1c79a9"
+    },
+    {
+      "id": "db.v7-v8",
+      "kind": "database",
+      "from": 7,
+      "to": 8,
+      "requires": [
+        "db.v6-v7"
+      ],
+      "summary": "新增具名 Agent 模型配置、历史修订和运行绑定",
+      "reviewReference": "docs/features/2026-11-07-agent-model-configs/design.md#数据库审核提案",
+      "verification": "三张新表为空；既有工作流和历史运行不改写；索引、约束及外键准确。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v7-v8.sql",
+        "docs/features/2026-11-07-agent-model-configs/design.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "checksum": "35cc63674bfc2e8b60ad28af0d1589034a464c2b3617460228efaad24361354d"
+    },
+    {
+      "id": "db.initialize-v8",
+      "kind": "initialization",
+      "from": null,
+      "to": 8,
+      "requires": [],
+      "summary": "已审核 v8 结构的新库初始化",
+      "reviewReference": "docs/features/2026-11-07-agent-model-configs/design.md#数据库审核提案",
+      "verification": "application_id 1331110449、user_version 8、十九张表及全部索引触发器匹配冻结基线。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v8.sql",
+        "docs/features/2026-11-07-agent-model-configs/design.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "checksum": "f8b0f392cdc009124fc8559773aeb02e0ad74467017e56a77e337f1562ab23af"
+    },
+    {
+      "id": "db.v8-v9",
+      "kind": "database",
+      "from": 8,
+      "to": 9,
+      "requires": [
+        "db.v7-v8"
+      ],
+      "summary": "字典、加密字典与运行/测试字典绑定四张表；延迟当前指针外键、版本不可变触发器与对象身份不可变触发器",
+      "reviewReference": "docs/features/2026-11-09-dictionaries/schema-review-v9.md#审核记录",
+      "verification": "v8 增量升级与 v9 新建库对象一致；迁移前后旧表行与列内容比对一致，foreign_key_check 与 integrity_check 通过；延迟指针外键、版本不可改写、对象身份不可变、NOCASE 重命名冲突与绑定外键用例通过。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v8-v9.sql",
+        "docs/features/2026-11-09-dictionaries/schema-review-v9.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "checksum": "23efed1d9133d1841790f3224de6a77f96495628439c1802116383ac2ed4d405"
+    },
+    {
+      "id": "db.initialize-v9",
+      "kind": "initialization",
+      "from": null,
+      "to": 9,
+      "requires": [],
+      "summary": "已审核 v9 结构的新库初始化（含字典表）",
+      "reviewReference": "docs/features/2026-11-09-dictionaries/schema-review-v9.md#审核记录",
+      "verification": "application_id 1331110449、user_version 9、v8 全部对象加四张字典表及索引触发器匹配冻结基线。",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v9.sql",
+        "docs/features/2026-11-09-dictionaries/schema-review-v9.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "checksum": "d8aa5cf7d37854b0994ab5def8f032f272269ea611a41efa42eca45726a652b8"
+    },
+    {
+      "id": "db.v9-v10",
+      "kind": "database",
+      "from": 9,
+      "to": 10,
+      "requires": [
+        "db.v8-v9"
+      ],
+      "summary": "字典软删除标记及受保护的历史版本彻底删除",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v9-v10.sql",
+        "docs/features/2026-11-09-dictionaries/schema-review-v10.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "旧列与行不变，deleted_at 默认为 NULL；正常字典版本不可删除；存在运行或测试绑定时不可删除；v9 增量升级与 v10 新建库结构一致，外键检查通过。",
+      "reviewReference": "docs/features/2026-11-09-dictionaries/schema-review-v10.md",
+      "checksum": "3d9800ee0795eab23045285dcb4fcab0e0f1d0a9a3245bd67a2dc4849735b6bb"
+    },
+    {
+      "id": "db.initialize-v10",
+      "kind": "initialization",
+      "from": null,
+      "to": 10,
+      "requires": [],
+      "summary": "已审核 v10 结构的新库初始化（含字典删除能力）",
+      "affectedResources": [
+        "workbench.db"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v10.sql",
+        "docs/features/2026-11-09-dictionaries/schema-review-v10.md",
+        "src/migrations/config.ts",
+        "src/migrations/definitions.ts",
+        "src/migrations/journal.ts",
+        "src/migrations/lock.ts",
+        "src/migrations/mapping.ts",
+        "src/migrations/planner.ts",
+        "src/migrations/preview.ts",
+        "src/migrations/questions.ts",
+        "src/migrations/release.ts",
+        "src/migrations/runner.ts",
+        "src/migrations/types.ts",
+        "src/migrations/validators.ts",
+        "src/migrations/worker.ts"
+      ],
+      "verification": "旧列与行不变，deleted_at 默认为 NULL；正常字典版本不可删除；存在运行或测试绑定时不可删除；v9 增量升级与 v10 新建库结构一致，外键检查通过。",
+      "reviewReference": "docs/features/2026-11-09-dictionaries/schema-review-v10.md",
+      "checksum": "8f7cf3159c8e6f8727ed31a3b0a4b843acfe2aff0b880d0a8387bf194633f978"
+    },
+    {
+      "id": "db.workspace-projection.v10-v11",
+      "kind": "database",
+      "from": 10,
+      "to": 11,
+      "requires": [
+        "db.v9-v10"
+      ],
+      "summary": "迁入浏览器声明并建立工作流草稿绑定和维护工作区",
+      "affectedResources": [
+        "workbench.db",
+        "config/web-bridge.json"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.v10-v11.sql",
+        "docs/features/2026-11-12-agent-workspace-projection/database-review-approved.md",
+        "docs/features/2026-11-12-agent-workspace-projection/migration-release-review.md",
+        "src/agent/workspace-schema.ts",
+        "tests/fixtures/migrations/database/v11.sql"
+      ],
+      "verification": "校验旧业务行、浏览器声明摘要、草稿身份、外键和待同步投影。保留旧原生会话。",
+      "reviewReference": "docs/features/2026-11-12-agent-workspace-projection/migration-release-review.md",
+      "checksum": "3725b7bf262e84204a3df1a6bb0a507b7989a1536730c7c60ac514aeaf22a08a"
+    },
+    {
+      "id": "db.initialize-v11",
+      "kind": "initialization",
+      "from": null,
+      "to": 11,
+      "requires": [],
+      "summary": "初始化 Workspace Projection v11 数据库",
+      "affectedResources": [
+        "workbench.db",
+        "config/web-bridge.json"
+      ],
+      "questions": [],
+      "requiresSchemaReview": true,
+      "files": [
+        "docs/features/2026-11-06-data-migration/sql/db.initialize-v11.sql",
+        "docs/features/2026-11-12-agent-workspace-projection/database-review-approved.md",
+        "docs/features/2026-11-12-agent-workspace-projection/migration-release-review.md",
+        "src/agent/workspace-schema.ts",
+        "tests/fixtures/migrations/database/v11.sql"
+      ],
+      "verification": "校验旧业务行、浏览器声明摘要、草稿身份、外键和待同步投影。保留旧原生会话。",
+      "reviewReference": "docs/features/2026-11-12-agent-workspace-projection/migration-release-review.md",
+      "checksum": "c3b30c48d20dd82a41e783fbe66f70dfbe60c71e63c330c721efdb1eecbb8b2c"
+    }
+  ],
+  "approvalSources": [
+    {
+      "path": "docs/features/2026-11-12-agent-workspace-projection/migration-release-review.md",
+      "sha256": "dabcadb36345442ed2c7ded3821856634d264c24990dfa55f1c6247e31198859"
+    }
+  ],
+  "contentDigest": "54c0a5fcb883887e0b5afec8a84a991a6cdec7339a36631f671bbb8a90dc9645",
+  "review": {
+    "status": "approved",
+    "reviewer": "用户",
+    "date": "2026-11-12",
+    "contentDigest": "54c0a5fcb883887e0b5afec8a84a991a6cdec7339a36631f671bbb8a90dc9645"
+  }
+}

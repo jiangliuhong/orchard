@@ -7,7 +7,8 @@ import { join } from "node:path";
 import { setup, temporary, until } from "./helpers.js";
 import { TestStore as Store } from "./helpers.js";
 import { AGENT_MODEL_SCHEMA, SCHEMA, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8 } from "../src/persistence/schema.js";
-import { sql, initializationSql } from "../src/migrations/frozen.js";
+import { currentVersion, sql, initializationSql } from "../src/migrations/frozen.js";
+import { WORKSPACE_MAINTENANCE_SCHEMA } from "../src/agent/workspace-schema.js";
 import { GraphRunner } from "../src/runtime/runner.js";
 import { createApp } from "../src/server/app.js";
 import { validateWorkflow } from "../src/domain/validation.js";
@@ -17,7 +18,8 @@ const command = () => ({ requestId: randomUUID() });
 test("registered Agent migration SQL and initialization match the reviewed schema constants", () => {
   assert.equal(sql[6], MIGRATE_V6_TO_V7);
   assert.equal(sql[7], MIGRATE_V7_TO_V8);
-  assert.equal(initializationSql, SCHEMA);
+  const legacy = SCHEMA.replace(/PRAGMA user_version = \d+;\n$/, "PRAGMA user_version = 10;\n");
+  assert.equal(initializationSql, Number(currentVersion) === 11 ? `${legacy}\n${WORKSPACE_MAINTENANCE_SCHEMA}\nPRAGMA user_version=11;\n` : legacy);
 });
 function workflow(id: string): Workflow {
   return {
@@ -147,7 +149,7 @@ test("v7 to v8 creates empty configuration tables without converting or deleting
   database.exec("INSERT INTO provider_settings VALUES('existing',1,'{}','[]','model',1,1);");
   database.close();
   const store = new Store(root); t.after(() => store.close());
-  assert.equal(store.one("PRAGMA user_version")!.user_version, 10);
+  assert.equal(store.one("PRAGMA user_version")!.user_version, currentVersion);
   assert.ok(store.migrationBackupPath);
   assert.equal(store.provider("existing")!.defaultModel, "model");
   for (const table of ["agent_model_configs", "agent_model_config_revisions", "run_agent_bindings", "dictionaries", "dictionary_versions", "run_dictionary_bindings", "script_test_dictionary_bindings"]) assert.equal(store.all(`SELECT * FROM ${table}`).length, 0);

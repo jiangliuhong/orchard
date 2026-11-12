@@ -59,21 +59,22 @@ export class WebBridgeGateway {
   deleteEnvironment(application: string, id: string) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); this.config.deleteEnvironment(application, id); }
   setToolEnabled(application: string, toolId: string, enabled: boolean) { check(this.config, "CONFIG_UNAVAILABLE", "Web Bridge 配置不可用"); check(this.tools(application).some(tool => tool.toolId === toolId), "UNKNOWN_TOOL", "工具不存在"); this.config.setToolEnabled(application, toolId, enabled); }
   registerProfile(profile: { id: string; name: string; extensionId: string; extensionVersion?: string }) {
-    return this.coordinator.withWrite(() => {
-      check(/^[a-zA-Z0-9._-]{1,100}$/.test(profile.id), "INVALID_PROFILE", "浏览器资料 ID 无效");
-      check(profile.name.trim().length > 0 && profile.name.length <= 100, "INVALID_PROFILE", "浏览器资料名称不能为空");
-      if (profile.id !== profile.extensionId) {
-        const config = this.config;
-        for (const application of config?.applications() ?? []) {
-          for (const environment of config?.environments(application.id) ?? []) {
-            if (environment.profileId === profile.extensionId) config?.saveEnvironment(application.id, { ...environment, profileId: profile.id });
-          }
-        }
-        this.profiles.delete(profile.extensionId);
-      }
-      const next = { ...profile, name: profile.name.trim(), connected: true, lastSeen: Date.now() };
-      this.profiles.set(profile.id, next); return next;
-    });
+    check(/^[a-zA-Z0-9._-]{1,100}$/.test(profile.id), "INVALID_PROFILE", "浏览器资料 ID 无效");
+    check(profile.name.trim().length > 0 && profile.name.length <= 100, "INVALID_PROFILE", "浏览器资料名称不能为空");
+    if (profile.id !== profile.extensionId) {
+      const config = this.config;
+      const bindings = (config?.applications() ?? []).flatMap(application =>
+        (config?.environments(application.id) ?? []).filter(environment => environment.profileId === profile.extensionId)
+          .map(environment => ({ application: application.id, environment })));
+      // Heartbeats/connection state are not configuration writes. Only an actual
+      // automatic binding migration takes the business gate (before Map changes).
+      if (bindings.length) this.coordinator.withWrite(() => {
+        for (const { application, environment } of bindings) config!.saveEnvironment(application, { ...environment, profileId: profile.id });
+      });
+      this.profiles.delete(profile.extensionId);
+    }
+    const next = { ...profile, name: profile.name.trim(), connected: true, lastSeen: Date.now() };
+    this.profiles.set(profile.id, next); return next;
   }
   profilesList() { return [...this.profiles.values()].map(profile => ({ ...profile, connected: Date.now() - profile.lastSeen < 150000 })).sort((a, b) => b.lastSeen - a.lastSeen); }
   async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver; source?: "call" | "test"; omitHistoryArgs?: boolean } = {}) {

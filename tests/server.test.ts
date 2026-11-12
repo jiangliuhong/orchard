@@ -1,3 +1,4 @@
+import { currentVersion } from "../src/migrations/frozen.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -103,7 +104,7 @@ test("HTTP draft tests run without publishing and expose immutable execution sna
   assert.deepEqual(snapshot.output, payload.input);
   assert.equal(snapshot.nodes[0].status, "succeeded");
   assert.ok(snapshot.attempts.length);
-  assert.equal((await app.inject({ url: "/api/health" })).json().schemaVersion, 10);
+  assert.equal((await app.inject({ url: "/api/health" })).json().schemaVersion, currentVersion);
   assert.equal((await app.inject({ url: "/api/workflows" })).json().items.length, 0);
   assert.equal(store.all("SELECT id FROM workflow_versions").length, 0);
   const events = (await app.inject({ url: `/api/runs/${run.id}/events` })).json().items;

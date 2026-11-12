@@ -5,6 +5,7 @@ import { declarations, initializationSql, currentVersion } from './frozen.js';
 import { defaultBridgeConfig } from './config.js';
 import { validateBridgeConfigV1 } from '../web-bridge/config-validation.js';
 import { applyDefinitions } from './definitions.js';
+import { seedWorkspaceV11 } from './workspace-v11.js';
 import { plan, source, validateLedger, resolvePlan } from './planner.js';
 import { verifyDatabase } from './validators.js';
 import { captureRows, verifyMapping } from './mapping.js';
@@ -102,7 +103,7 @@ export function restore(root:string,job:Job,point:Boundary=noop){
     const snapshot=loadSnapshot(root,job);
     const disk=readJson<{formatVersion:number;items:Job['install']}>(safe(root,`migrations/jobs/${job.jobId}/install.json`));
     const resources=[...new Set(job.plan.steps.flatMap(step=>{const definition=declarations.find(value=>value.id===step.id&&value.checksum===step.checksum);if(!definition)throw new MigrationError('UNKNOWN_PROTOCOL');return definition.affectedResources;}))];
-    if(job.plan.sourceVersions.webBridge===null&&job.plan.steps.length)resources.push('config/web-bridge.json');
+    if(job.plan.sourceVersions.webBridge===null&&job.plan.steps.length&&!resources.includes('config/web-bridge.json'))resources.push('config/web-bridge.json');
     if(canonical([...job.plan.resources].sort())!==canonical(resources.sort())||canonical(job.install.map(item=>item.path))!==canonical(job.plan.resources)||job.install.some(item=>item.before!==(snapshot.files.find(file=>file.path===item.path)?.hash??null)||!/^[a-f\d]{64}$/.test(item.target)))throw new MigrationError('UNKNOWN_PROTOCOL');
     if(disk.formatVersion!==1||!Array.isArray(disk.items)||canonical(disk.items.map(({path,before,target})=>({path,before,target})))!==canonical(job.install.map(({path,before,target})=>({path,before,target}))))throw new MigrationError('UNKNOWN_PROTOCOL');
     // Validate every resource before writing any. Unmodified resources must also be unchanged.
@@ -210,7 +211,16 @@ export function initializeData(root:string,kind:Initialization['kind'],id:string
     const resources=record.kind==='new_install'?['workbench.db','config/web-bridge.json']:['config/web-bridge.json'];
     for(const relative of resources)if(present(safe(root,relative)))throw new MigrationError('RECOVERY_CONFLICT');
     if(record.kind==='new_install'){
-      const path=safe(work,'workbench.db');rmSync(path,{force:true});const db=new DatabaseSync(path);try{db.exec(initializationSql);verifyDatabase(db);}finally{db.close();}chmodSync(path,0o600);checkpoint(path);
+      const path=safe(work,'workbench.db');rmSync(path,{force:true});const db=new DatabaseSync(path);
+      try{
+        db.exec(initializationSql);
+        if(currentVersion>=11){
+          db.exec('BEGIN IMMEDIATE');
+          try{seedWorkspaceV11(db,work);verifyDatabase(db);db.exec('COMMIT');}
+          catch(error){db.exec('ROLLBACK');throw error;}
+        }else verifyDatabase(db);
+      }finally{db.close();}
+      chmodSync(path,0o600);checkpoint(path);
     }
     writeJson(safe(work,'config/web-bridge.json'),defaultBridgeConfig());
     record.resources=resources.map(path=>({path,before:null,hash:fileHash(safe(work,path))!,installed:false}));

@@ -240,6 +240,42 @@ test("switching sync directions performs no fetch or preview request", async () 
 
 const remoteSource = { bindingId: "b", branch: "main", sourceSha: "a".repeat(40), fetchedAt: "2026-11-10", commit: { subject: "跨设备配置", author: "tester", committedAt: "2026-11-10" }, snapshotState: "valid", supportedCategories: ["dictionaries", "workflows"] };
 const remoteBinding = { id: "b", branch: "main", remoteUrl: "git@example.test:config.git", configDir: "orchard-config" };
+
+test("discarding sync previews requires confirmation in the application dialog", async () => {
+  const preview = { token: "p", expiresAt: Date.now() + 60000, categories: ["dictionaries"], diffs: [], blockers: [] };
+  mock(path => {
+    if (path.endsWith("/commit-preview")) return preview;
+    if (path.endsWith("/remote-sync-source")) return remoteSource;
+    if (path.endsWith("/restore-preview")) return { ...preview, requiredMappings: [{ key: "path", label: "本机路径" }] };
+    return {};
+  });
+  render(createElement(ThemeProvider, null, createElement(ConfigGitSettings, { sync: true })));
+  fireEvent.change(await screen.findByLabelText("变更描述"), { target: { value: "backup" } });
+  fireEvent.click(screen.getByRole("button", { name: "生成提交预览" }));
+  await screen.findByRole("checkbox");
+  const remoteTab = screen.getByRole("button", { name: "从远端同步" });
+  fireEvent.click(remoteTab);
+  const backupDialog = await screen.findByRole("dialog", { name: "放弃当前备份预览？" });
+  fireEvent.keyDown(backupDialog, { key: "Escape" });
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.ok(screen.getByRole("checkbox"));
+  fireEvent.click(remoteTab);
+  fireEvent.click(screen.getByRole("button", { name: "放弃并切换" }));
+
+  fireEvent.click(await screen.findByRole("button", { name: "获取远端配置" }));
+  fireEvent.click(await screen.findByRole("button", { name: "预览同步" }));
+  const mapping = await screen.findByRole<HTMLInputElement>("textbox", { name: "本机路径" });
+  fireEvent.change(mapping, { target: { value: "/local/path" } });
+  fireEvent.click(screen.getByRole("button", { name: "返回备份" }));
+  await screen.findByRole("dialog", { name: "放弃当前同步预览和映射输入？" });
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  assert.equal(mapping.value, "/local/path");
+  fireEvent.click(screen.getByRole("button", { name: "备份到远端" }));
+  fireEvent.click(screen.getByRole("button", { name: "放弃并返回备份" }));
+  fireEvent.click(remoteTab);
+  assert.equal(screen.queryByRole("textbox", { name: "本机路径" }), null);
+});
+
 test("remote sync fixes source SHA, requires every diff page, confirms and previews recovery points", async () => {
   const requests: { path: string; body: Record<string, unknown> }[] = [];
   mock((path, body) => {

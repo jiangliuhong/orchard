@@ -1,7 +1,7 @@
+import { configuredWebBridge } from "../src/web-bridge/configured.js";
 import test from "node:test";
 import { setup } from "./helpers.js";
 import { createApp } from "../src/server/app.js";
-import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -139,7 +139,7 @@ test("HTTP browser channel executes reviewed actions only after confirmation, is
   bridge.httpDependencies.resolveCredential = resolver;
   bridge.saveTool({ toolId: "outbound", application: "crm", site: "crm", description: "Outbound", ...defaults, method: "POST", parameters: { type: "object" }, fields: [], risk: "execute", approval: "user", timeoutMs: 5000, catalogVersion: "1", enabled: true,
     execution: { ...execution, postprocess: { runtime: "nodejs", code: "return {items:response,product:args.productNo};" } } });
-  assert.equal(new WebBridgeConfig(store.root).tools("crm")[0].execution?.transport, "browser");
+  assert.equal(configuredWebBridge(store).tools("crm")[0].execution?.transport, "browser");
   const payload = { application: "crm", tool: "outbound", args: { productNo: "p", apiCode: "outbound", body: "{}" } };
   const refused = await app.inject({ method: "POST", url: "/api/web-bridge/calls", payload });
   assert.equal(refused.json().code, "APPROVAL_REQUIRED");

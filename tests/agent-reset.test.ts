@@ -3,17 +3,17 @@ import { test, type TestContext } from "node:test";
 import { DatabaseSync, backup } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { previewAgentReset } from "../src/agent/reset-preview.js";
 import { temporary } from "./helpers.js";
-import { SCHEMA } from "../src/persistence/schema.js";
 import { AGENT_RUNTIME_SCHEMA } from "../src/agent/schema.js";
 import { previewLegacyAgentReset, applyLegacyAgentDatabaseReset } from "../src/agent/legacy-reset.js";
 import { AgentStore } from "../src/agent/store.js";
 
 function legacy(t: TestContext) {
   const db = new DatabaseSync(":memory:"); t.after(() => db.close());
-  db.exec("PRAGMA foreign_keys=ON;"); db.exec(SCHEMA);
+  db.exec(readFileSync(new URL("./fixtures/migrations/database/v10.sql", import.meta.url), "utf8"));
+  db.exec("PRAGMA foreign_keys=ON;");
   db.exec(`
     INSERT INTO provider_settings VALUES('provider',1,'{}','[]','model',1,1);
     INSERT INTO workflows VALUES('wf','business workflow',NULL,1,1);

@@ -79,6 +79,7 @@ export class BridgeAgentService {
     };
   }
   start(application: string, input: BridgeAgentRequest) {
+    check(this.config.databaseRevision === undefined, "LEGACY_AGENT_DISABLED", "浏览器配置已迁入数据库，旧 Agent 维护入口已停用", 409);
     this.config.coordinator.assertAvailable();
     check(!this.closed, "SERVICE_CLOSED", "Agent 已关闭");
     check(typeof input.requestId === "string" && input.requestId.length > 0 && input.requestId.length <= 200, "INVALID_REQUEST", "请求 ID 无效");
@@ -127,6 +128,7 @@ export class BridgeAgentService {
     } finally { clearTimeout(timer); rmSync(cwd, { force: true, recursive: true }); }
   }
   apply(application: string, id: string) {
+    check(this.config.databaseRevision === undefined, "LEGACY_AGENT_DISABLED", "旧浏览器提案不能作为已确认提案迁入新维护链路", 409);
     return this.config.coordinator.withWrite(() => {
       const turn = this.read(application, id);
       check(turn?.status === "succeeded" && turn.proposal, "INVALID_STATE", "没有可应用的变更");

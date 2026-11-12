@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { setup, publishExample, until } from "./helpers.js";
+import { setupLegacy as setup, publishExample, until } from "./helpers.js";
 import { createApp } from "../src/server/app.js";
 
 test("SSE replays persisted events, delivers new commits and resumes with Last-Event-ID", async t => {

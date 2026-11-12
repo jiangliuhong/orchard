@@ -12,7 +12,7 @@ import { decodeNativeMessages, encodeNativeMessage } from "../src/web-bridge/pro
 import { extensionId } from "../src/web-bridge/catalog.js";
 import { WebBridgeGateway } from "../src/web-bridge/gateway.js";
 import { WebBridgeClient } from "../src/web-bridge/client.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 
 test("text batching preserves UTF-8 offsets, item boundaries, deadlines and terminal event ordering", async t => {
   const events: ProviderEvent[] = [], errors: unknown[] = [];

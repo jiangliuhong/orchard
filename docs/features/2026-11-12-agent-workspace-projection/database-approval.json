@@ -1,0 +1,22 @@
+{
+  "formatVersion": 1,
+  "status": "approved",
+  "reviewer": "user",
+  "evidence": {
+    "type": "conversation",
+    "message": "确认",
+    "request": "审核 database-review.md 所列 8 表、约束/索引/触发器、浏览器配置迁入数据库、稳定草稿身份、queued 应用及迁移/保留边界"
+  },
+  "reviewDocument": "docs/features/2026-11-12-agent-workspace-projection/database-review.md",
+  "reviewSnapshot": "docs/features/2026-11-12-agent-workspace-projection/database-review-approved.md",
+  "reviewedDocumentSha256": "53aff92377491568ee91452358afb28f3254c75d3782909f7381c4d2b7515074",
+  "scope": [
+    "eight workspace projection and maintenance tables with reviewed fields, indexes, constraints and triggers",
+    "database authority for browser declarative configuration and separation of runtime state",
+    "stable workflow/draft bindings with multiple drafts",
+    "queued confirmed proposal application, atomic business receipt and projection generation registration",
+    "independent native session references, preservation of legacy sessions and reviewed retention boundaries"
+  ],
+  "authorization": "Implementation and isolated tests only. Actual production migration, directory migration and destructive reset require separate preview and explicit confirmation.",
+  "activation": "Do not change the global schema version, frozen migration bundle or production startup before a separately reviewed migration and completed runtime/security cutover. This approval does not activate the previous v11 reset or certify CLI safety."
+}

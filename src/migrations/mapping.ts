@@ -3,6 +3,7 @@ import { canonical } from './journal.js';
 import { MigrationError } from './types.js';
 import { encode } from './validators.js';
 import { currentVersion } from './frozen.js';
+import { WORKSPACE_TABLES } from '../agent/workspace-state.js';
 export function captureRows(db:DatabaseSync){
  const result:Record<string,Record<string,unknown>[]>={};
  for(const table of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()){
@@ -14,6 +15,9 @@ export function verifyMapping(db:DatabaseSync,before:ReturnType<typeof captureRo
  const after=captureRows(db);
  const serialize=(rows:Record<string,unknown>[])=>rows.map(row=>canonical(Object.fromEntries(Object.entries(row).map(([key,value])=>[key,encode(value)])))).sort();
  for(const [table,rows] of Object.entries(after)){
+  // The v11 step validates the three seeded tables as part of its transaction.
+  // Existing maintenance rows still use exact row comparison on later upgrades.
+  if(version<11&&targetVersion>=11&&WORKSPACE_TABLES.some(name=>name===table))continue;
   const original=before[table]??[];
   const expected=original.map(row=>{
    const target={...row};

@@ -45,6 +45,8 @@ export function validateLedger(root:string, versions:{database:number;webBridge:
 export function plan(root:string):Plan {
   if(approval.status!=='approved')throw new MigrationError('SCHEMA_REVIEW_REQUIRED');
   const current=source(root);validateLedger(root,current);
+  if(current.database<11&&currentVersion>=11&&present(safe(root,'agent/workspace')))
+    throw new MigrationError('LEGACY_WORKSPACE_ARCHIVE_REQUIRED','先预览并独立归档旧工作区目录');
   const steps:typeof declarations=[];
   for(let version=current.database;version<currentVersion;version++){
     const step=declarations.find(d=>d.kind==='database'&&d.from===version&&d.to===version+1);
@@ -53,7 +55,7 @@ export function plan(root:string):Plan {
   }
   if(current.webBridge===0){const step=declarations.find(d=>d.id==='config.web-bridge.v0-v1');if(!step)throw new MigrationError('CHAIN_UNSUPPORTED');steps.push(step);}
   const resources=[...new Set(steps.flatMap(step=>step.affectedResources))];
-  if(current.webBridge===null&&steps.length)resources.push('config/web-bridge.json');
+  if(current.webBridge===null&&steps.length&&!resources.includes('config/web-bridge.json'))resources.push('config/web-bridge.json');
   const value={sourceVersions:{database:current.database,webBridge:current.webBridge},targetVersions:{database:currentVersion,webBridge:1},sourceFingerprint:current.fingerprint,steps,resources,questions:steps.flatMap(step=>step.questions) as Question[],estimates:{bytes:current.bytes,requiredBytes:current.bytes*4+16*1024*1024},blockers:[]};
   return {status:'ready',...value,planHash:hash(canonical({formatVersion:1,root,...value}))};
 }

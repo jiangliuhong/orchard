@@ -5,7 +5,7 @@ import { writeFileSync } from "node:fs";
 import { executeProcess } from "../src/runtime/process.js";
 import { GraphRunner } from "../src/runtime/runner.js";
 import { TestStore as Store } from "./helpers.js";
-import { setup, publishExample, until, temporary, exampleFiles } from "./helpers.js";
+import { setup, publishExample, until, temporary, exampleFiles, setupLegacy } from "./helpers.js";
 import { validateWorkflow } from "../src/domain/validation.js";
 import { json } from "../src/persistence/files.js";
 import type { Workflow } from "../src/domain/types.js";
@@ -212,7 +212,7 @@ test("unpublished drafts run immutable snapshots without creating published work
 });
 
 test("draft tests reject stale revisions, invalid input, invalid scripts, active authoring and published drafts", async t => {
-  const { store, providers, provider, authoring } = setup(t), runner = new GraphRunner(store, providers);
+  const { store, providers, provider, authoring } = setupLegacy(t), runner = new GraphRunner(store, providers);
   t.after(async () => { await runner.close(); await authoring.close(); store.close(); });
   const draft = await authoring.create(undefined, randomUUID()), files = authoring.snapshot(draft.id).files;
   const workflow = JSON.parse(files["workflow.json"]!);

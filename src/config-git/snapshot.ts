@@ -1,5 +1,6 @@
 import { exportDictionaries, dictionaryDependencies } from "./dictionaries.js";
-import { readFileSync } from "node:fs";
+import { readConfiguredBridge } from "../web-bridge/configured.js";
+import { workspaceSchemaInstalled } from "../agent/workspace-business-hooks.js";
 import type { Store } from "../persistence/store.js";
 import type { WebBridgeConfig } from "../web-bridge/config.js";
 import type { ScriptDefinition } from "../domain/scripts.js";
@@ -171,7 +172,7 @@ export function refreshManifest(files: SourceFiles): SnapshotBundle {
 /** Caller holds the configuration read window while this synchronous copy runs. */
 export function exportSnapshot(store: Store, bridge: WebBridgeConfig | Record<string, unknown>, theme: SnapshotTheme): SnapshotBundle {
   check(["light", "dark", "system"].includes(theme), "GENERAL_REQUIRED", "Export requires an explicit theme");
-  const raw = typeof bridge.applications === "function" ? JSON.parse(readFileSync(store.files.path("config/web-bridge.json"), "utf8")) as Record<string, unknown> : bridge;
+  const raw = workspaceSchemaInstalled(store) || typeof bridge.applications === "function" ? readConfiguredBridge(store) : bridge;
   const b = object(raw), applications = object(b.applications), environments = object(b.environments);
   const portableBridge: PortableBridge = {
     applications: Object.fromEntries(Object.entries(applications).map(([id, raw]) => { const app = object(raw); return [id, { id: app.id, name: app.name, enabled: app.enabled }]; })) as PortableBridge["applications"],

@@ -10,6 +10,9 @@ import { validateScript } from "../domain/scripts.js";
 import { checkScriptSource } from "../runtime/script.js";
 import { schemaSubset, bindingSchema } from "../domain/schema-compatibility.js";
 import { validateBridgeConfigV1 } from "../web-bridge/config-validation.js";
+import { readConfiguredBridge } from "../web-bridge/configured.js";
+import { DatabaseBridgeConfiguration, bridgeDeclaration } from "../web-bridge/database-config.js";
+import { workspaceSchemaInstalled, assertNoMaintenanceTask } from "../agent/workspace-business-hooks.js";
 import type { PortableSnapshot, PortableBridge, PortableProvider, PortableScript, PortableWorkflow, SnapshotCategory, SnapshotTheme, LocalRef } from "./snapshot-types.js";
 import type { RestorePreview, RestorePreviewOptions } from "./restore.js";
 import { persistArtifact, readOptional } from "./restore-files.js";
@@ -27,11 +30,12 @@ export interface PreparedImport {
   categories: SnapshotCategory[]; changes: RestorePreview["changes"]; files: Record<string, string>;
   scripts: ScriptImport[]; workflows: WorkflowImport[]; providers: { value: Row; changed: boolean }[];
   agentModelConfigs: { value: NonNullable<PortableProvider["agentModelConfigs"]>[number] & { providerId: string }; changed: boolean }[];
+  bridge?: { revision: number; contentHash: string; runtimeJson: string };
 }
 const categories: SnapshotCategory[] = ["general", "providers", "webBridge", "scripts", "workflows", "dictionaries"];
 const ordered = <T extends { id: string }>(items: T[]) => [...items].sort((a, b) => compareCodePoints(a.id, b.id));
 const equal = (a: unknown, b: unknown) => canonicalJson(a) === canonicalJson(b);
-function rawBridge(store: Store): Row { return JSON.parse(readOptional(store, "config/web-bridge.json") ?? '{"schemaVersion":1,"applications":{},"environments":{},"tools":{},"enabledTools":{}}'); }
+function rawBridge(store: Store): Row { return readConfiguredBridge(store, true); }
 function localValue(ref: LocalRef, existing: unknown, mappings: Record<string, string>) {
   const value = mappings[ref.localRef] ?? existing;
   check(typeof value === "string" && value.trim().length > 0, "LOCAL_MAPPING_REQUIRED", `需要本机映射: ${ref.localRef}`, 422);
@@ -44,18 +48,20 @@ function draftRows(store: Store, id: string) {
   });
 }
 export function assertIdle(store: Store) {
+  if (workspaceSchemaInstalled(store)) assertNoMaintenanceTask(store);
   for (const table of ["runs", "script_tests", "authoring_turns"]) check(!store.one(`SELECT id FROM ${table} WHERE status IN ('queued','running','cancel_requested') LIMIT 1`), "CONFIG_BUSY", "存在未完成执行或生成活动", 409);
   check(!store.one("SELECT id FROM drafts WHERE status='publishing' LIMIT 1"), "CONFIG_BUSY", "工作流正在发布", 409);
 }
 export function databaseFingerprint(store: Store) {
   const rows = Object.fromEntries(["workflows", "workflow_versions", "drafts", "scripts", "script_versions", "provider_settings", "agent_model_configs", "dictionaries", "dictionary_versions"].map(table => [table, store.all<Row>(`SELECT * FROM ${table} ORDER BY id`)]));
+  if (workspaceSchemaInstalled(store)) rows.bridge_configuration = store.all<Row>("SELECT * FROM bridge_configuration ORDER BY id");
   rows.agent_model_config_revisions = store.all<Row>("SELECT * FROM agent_model_config_revisions ORDER BY config_id,revision");
   const artifacts = [...rows.workflow_versions!, ...rows.drafts!].map(row => ({ path: row.artifact_path, content: store.files.readTree(row.artifact_path) }));
   const scriptArtifacts = rows.script_versions!.map(row => ({ path: row.source_ref, content: store.files.readScriptTree(row.source_ref) }));
   return digest(canonicalJson({ rows, artifacts, scriptArtifacts }));
 }
 export function targetFingerprint(store: Store) {
-  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
+  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: workspaceSchemaInstalled(store) ? rawBridge(store) : readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
 }
 /** Independent source copies live inside the recovery point JSON, never just artifact paths. */
 export function captureSnapshot(store: Store, theme: SnapshotTheme) {
@@ -175,7 +181,12 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
       bridge.environments[app] = [...list.values()];
     }
     for (const environments of Object.values(bridge.environments) as Row[][]) for (const environment of environments) { environment.bound = false; environment.tabAvailable = false; }
-    validateBridgeConfigV1(JSON.stringify(bridge)); result.files["config/web-bridge.json"] = JSON.stringify(bridge);
+    validateBridgeConfigV1(JSON.stringify(bridge));
+    if (workspaceSchemaInstalled(store)) {
+      const row = store.one<{ revision: number; content_hash: string }>("SELECT revision,content_hash FROM bridge_configuration WHERE id='current'");
+      check(row, "BRIDGE_CONFIG_INVALID", "浏览器数据库配置缺失", 503);
+      result.bridge = { revision: row.revision, contentHash: row.content_hash, runtimeJson: JSON.stringify(bridge) };
+    } else result.files["config/web-bridge.json"] = JSON.stringify(bridge);
     change("webBridge", "webBridge", true, before !== canonicalJson(bridge));
   }
   if (Object.keys(mappings).length) result.files["config-git/local-mappings.json"] = JSON.stringify({ ...JSON.parse(readOptional(store, "config-git/local-mappings.json") ?? "{}"), ...mappings });
@@ -296,6 +307,13 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
 
 /** Synchronous, called only inside the enclosing Store.command transaction. */
 export function importDefinitions(store: Store, plan: PreparedImport) {
+  if (plan.bridge) {
+    check(workspaceSchemaInstalled(store), "PREVIEW_EXPIRED", "配置事实源已变化，请重新预览", 409);
+    const backend = new DatabaseBridgeConfiguration(store); backend.read();
+    const current = store.one<{ revision: number; content_hash: string }>("SELECT revision,content_hash FROM bridge_configuration WHERE id='current'");
+    check(current?.revision === plan.bridge.revision && current.content_hash === plan.bridge.contentHash, "PREVIEW_EXPIRED", "浏览器配置已变化，请重新预览", 409);
+    bridgeDeclaration(plan.bridge.runtimeJson); backend.write(plan.bridge.runtimeJson);
+  }
   importDictionaries(store, plan.dictionaries);
   const now = Date.now();
   for (const { value, changed } of plan.providers) if (changed) {

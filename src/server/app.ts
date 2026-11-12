@@ -33,7 +33,13 @@ import type { CredentialBindings } from "../web-bridge/credential-inputs.js";
 import { WebBridgeGateway } from "../web-bridge/gateway.js";
 import { WebBridgeClient } from "../web-bridge/client.js";
 import { catalogHash, extensionDirectory } from "../web-bridge/catalog.js";
-import { WebBridgeConfig } from "../web-bridge/config.js";
+import { configuredWebBridge } from "../web-bridge/configured.js";
+import { workspaceSchemaInstalled, installWorkspaceBusinessTracking, assertNoMaintenanceTask } from "../agent/workspace-business-hooks.js";
+import { MaintenanceAssets } from "../agent/maintenance-assets.js";
+import { MaintenanceService, assertMaintenanceQuiescent } from "../agent/maintenance-service.js";
+import { registerMaintenanceRoutes } from "../agent/maintenance-routes.js";
+import { MaintenanceApplyWorker } from "../agent/maintenance-worker.js";
+import { createMaintenanceAuthority, type MaintenanceRuntimeFactory } from "../agent/maintenance-composition.js";
 import { normalizeToolIdentity, validateToolId } from "../web-bridge/tool-identity.js";
 import { LocalApiAuth } from "../web-bridge/auth.js";
 import type { Bootstrap } from "./bootstrap.js";
@@ -60,7 +66,7 @@ function cursor(value: unknown) {
   check(typeof value === "string" && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)), "INVALID_CURSOR", "游标必须为非负整数");
   return Number(value);
 }
-export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegistry, sessionManager?: SessionManager, bootstrap?: Bootstrap, configGitOptions: GitRepositoryOptions = {}) {
+export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegistry, sessionManager?: SessionManager, bootstrap?: Bootstrap, configGitOptions: GitRepositoryOptions = {}, maintenanceFactory?: MaintenanceRuntimeFactory) {
   let services: Record<string, any> = {};
   let cleanup: (() => unknown | Promise<unknown>)[] = [];
   let clean = true;
@@ -85,6 +91,23 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       add("store", opened, () => opened.close());
       const coordinator = configCoordinator(opened);
       add("coordinator", coordinator);
+      const migrated = workspaceSchemaInstalled(opened);
+      if (migrated) {
+        const dispose = installWorkspaceBusinessTracking(opened);
+        add("workspaceTracking", true, dispose);
+      }
+      const maintenanceRuntime = migrated && maintenanceFactory ? add("maintenanceRuntime", createMaintenanceAuthority(opened, maintenanceFactory)) : undefined;
+      if (maintenanceRuntime) {
+        cleanup.push(() => maintenanceRuntime.close());
+        // Validate the trusted authority before calling its recovery hook.
+        const boundary = maintenanceRuntime.boundary;
+        await maintenanceRuntime.recover();
+        assertNoMaintenanceTask(opened);
+        assertMaintenanceQuiescent(opened, boundary);
+      } else if (migrated) {
+        assertNoMaintenanceTask(opened);
+        check(!opened.one("SELECT id FROM agent_maintenance_apply_requests WHERE state='queued' LIMIT 1"), "MAINTENANCE_RUNTIME_REQUIRED", "已有确认应用等待处理，须接入真实维护授权与停机证明；禁止忽略队列启动", 503);
+      }
       const restore = new ConfigRestoreService(opened, coordinator, { afterRestore: async () => {
         await services.providers?.reloadAfterRestore();
         services.bridge?.reloadAfterRestore();
@@ -92,15 +115,16 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       add("restore", restore);
       await new GitRepositoryService(opened.root, configGitOptions).recover();
       await restore.recover();
-      opened.recoverBusiness();
+      if (maintenanceRuntime) coordinator.withRecovery(() => opened.recoverBusiness()); else opened.recoverBusiness();
       const manager = sessionManager ?? new SessionManager(agentLimits()); add("manager", manager, () => manager.close());
-      const registry = suppliedProviders ?? new ProviderRegistry(opened)
+      const registerProviders = () => suppliedProviders ?? new ProviderRegistry(opened)
         .register(new CliProvider("codex-cli", { native: codexNativeAdapter(manager, manager.limits), scheduler: manager }))
         .register(new CliProvider("pi-cli", { native: piNativeAdapter(manager, manager.limits), scheduler: manager }));
+      const registry = maintenanceRuntime ? coordinator.withRecovery(registerProviders) : registerProviders();
       add("providers", registry, () => registry.closeVerifications());
       const projects = gitProjects(opened); await projects.recover(); add("projects", projects, () => projects.close());
       const storage = new StorageUsageService(opened); add("storage", storage, () => storage.close());
-      const gateway = new WebBridgeGateway(new WebBridgeClient(opened.files.path("runtime/web-bridge.sock"), catalogHash), new WebBridgeConfig(opened.root, coordinator)); gateway.history = new BridgeExecutionHistory(opened.files);
+      const gateway = new WebBridgeGateway(new WebBridgeClient(opened.files.path("runtime/web-bridge.sock"), catalogHash), configuredWebBridge(opened, coordinator)); gateway.history = new BridgeExecutionHistory(opened.files);
       for (const tool of gateway.tools()) gateway.history.restrict(tool);
       add("bridge", gateway, () => gateway.close());
       add("apiAuth", new LocalApiAuth(opened.root));
@@ -118,6 +142,11 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       add("secrets", secretsService);
       gateway.httpDependencies.resolveCredential = dictionaryCredentials(opened, secretsService);
       add("dictionaries", new DictionaryService(opened, secretsService));
+      if (maintenanceRuntime) {
+        const maintenance = add("maintenance", new MaintenanceService(opened, new MaintenanceAssets(opened, gateway.config!), maintenanceRuntime.boundary));
+        const worker = new MaintenanceApplyWorker(opened, maintenance, { synchronize: true });
+        add("maintenanceWorker", worker, () => worker.close());
+      }
       const notifications = add("notifications", new NotificationFeed());
       const listener = (event: StreamEvent) => {
         if (event.streamType === "run" && /^run\.(succeeded|failed|cancelled|interrupted)$/.test(event.type)) {
@@ -134,7 +163,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       clean = true;
     } catch (error) { await closeServices(); throw error; }
   };
-  const activate = () => { services.runner.start(); services.scriptTests.start(); };
+  const activate = () => { services.runner.start(); services.scriptTests.start(); services.maintenanceWorker?.start(); };
   const initialization = initialStore ? initialize(initialStore).then(activate) : Promise.resolve();
   // Keep rejection observed until Fastify's ready barrier reports startup failure.
   void initialization.catch(() => {});
@@ -179,6 +208,15 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     if (request.url.startsWith("/api/") && !request.url.startsWith("/api/config-git/") && !["/api/health", "/api/ready"].includes(request.url)) services.coordinator?.assertAvailable();
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
+  });
+  if (maintenanceFactory) registerMaintenanceRoutes(app, {
+    service: proxy<MaintenanceService>("maintenance"),
+    tasks: () => services.maintenanceRuntime?.tasks,
+    authorizeUserRequest(request) {
+      check(services.maintenanceRuntime, "MAINTENANCE_RUNTIME_REQUIRED", "维护运行时尚未启用", 503);
+      return services.maintenanceRuntime.authorizeUserRequest(request);
+    },
+    schedule() { services.maintenanceWorker.wake(); },
   });
   app.setErrorHandler((error, _request, reply) => {
     const known = error instanceof AppError;
@@ -599,7 +637,11 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     app.register(staticPlugin, { root: assets });
     app.setNotFoundHandler((request, reply) => request.url.startsWith("/api/") ? reply.code(404).send({ code: "NOT_FOUND", message: "接口不存在" }) : reply.sendFile("index.html"));
   }
-  app.addHook("preClose", async () => { await bootstrap?.close(); for (const close of connections) close(); if (services.providers) await services.providers.closeVerifications(); });
+  app.addHook("preClose", async () => {
+    await bootstrap?.close();
+    await services.maintenanceWorker?.close(); await services.maintenanceRuntime?.close();
+    for (const close of connections) close(); if (services.providers) await services.providers.closeVerifications();
+  });
   // 关闭顺序（§23.2）：先停止接收任务与 SSE、取消验证，再取消创作与运行任务，
   // 之后关闭 Provider 连接（必要时 kill 进程组），最后关闭 Store。
   app.addHook("onClose", async () => { await closeServices(); bootstrap?.release(); });
@@ -608,5 +650,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     // initialize 完成后可用的真实服务实例（测试与宿主接线使用）。
     get secrets() { return services.secrets as SecretsService; },
     get dictionaries() { return services.dictionaries as DictionaryService; },
+    get maintenance() { return services.maintenance as MaintenanceService | undefined; },
+    get maintenanceWorker() { return services.maintenanceWorker as MaintenanceApplyWorker | undefined; },
   };
 }

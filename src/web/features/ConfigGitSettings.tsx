@@ -141,6 +141,10 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
   const [operation, setOperation] = useState<Operation>();
   const [preview, setPreview] = useState<Preview>();
   const [direction, setDirection] = useState(() => localStorage.getItem("orchard-config-git-remote-operation") ? "remote" : "backup");
+  const [discardBackupOpen, setDiscardBackupOpen] = useState(false);
+  const discardRemote = useRef<(trigger: HTMLButtonElement) => void>(null);
+  const backupTab = useRef<HTMLButtonElement>(null);
+  const remoteTab = useRef<HTMLButtonElement>(null);
   const [message, setMessage] = useState("备份配置");
   const messageAgent = useResource<MessageAgentSetting>(`${root}/message-agent`);
   const [confirmed, setConfirmed] = useState(false);
@@ -239,11 +243,31 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
     await mutate("/commit-preview", { message: message.trim(), push: true, ...general() }, showPreview);
   });
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
+  const switchToRemote = () => { invalidate(); setDirection("remote"); };
   const cannotConfirm = !preview || !confirmed || !!preview.nextCursor || preview.noChanges || preview.blockers.length > 0 || preview.diffs.some(d => d.blockingReason) || preview.expiresAt <= Date.now();
   const snapshotBlocked = binding?.snapshotState === "invalid" || binding?.snapshotState === "unsupported";
   return <section className={`config-git-settings${sync ? " config-git-sync" : ""}`} aria-label="Git 配置存储" aria-busy={locked}>
-    {sync && <div className="actions" role="group" aria-label="同步方向"><Button variant={direction === "backup" ? "secondary" : "ghost"} aria-pressed={direction === "backup"} onClick={() => { if ((direction !== "remote" && !preview) || window.confirm("放弃当前预览和映射输入？已受理操作会继续执行。")) { invalidate(); setDirection("backup"); } }}>备份到远端</Button><Button variant={direction === "remote" ? "secondary" : "ghost"} aria-pressed={direction === "remote"} onClick={() => { if (!preview || window.confirm("放弃当前备份预览？")) { invalidate(); setDirection("remote"); } }}>从远端同步</Button></div>}
-    {sync && <RemoteConfigSync visible={direction === "remote"} binding={binding} status={status} onApplied={reload} onLeave={() => setDirection("backup")} />}
+    {sync && <div className="actions" role="group" aria-label="同步方向">
+      <Button ref={backupTab} variant={direction === "backup" ? "secondary" : "ghost"} aria-pressed={direction === "backup"} onClick={event => { if (direction === "remote") discardRemote.current?.(event.currentTarget); }}>备份到远端</Button>
+      <Button ref={remoteTab} variant={direction === "remote" ? "secondary" : "ghost"} aria-pressed={direction === "remote"} onClick={() => {
+        if (direction === "remote") return;
+        if (preview) setDiscardBackupOpen(true);
+        else switchToRemote();
+      }}>从远端同步</Button>
+    </div>}
+    {sync && <RemoteConfigSync visible={direction === "remote"} binding={binding} status={status} onApplied={reload} leaveRef={discardRemote} onLeave={() => setDirection("backup")} onLeaveFocus={() => backupTab.current?.focus()} />}
+    <Dialog open={discardBackupOpen} onOpenChange={setDiscardBackupOpen}>
+      <DialogContent showCloseButton={false} onCloseAutoFocus={event => { event.preventDefault(); remoteTab.current?.focus(); }}>
+        <DialogHeader>
+          <DialogTitle>放弃当前备份预览？</DialogTitle>
+          <DialogDescription>切换到远端同步会清除当前备份预览。</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setDiscardBackupOpen(false)}>取消</Button>
+          <Button variant="destructive" onClick={() => { setDiscardBackupOpen(false); switchToRemote(); }}>放弃并切换</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <div hidden={sync && direction !== "backup"} className="config-git-backup">
     <div className="settings-section-heading"><span className="field-hint">{sync ? "本地变更" : "管理配置备份仓库及描述生成方式"}</span><Button variant="outline" size={sync ? "icon-sm" : "sm"} aria-label="刷新状态" title="刷新状态" disabled={busy} onClick={() => void run(reload)}><RefreshCw size={14} className={busy ? "animate-spin" : ""} />{!sync && "刷新状态"}</Button></div>
     <div className="config-git-body"><ErrorNotice message={error || messageAgent.error} /><ToastNotice message={notice} onDismiss={() => setNotice("")} />

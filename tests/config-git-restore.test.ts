@@ -1,16 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigRestoreService } from "../src/config-git/restore.js";
 import { ConfigWriteCoordinator, configCoordinator } from "../src/config-git/coordinator.js";
 import type { PortableSnapshot } from "../src/config-git/snapshot-types.js";
 import { localReference } from "../src/config-git/snapshot-primitives.js";
 import { exportSnapshot, parseSnapshot } from "../src/config-git/snapshot.js";
-import { temporary, TestStore } from "./helpers.js";
-import { Store } from "../src/persistence/store.js";
-import { DirectoryLease } from "../src/migrations/lock.js";
+import { temporary, TestStore, LegacyTestStore } from "./helpers.js";
 
 function snapshot(): PortableSnapshot {
   const definition = { id: "sample", name: "Sample", description: "", runtime: "nodejs" as const, entryFile: "main.ts", inputSchema: true, outputSchema: true, timeoutMs: 10000, resultMode: "json" as const, files: { "main.ts": "export default input => input;\n" } };
@@ -165,13 +163,15 @@ test("provider hidden models merge, local mappings required, unchanged revision 
 });
 
 for (const boundary of ["accepted", "prepared", "transaction", "database_committed_before_journal", "before_file:config/web-bridge.json", "after_file:config/web-bridge.json", "before_file:config-git/general.json", "after_file:config-git/general.json", "before_completed"]) test(`SIGKILL restart at ${boundary} restores complete old or new state`, async t => {
-  const root = temporary(t), initial = new TestStore(root); initial.close();
+  const legacyFile = boundary.endsWith(":config/web-bridge.json");
+  const Fixture = legacyFile ? LegacyTestStore : TestStore;
+  const root = temporary(t), initial = new Fixture(root); initial.close();
   const fixture = join(root, "snapshot.json"); writeFileSync(fixture, JSON.stringify(snapshot()));
-  const childCode = `import {readFileSync} from 'node:fs'; import {TestStore} from './tests/helpers.ts'; import {ConfigRestoreService} from './src/config-git/restore.ts'; import {configCoordinator} from './src/config-git/coordinator.ts'; const store=new TestStore(process.argv[1]); const service=new ConfigRestoreService(store,configCoordinator(store),{fault(phase){if(phase===process.argv[2])process.kill(process.pid,'SIGKILL')}}); const preview=await service.preview(JSON.parse(readFileSync(process.argv[1]+'/snapshot.json','utf8'))); await service.apply('killed',preview.token);`;
-  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childCode, root, boundary], { cwd: process.cwd(), encoding: "utf8", timeout: 30000 });
+  const childCode = `import {readFileSync} from 'node:fs'; import {TestStore,LegacyTestStore} from './tests/helpers.ts'; import {ConfigRestoreService} from './src/config-git/restore.ts'; import {configCoordinator} from './src/config-git/coordinator.ts'; const store=new (process.argv[3]==='legacy'?LegacyTestStore:TestStore)(process.argv[1]); const service=new ConfigRestoreService(store,configCoordinator(store),{fault(phase){if(phase===process.argv[2])process.kill(process.pid,'SIGKILL')}}); const preview=await service.preview(JSON.parse(readFileSync(process.argv[1]+'/snapshot.json','utf8'))); await service.apply('killed',preview.token);`;
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childCode, root, boundary, legacyFile ? "legacy" : "current"], { cwd: process.cwd(), encoding: "utf8", timeout: 30000 });
   assert.equal(child.signal, "SIGKILL", child.stderr);
   // Stale lease is reclaimed by the existing DirectoryLease protocol.
-  const lease = DirectoryLease.acquire(root), store = new Store(root, lease); t.after(() => { store.close(); if (existsSync(join(root, "workbench.lock"))) lease.release(); });
+  const store = new Fixture(root); t.after(() => store.close());
   const service = new ConfigRestoreService(store); await service.recover(); store.recoverBusiness();
   const committed = !["accepted", "prepared", "transaction"].includes(boundary);
   assert.equal(!!store.one("SELECT id FROM scripts WHERE id='sample'"), committed);

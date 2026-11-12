@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 import { createApp } from "../src/server/app.js";
 import { titleFromPrompt } from "../src/authoring/conversations.js";
 import type { ConversationRecord } from "../src/persistence/store.js";

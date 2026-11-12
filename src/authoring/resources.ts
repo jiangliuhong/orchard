@@ -1,5 +1,5 @@
 import type { Store } from "../persistence/store.js";
-import { WebBridgeConfig } from "../web-bridge/config.js";
+import { configuredWebBridge } from "../web-bridge/configured.js";
 import { credentialSchema } from "../web-bridge/credential-schema.js";
 
 /** Allowlisted contracts only: never include source files, credential values or execution code. */
@@ -16,7 +16,7 @@ export function workflowResourceMetadata(store: Store) {
       };
     }));
   // Read the current persisted configuration each turn, including after configuration restores.
-  const bridge = new WebBridgeConfig(store.root);
+  const bridge = configuredWebBridge(store);
   const availableBridgeTools = bridge.tools().filter(tool => tool.enabled && bridge.application(tool.application)?.enabled).map(tool => ({
     application: tool.application, tool: tool.toolId, description: tool.description,
     parameters: tool.parameters, fields: tool.fields, risk: tool.risk, approval: tool.approval,

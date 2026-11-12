@@ -11,7 +11,7 @@ import { GraphRunner } from "../src/runtime/runner.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import { WebBridgeGateway } from "../src/web-bridge/gateway.js";
 import { WebBridgeClient } from "../src/web-bridge/client.js";
-import { setup, until, publishExample } from "./helpers.js";
+import { setupLegacy as setup, until, publishExample } from "./helpers.js";
 import type { AgentProvider } from "../src/providers/registry.js";
 import type { ScriptDefinition } from "../src/domain/scripts.js";
 

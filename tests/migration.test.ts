@@ -19,6 +19,7 @@ import { source, plan, validateLedger, validateAnswers, resolvePlan } from '../s
 import { preview } from '../src/migrations/preview.js';
 import { execute, recoverJobs, initializeData, restore, baseline } from '../src/migrations/runner.js';
 import { defaultBridgeConfig } from '../src/migrations/config.js';
+import { seedWorkspaceV11 } from '../src/migrations/workspace-v11.js';
 import { databaseFingerprint } from '../src/migrations/validators.js';
 import { safe, present, scan, writeJson, readJson, durable, canonical, directory } from '../src/migrations/journal.js';
 import type { Job, Ledger, Question } from '../src/migrations/types.js';
@@ -51,8 +52,13 @@ function fixture(t:TestContext,version=2,config:0|1|null=0){
   db.prepare("INSERT INTO script_versions(id,script_id,version_no,status,revision,entry_file,input_schema_json,output_schema_json,source_ref,content_hash,validation_json,created_at,updated_at) VALUES('sv','script',1,'draft',0,'main.mjs','{}','{}',?,?,'{}',0,0)").run(script.path,script.hash);
   db.exec("UPDATE scripts SET current_draft_version_id='sv'");
  }
- db.close();
  if(config!==null)writeJson(safe(root,'config/web-bridge.json'),config===0?{applications:{demo:{id:'demo',name:'Demo',enabled:true}},environments:{demo:[{id:'prod',origin:'https://example.test',enabled:true,bound:false,tabAvailable:false}]},unknown:{nested:['keep',null]}}:{...defaultBridgeConfig(),unknown:{nested:['keep',null]}});
+ if(version>=11){
+  db.exec('BEGIN');
+  try{seedWorkspaceV11(db,root);db.exec('COMMIT');}
+  catch(error){db.exec('ROLLBACK');throw error;}
+  finally{db.close();}
+ }else db.close();
  for(const name of ['runs','script-agent','agent-sessions','agent-workspaces'])durable(safe(root,`${name}/fixture/opaque.dat`),Buffer.from([0,1,255,10]));
  return root;
 }
@@ -135,7 +141,9 @@ test('v6 release ledgers keep their original migration identities when extending
  const migrations=declarations.filter(value=>value.kind==='database'&&value.from>=2&&value.to<=6);
  const ledger:Ledger={formatVersion:1,baseline:{database:2,webBridge:1,applicationId:1331110449,source:'previous release'},completed:[{jobId:randomUUID(),migrations,source:{database:2,webBridge:1},target:{database:6,webBridge:1}}]};
  writeJson(safe(root,'migrations/ledger.json'),ledger);
- assert.deepEqual(plan(root).steps.map(step=>step.id),['db.v6-v7','db.v7-v8','db.v8-v9','db.v9-v10']);
+ const expected=['db.v6-v7','db.v7-v8','db.v8-v9','db.v9-v10'];
+ if(currentVersion>=11)expected.push('db.workspace-projection.v10-v11');
+ assert.deepEqual(plan(root).steps.map(step=>step.id),expected);
  const job=execute(root,accept(root));assert.equal(job.phase,'committed',JSON.stringify(job.error));
  const updated=readJson<Ledger>(safe(root,'migrations/ledger.json'));
  assert.deepEqual(updated.completed[0],ledger.completed[0]);assert.equal(updated.completed.length,2);

@@ -8,12 +8,14 @@ import {createHash} from 'node:crypto';
 import {transformSync} from 'esbuild';
 const root=new URL('../',import.meta.url),manifestPath='docs/features/2026-11-06-data-migration/migration-manifest.json';
 const manifest=JSON.parse(readFileSync(new URL(manifestPath,root),'utf8'));
+const declarationCount = new Map([[10, 14], [11, 16]]).get(manifest.targetDatabaseVersion);
 test('release locks independent historical baselines and executable dependencies separately from schema approval',()=>{
  const approval=JSON.parse(readFileSync(new URL(manifest.schemaApproval,root),'utf8'));
  assert.equal(manifest.status,'release_locked');assert.equal(manifest.review.contentDigest,approval.contentDigest);assert.notEqual(manifest.contentDigest,approval.contentDigest);
  for(const entry of manifest.entries)for(const path of ['src/migrations/mapping.ts','src/migrations/runner.ts','src/migrations/validators.ts','src/migrations/questions.ts'])assert.ok(entry.files.includes(path),path);
  for(const path of ['src/server/bootstrap.ts','tests/fixtures/migrations/database/provenance.json','src/web/Bootstrap.tsx','vite.config.ts','src/domain/validation.ts'])assert.ok(manifest.fileChecksums[path],path);
- assert.equal(manifest.entries.length,14);
+ assert.ok(declarationCount, "unrecognized release target");
+ assert.equal(manifest.entries.length,declarationCount);
 });
 test('v9 migration identities survive later business-code releases',()=>{
  const historical=JSON.parse(readFileSync(new URL('docs/features/2026-11-06-data-migration/release-v9.json',root),'utf8'));
@@ -21,7 +23,7 @@ test('v9 migration identities survive later business-code releases',()=>{
  for(const id of ['db.v6-v7','db.v7-v8','db.v8-v9'])assert.ok(historical.entries.some((entry:{id:string})=>entry.id===id));
 });
 test('locked release passes approval verification and deterministic bundle generation',()=>{
- const result=execFileSync(process.execPath,['scripts/check-migration-manifest.mjs','--require-review'],{cwd:root,encoding:'utf8'});assert.match(result,/Verified 14 locked migration declarations/);
+ const result=execFileSync(process.execPath,['scripts/check-migration-manifest.mjs','--require-review'],{cwd:root,encoding:'utf8'});assert.ok(result.includes(`Verified ${declarationCount} locked migration declarations`));
  execFileSync(process.execPath,['scripts/generate-migration-bundle.mjs','--check'],{cwd:root,encoding:'utf8'});
 });
 test('compiled integrity envelopes must retain every required migration artifact',t=>{

@@ -15,9 +15,10 @@ const DICTIONARY_TABLES = ["dictionaries", "dictionary_versions", "run_dictionar
 test("registered dictionary migration SQL and initialization match the reviewed constants", () => {
   assert.equal(sql[8], MIGRATE_V8_TO_V9);
   assert.equal(sql[9], MIGRATE_V9_TO_V10);
-  assert.equal(initializationSql, SCHEMA);
+  const v10 = SCHEMA.replace(/PRAGMA user_version = \d+;\n$/, "PRAGMA user_version = 10;\n");
+  assert.ok(initializationSql.startsWith(v10));
   assert.equal(SCHEMA.includes("run_dictionary_bindings"), true);
-  assert.match(SCHEMA, /PRAGMA user_version = 10;/);
+  assert.match(SCHEMA, new RegExp(`PRAGMA user_version = ${SCHEMA_VERSION};\n$`));
 });
 
 test("fresh v9 database keeps new tables empty with active integrity triggers", (t: TestContext) => {

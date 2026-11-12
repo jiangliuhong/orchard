@@ -5,7 +5,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 const root=fileURLToPath(new URL('../',import.meta.url));
 export const manifestPath='docs/features/2026-11-06-data-migration/migration-manifest.json';
 export const historicalReleasePath='docs/features/2026-11-06-data-migration/release-v6.json';
-export const historicalReleasePaths=[historicalReleasePath,'docs/features/2026-11-06-data-migration/release-v9.json'];
+export const historicalReleasePaths=[historicalReleasePath,'docs/features/2026-11-06-data-migration/release-v9.json','docs/features/2026-11-06-data-migration/release-v10.json'];
 export function historicalReleases(){
  return historicalReleasePaths.filter(path=>existsSync(resolve(root,path))).map(path=>JSON.parse(resourceBytes(path)));
 }
@@ -47,7 +47,12 @@ export function checkManifest({requireReview=false}={}){
  if(histories.length!==historicalReleasePaths.length)throw new Error('Missing historical release archive');
  for(const historical of histories){
   if(historical.contentDigest!==contentDigest(historical))throw new Error('Invalid historical release archive');
-  for(const entry of historical.entries)if(canonical(manifest.entries.find(candidate=>candidate.id===entry.id))!==canonical(entry))throw new Error(`Historical migration identity changed: ${entry.id}`);
+  for(const entry of historical.entries) {
+   if(canonical(manifest.entries.find(candidate=>candidate.id===entry.id))!==canonical(entry))throw new Error(`Historical migration identity changed: ${entry.id}`);
+   for(const path of entry.files.filter(path=>path.endsWith('.sql'))) {
+    if(sha256(resourceBytes(path))!==historical.fileChecksums[path])throw new Error(`Approved schema/protocol bytes changed: ${entry.id}`);
+   }
+  }
  }
  if(approved.formatVersion!==1||approved.status!=='review_candidate'||approved.contentDigest!==contentDigest(approved))throw new Error('Invalid schema approval archive');
  if(approved.review.status!=='approved'||!approved.review.reviewer||!approved.review.date||approved.review.contentDigest!==approved.contentDigest||canonical(manifest.review)!==canonical(approved.review))throw new Error('Schema approval does not match the reviewed archive');

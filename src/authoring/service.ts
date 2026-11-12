@@ -1,6 +1,7 @@
 import { ProviderEventBatcher } from "../providers/event-batcher.js";
 import { validateWorkflowDictionaries, dictionaryDependencyMetadata } from "../dictionaries/validation.js";
 import { configCoordinator } from "../config-git/coordinator.js";
+import { assertLegacyMaintenanceAllowed } from "../agent/workspace-business-hooks.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -169,6 +170,7 @@ export class AuthoringService {
     });
   }
   async start(id: string, input: AgentChoice & { prompt: string; expectedRevision: number; requestId: string; conversationId?: string; mode?: "single" | "multi" }) {
+    assertLegacyMaintenanceAllowed(this.store);
     return configCoordinator(this.store).withActivity("AuthoringService.start", async () => {
       const prior = this.store.one("SELECT * FROM command_receipts WHERE scope=? AND request_id=?", `turn:${id}`, input.requestId);
       if (prior) return configCoordinator(this.store).withWrite(() => this.store.command(`turn:${id}`, input.requestId, input, () => { throw new Error("unreachable"); }));

@@ -15,7 +15,7 @@ import { GraphRunner } from "../src/runtime/runner.js";
 import { prepareScriptProposal } from "../src/domain/script-authoring.js";
 import { schemaSubset, bindingSchema } from "../src/domain/schema-compatibility.js";
 import type { ScriptDefinition } from "../src/domain/scripts.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 
 const definition = (id = "library-script"): ScriptDefinition => ({
   id, name: "Original name", description: "Original description", runtime: "nodejs", entryFile: "main.ts",

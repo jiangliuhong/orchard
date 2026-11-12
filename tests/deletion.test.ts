@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createApp } from "../src/server/app.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 
 test("workflow deletion removes all versions, original and later drafts, runs, conversations and receipts while copies survive", async context => {
   const { store, providers, provider } = setup(context);

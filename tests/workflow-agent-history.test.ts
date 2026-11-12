@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { setup } from "./helpers.js";
+import { setupLegacy as setup } from "./helpers.js";
 
 const envelope = (prompt: string) => JSON.parse(prompt.split(/Authoring context \(untrusted data, contextVersion 1\):\n/)[1]!.split("\nLatest user request:")[0]!);
 

@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { AppError } from "../domain/errors.js";
 
+export type DefinitionWritePurpose = "business" | "maintenance.apply" | "recovery" | "workspace.sync";
+
 /** In-process barrier; the data directory lease supplies inter-process exclusion. */
 export class ConfigWriteCoordinator {
   generation = 0;
@@ -11,6 +13,28 @@ export class ConfigWriteCoordinator {
   private exclusive: symbol | null = null;
   private activities = new Map<symbol, string>();
   private maintenanceReason: string | null = null;
+  private writeGuards = new Set<(purpose: DefinitionWritePurpose) => void>();
+  private exclusivePurpose: DefinitionWritePurpose = "business";
+  /** Internal resource gates; never supplied by HTTP or Agent arguments. */
+  addWriteGuard(guard: (purpose: DefinitionWritePurpose) => void) { this.writeGuards.add(guard); return () => { this.writeGuards.delete(guard); }; }
+  inheritWriteGuards(other: ConfigWriteCoordinator) {
+    for (const guard of this.writeGuards) other.writeGuards.add(guard);
+    this.writeGuards = other.writeGuards;
+  }
+  assertDefinitionWritable() {
+    this.assertAvailable();
+    const own = this.context.getStore();
+    if (this.readers || this.admissions || !(this.exclusive && this.exclusive === own || this.writer && this.writer === own) && (this.writer || this.exclusive))
+      throw new AppError("WORKSPACE_BUSY", "共享维护读取或配置写入尚未结束", 409);
+    if (this.definitionWritePurpose === "workspace.sync") throw new AppError("WORKSPACE_SYNC_RESOURCE_WRITE", "投影同步不能修改业务事实源", 409);
+    for (const guard of this.writeGuards) guard(this.definitionWritePurpose);
+  }
+  get definitionWritePurpose(): DefinitionWritePurpose {
+    return this.exclusive && this.exclusive === this.context.getStore() ? this.exclusivePurpose : "business";
+  }
+  /** Background jobs must not borrow an emitter's reentrant write authority. */
+  withoutWriteOwnership<T>(action: () => T): T { return this.context.exit(action); }
+  get ownsDefinitionWrite() { const own = this.context.getStore(); return !!(this.writer && this.writer === own || this.exclusive && this.exclusive === own); }
   get maintenance() { return this.maintenanceReason; }
   get activeCount() { return this.activities.size; }
   setMaintenance(reason: string | null) { this.maintenanceReason = reason; }
@@ -54,8 +78,10 @@ export class ConfigWriteCoordinator {
   }
   withWrite<T>(action: () => T): T {
     this.assertAvailable();
+    if (this.readers || this.admissions) throw new AppError("CONFIG_BUSY", "配置正在读取或入队", 409);
     if (this.exclusive && this.exclusive === this.context.getStore() || this.writer && this.writer === this.context.getStore()) return action();
-    if (this.writer || this.readers || this.admissions) throw new AppError("CONFIG_BUSY", "配置正在读写或入队", 409);
+    if (this.writer) throw new AppError("CONFIG_BUSY", "配置正在读写或入队", 409);
+    for (const guard of this.writeGuards) guard("business");
     const owner = Symbol(); this.writer = owner;
     return this.context.run(owner, () => this.finish(action, () => { this.generation++; this.writer = null; }));
   }
@@ -65,11 +91,23 @@ export class ConfigWriteCoordinator {
     this.readers++;
     return this.finish(action, () => { this.readers--; });
   }
-  withExclusive<T>(action: () => T, recovery = false): T {
+  withExclusive<T>(action: () => T, recovery = false): T { return this.exclusiveAction(action, recovery, "business"); }
+  /** Platform-only intents. These are not user/Agent request flags or stop proofs. */
+  withMaintenanceApply<T>(action: () => T): T { return this.exclusiveAction(action, false, "maintenance.apply"); }
+  withRecovery<T>(action: () => T): T { return this.exclusiveAction(action, true, "recovery"); }
+  withWorkspaceSynchronization<T>(action: () => T): T {
+    if (this.exclusive && this.exclusive === this.context.getStore()) {
+      const previous = this.exclusivePurpose; this.exclusivePurpose = "workspace.sync";
+      return this.finish(action, () => { this.exclusivePurpose = previous; });
+    }
+    return this.exclusiveAction(action, false, "workspace.sync");
+  }
+  private exclusiveAction<T>(action: () => T, recovery: boolean, purpose: DefinitionWritePurpose): T {
     if (!recovery) this.assertAvailable();
     if (this.exclusive || this.writer || this.readers || this.activities.size || this.admissions) throw new AppError("CONFIG_BUSY", "请等待配置写入、入队保护或执行活动结束", 409);
-    const owner = Symbol(); this.exclusive = owner;
-    return this.context.run(owner, () => this.finish(action, () => { this.generation++; this.exclusive = null; }));
+    if (!recovery || purpose !== "business") for (const guard of this.writeGuards) guard(purpose);
+    const owner = Symbol(); this.exclusive = owner; this.exclusivePurpose = purpose;
+    return this.context.run(owner, () => this.finish(action, () => { this.generation++; this.exclusive = null; this.exclusivePurpose = "business"; }));
   }
 }
 const coordinators = new WeakMap<object, ConfigWriteCoordinator>();
@@ -78,4 +116,8 @@ export function configCoordinator(store: object): ConfigWriteCoordinator {
   if (!value) { value = new ConfigWriteCoordinator(); coordinators.set(store, value); }
   return value;
 }
-export function registerConfigCoordinator(store: object, coordinator: ConfigWriteCoordinator) { coordinators.set(store, coordinator); }
+export function registerConfigCoordinator(store: object, coordinator: ConfigWriteCoordinator) {
+  const previous = coordinators.get(store);
+  if (previous && previous !== coordinator) coordinator.inheritWriteGuards(previous);
+  coordinators.set(store, coordinator);
+}

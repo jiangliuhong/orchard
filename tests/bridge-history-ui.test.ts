@@ -16,7 +16,17 @@ test("history only loads parameters on explicit action and respects disabled sta
   globalThis.fetch = async () => { requests++; return Response.json({ items: [record] }); };
   try {
     const view = render(createElement(BridgeExecutionHistory, { application: "crm", toolId: "query", disabled: true, onReuse: value => { reused = value; } }));
-    const button = await screen.findByRole("button", { name: "载入参数并前往测试", hidden: true });
+    const row = await screen.findByRole("button", { name: /测试 · 成功 · 12 ms/ });
+    assert.equal(screen.queryByRole("region", { name: "执行详情" }), null);
+    fireEvent.click(row);
+    assert.equal(row.getAttribute("aria-expanded"), "true");
+    const back = screen.getByRole("button", { name: "返回列表" });
+    assert.equal(document.activeElement, back);
+    fireEvent.keyDown(back, { key: "Escape" });
+    assert.equal(row.getAttribute("aria-expanded"), "false");
+    assert.equal(document.activeElement, row);
+    fireEvent.click(row);
+    const button = screen.getByRole("button", { name: "载入参数并前往测试" });
     assert.equal((button as HTMLButtonElement).disabled, true);
     assert.equal(reused, undefined);
     view.rerender(createElement(BridgeExecutionHistory, { application: "crm", toolId: "query", disabled: false, onReuse: value => { reused = value; } }));
@@ -44,7 +54,8 @@ test("workspace restores dictionary bindings and permitted inline history withou
     render(createElement(WebBridgeSettings));
     fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
     fireEvent.click(screen.getByRole("button", { name: "执行历史" }));
-    fireEvent.click(await screen.findByRole("button", { name: "载入参数并前往测试", hidden: true }));
+    fireEvent.click(await screen.findByRole("button", { name: /测试 · 成功 · 1 ms/ }));
+    fireEvent.click(screen.getByRole("button", { name: "载入参数并前往测试" }));
     assert.equal((screen.getByLabelText("ak:") as HTMLInputElement).value, "{{dictionary:dict:access}}");
     assert.equal((screen.getByLabelText("label:") as HTMLInputElement).value, "saved-label");
     assert.equal((screen.getByLabelText("sk:") as HTMLInputElement).value, "");

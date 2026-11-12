@@ -7,7 +7,7 @@ import { BridgeAgentService } from "../src/web-bridge/agent.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import type { WebBridgeTool } from "../src/web-bridge/catalog.js";
 import { BRIDGE_PROPOSAL_SCHEMA, bridgeAuthoringContract, prepareBridgeProposal } from "../src/web-bridge/authoring.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 
 const definition = (application = "crm", toolId = "customers"): WebBridgeTool => ({
   application, toolId, site: application, description: "查询客户", parameters: { type: "object", properties: {}, additionalProperties: false },

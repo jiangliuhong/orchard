@@ -1,5 +1,6 @@
 import { dictionaryDependencyMetadata } from "../dictionaries/validation.js";
 import { configCoordinator } from "../config-git/coordinator.js";
+import { assertLegacyMaintenanceAllowed } from "../agent/workspace-business-hooks.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { digest, canonicalJson } from "../persistence/files.js";
 import { ScriptJournal } from "../persistence/script-journal.js";
@@ -77,6 +78,7 @@ export class ScriptAgentService {
     });
   }
   start(scriptId: string, input: ScriptAgentRequest) {
+    assertLegacyMaintenanceAllowed(this.store);
     configCoordinator(this.store).assertAvailable();
     check(!this.closed, "SERVICE_CLOSED", "脚本 Agent 已关闭");
     check(typeof input.requestId === "string" && input.requestId.length > 0 && input.requestId.length <= 200, "INVALID_REQUEST_ID", "requestId 无效");
@@ -146,6 +148,7 @@ export class ScriptAgentService {
     } finally { clearTimeout(timer); rmSync(cwd, { recursive: true, force: true }); }
   }
   async apply(scriptId: string, input: { turnId: string; expectedRevision: number; requestId: string }) {
+    assertLegacyMaintenanceAllowed(this.store);
     return configCoordinator(this.store).withActivity("ScriptAgentService.apply", async () => {
       const scope = `script-agent-confirm:${scriptId}`;
       if (this.store.one("SELECT 1 FROM command_receipts WHERE scope=? AND request_id=?", scope, input.requestId)) {

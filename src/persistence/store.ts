@@ -53,19 +53,36 @@ const parsed = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(
 export type PreparedReference =
   | { kind: "inline"; value: unknown }
   | { kind: "blob"; artifactId: string; relativePath: string; sha256: string; byteSize: number };
+export interface StoreTransactionObserver {
+  begin(): unknown;
+  beforeCommit(snapshot: unknown): void;
+  committed(snapshot: unknown): void;
+}
 export class Store {
   readonly db!: DatabaseSync;
   readonly files: FileStore;
   readonly root: string;
+  /** Internal ownership proof for platform-managed projections; never serialize. */
+  readonly directoryLease!: DirectoryLease;
   readonly events = new EventEmitter();
   private depth = 0;
   private pendingEvents: StreamEvent[] = [];
+  private transactionObserver: StoreTransactionObserver | undefined;
+  /** Only the platform composition root installs the single business observer. */
+  observeTransactions(observer: StoreTransactionObserver): () => void {
+    check(this.depth === 0 && !this.transactionObserver, "TRANSACTION_OBSERVER_CONFLICT", "事务观察器已安装或事务尚未结束", 409);
+    this.transactionObserver = observer;
+    return () => { check(this.depth === 0, "TRANSACTION_ACTIVE", "事务期间不能移除配置边界", 409); if (this.transactionObserver === observer) this.transactionObserver = undefined; };
+  }
+  protected get expectedSchemaVersion(): number { return SCHEMA_VERSION; }
+
   constructor(root: string, lease: DirectoryLease) {
     this.root = realpathSync(root); DirectoryLease.validate(lease, this.root);
+    Object.defineProperty(this, "directoryLease", { value: lease, enumerable: false });
     check(present(safe(this.root, "workbench.db")), "UNKNOWN_DATABASE", "数据库不存在，须由 Bootstrap 初始化");
     this.db = new DatabaseSync(safe(this.root, "workbench.db"), { open: true });
     try {
-      check(Number(this.db.prepare("PRAGMA user_version").get()!.user_version) === SCHEMA_VERSION && Number(this.db.prepare("PRAGMA application_id").get()!.application_id) === 1331110449, "UNKNOWN_DATABASE", "数据库尚未就绪，须由 Bootstrap 检测和迁移");
+      check(Number(this.db.prepare("PRAGMA user_version").get()!.user_version) === this.expectedSchemaVersion && Number(this.db.prepare("PRAGMA application_id").get()!.application_id) === 1331110449, "UNKNOWN_DATABASE", "数据库尚未就绪，须由 Bootstrap 检测和迁移");
       this.db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
       this.files = new FileStore(this.root);
     } catch(error) { this.db.close(); throw error; }
@@ -77,19 +94,34 @@ export class Store {
   }
   one<T = Row>(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).get(...params) as T | undefined; }
   all<T = Row>(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).all(...params) as T[]; }
-  exec(sql: string, ...params: SQLInputValue[]) { return this.db.prepare(sql).run(...params); }
+  exec(sql: string, ...params: SQLInputValue[]) {
+    // Observed autocommit writes receive the same atomic dirty-registration and
+    // rollback boundary as explicit business commands. Record-only writes remain
+    // admissible while an Agent holds a file-read lease.
+    return this.transactionObserver && this.depth === 0
+      ? this.transaction(() => this.db.prepare(sql).run(...params)) : this.db.prepare(sql).run(...params);
+  }
   transaction<T>(operation: () => T): T {
     const outer = this.depth === 0, savepoint = `s${this.depth}`, eventCount = this.pendingEvents.length;
     this.db.exec(outer ? "BEGIN IMMEDIATE" : `SAVEPOINT ${savepoint}`); this.depth++;
     let result: T;
+    const observer = outer ? this.transactionObserver : undefined;
+    let observation: unknown;
     try {
+      observation = observer?.begin();
       result = operation();
+      if (result && typeof (result as { then?: unknown }).then === "function") {
+        void Promise.resolve(result).catch(() => {});
+        throw new AppError("ASYNC_TRANSACTION", "数据库事务回调必须同步完成");
+      }
+      observer?.beforeCommit(observation);
       this.db.exec(outer ? "COMMIT" : `RELEASE ${savepoint}`); this.depth--;
     } catch (error) {
       this.depth--; this.pendingEvents.length = eventCount;
       this.db.exec(outer ? "ROLLBACK" : `ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`); throw error;
     }
     if (outer) {
+      try { observer?.committed(observation); } catch { /* A projection wakeup cannot undo a committed command. */ }
       const events = this.pendingEvents.splice(0);
       for (const event of events) {
         // A disconnected observer must never roll back an already committed command.

@@ -1,9 +1,8 @@
+import { configuredWebBridge, readConfiguredBridge } from "../src/web-bridge/configured.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { executeHttpTool, type BridgeHttpExecution, type HttpTool } from "../src/web-bridge/execution.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import { createApp } from "../src/server/app.js";
@@ -133,7 +132,7 @@ test("gateway routes real HTTP calls by environment, resolves encrypted credenti
   const environment = bridge.saveEnvironment("crm", { origin });
   const value = definition(); value.execution!.signing = { ...signing(), dictionaryId: dictionary.dictionaryId };
   bridge.saveTool(value);
-  assert.deepEqual(JSON.parse(JSON.stringify(new WebBridgeConfig(store.root).tools("crm"))), [value]);
+  assert.deepEqual(JSON.parse(JSON.stringify(configuredWebBridge(store).tools("crm"))), [value]);
   const args = { productNo: "product-2", body: '{ "中文": true }' };
   const payload = { application: "crm", tool: "credit", args };
   let response = await app.inject({ method: "POST", url: "/api/web-bridge/calls", payload });
@@ -147,13 +146,13 @@ test("gateway routes real HTTP calls by environment, resolves encrypted credenti
   bridge.saveTool({ ...value, risk: "write", approval: "user" });
   await assert.rejects(bridge.call("crm", "credit", args), { code: "APPROVAL_REQUIRED" });
   assert.equal(requests, 2);
-  const text = readFileSync(join(store.root, "config/web-bridge.json"), "utf8");
+  const text = JSON.stringify(readConfiguredBridge(store));
   assert.ok(!text.includes("test-secret-key") && !text.includes("test-access-key"));
 });
 
 test("HTTP definitions reject unsupported code, header overrides and undeclared templates atomically", t => {
   const { store } = setup(t); t.after(() => store.close());
-  const config = new WebBridgeConfig(store.root); config.saveApplication({ id: "crm", name: "CRM" });
+  const config = configuredWebBridge(store); config.saveApplication({ id: "crm", name: "CRM" });
   config.saveTool(definition()); const before = config.authoringSnapshot("crm").hash;
   const portable = { applications: { crm: { id: "crm", name: "CRM", enabled: true } }, environments: {}, tools: { "crm/credit": definition() }, enabledTools: {} };
   assert.doesNotThrow(() => validatePortableBridge(portable));
@@ -172,7 +171,7 @@ test("HTTP definitions reject unsupported code, header overrides and undeclared 
   const legacy = definition(); delete legacy.execution; legacy.path = "/fixed/request";
   config.saveTool(legacy);
   assert.equal(config.tools("crm")[0].execution, undefined);
-  assert.equal(new WebBridgeConfig(store.root).tools("crm")[0].execution, undefined);
+  assert.equal(configuredWebBridge(store).tools("crm")[0].execution, undefined);
 });
 
 test("timeouts and cancellation abort the actual HTTP request", async () => {

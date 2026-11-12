@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { configuredWebBridge } from "../src/web-bridge/configured.js";
 import { createApp } from "../src/server/app.js";
 import { ConfigRestoreService } from "../src/config-git/restore.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
@@ -44,11 +44,8 @@ test("startup awaits restore before business recovery, service caches and queue 
   assert.throws(() => services.authoring.snapshot("missing"), { code: "SERVICE_NOT_READY" });
   assert.throws(() => services.bridge.config, { code: "SERVICE_NOT_READY" });
 
-  // Simulate the file installed by restore; eager construction would cache the old file.
-  const configPath = store.files.path("config/web-bridge.json");
-  const config = JSON.parse(readFileSync(configPath, "utf8"));
-  config.applications.restored = { id: "restored", name: "Restored application", enabled: true };
-  writeFileSync(configPath, JSON.stringify(config));
+  // Simulate the declaration restored before the bridge config is constructed.
+  configuredWebBridge(store).saveApplication({ id: "restored", name: "Restored application" });
   release.resolve();
   await Promise.all([initializedPromise, readyPromise]);
   assert.equal(business.mock.callCount(), 1);

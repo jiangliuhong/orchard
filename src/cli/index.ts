@@ -18,6 +18,7 @@ const dataDir = resolve(value("--data-dir", join(homedir(), ".orchard")));
 function value(name: string, fallback: string) { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1] ?? fallback; }
 function help() { console.log(`orchard server [--port <port>] [--data-dir <dir>]
 orchard agent-reset preview --data-dir <dir> [--pretty]
+orchard workspace-migration preview --data-dir <dir> [--pretty]
 orchard web-bridge install|uninstall|chrome-ext|status|applications|tools [application]|tool <application> <tool>|doctor
 ${configGitHelp}
 ${secretsHelp}`); }
@@ -41,6 +42,13 @@ async function main() {
     check(value("--data-dir", "") && !value("--data-dir", "").startsWith("--"),
       "DATA_DIR_REQUIRED", "请显式指定需要预览的 Orchard 数据目录");
     console.log(JSON.stringify(previewAgentReset(dataDir), null, args.includes("--pretty") ? 2 : undefined));
+    return;
+  }
+  if (args[0] === "workspace-migration" && args[1] === "preview") {
+    const path = value("--data-dir", "");
+    check(path && !path.startsWith("--"), "DATA_DIR_REQUIRED", "请显式指定需要预览的 Orchard 数据目录");
+    const { inspectWorkspaceV11 } = await import("../migrations/workspace-v11.js");
+    console.log(JSON.stringify(inspectWorkspaceV11(dataDir), null, args.includes("--pretty") ? 2 : undefined));
     return;
   }
   if (args[0] === "config-git") return runConfigGitCli(args.slice(1), { dataDir, request, output: body => console.log(JSON.stringify(body, null, args.includes("--pretty") ? 2 : undefined)) });

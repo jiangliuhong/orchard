@@ -19,6 +19,7 @@ import { DeleteWorkflowButton } from "./DeleteWorkflowButton";
 import { WorkflowOutputEditor } from "./WorkflowOutputEditor";
 import { AgentModelConfigPicker } from "./AgentModelConfigPicker";
 import { AgentChat } from "../agent-chat/AgentChat";
+import { MaintenanceOwnerPanel } from "../agent-chat/MaintenanceOwnerPanel";
 import { workflowChatConfig, type WorkflowChatDraft } from "../agent-chat/adapters/workflow";
 
 export function DraftPage({ id }: { id: string }) {
@@ -68,7 +69,9 @@ export function DraftPage({ id }: { id: string }) {
     {draft.publishedVersionId && <div className="notice success">此草稿已发布。<a href={`/workflows/${graph?.id}`}>查看工作流 →</a></div>}
     <div className="mobile-workspace-tabs" role="group" aria-label="工作区视图"><Button aria-pressed={mobileTab === "chat"} variant={mobileTab === "chat" ? "secondary" : "ghost"} onClick={() => setMobileTab("chat")}>对话</Button><Button aria-pressed={mobileTab === "flow"} variant={mobileTab === "flow" ? "secondary" : "ghost"} onClick={() => setMobileTab("flow")}>流程</Button><Button aria-pressed={mobileTab === "details"} variant={mobileTab === "details" ? "secondary" : "ghost"} onClick={() => setMobileTab("details")}>节点</Button></div>
     <div className="studio-grid" data-mobile-tab={mobileTab}>
-      <AgentChat config={workflowChatConfig} resourceKey={id} context={{ draft, dirty, busy: !!busy, setBusy: value => setBusy(value ? "chat" : ""), reload: resource.reload, onOpenFile: path => { setFilePath(path); setSourceOpen(true); } }} />
+      <MaintenanceOwnerPanel key={id} kind="workflow_draft" ownerId={id} disabled={dirty || !!busy} onApplied={resource.reload}>
+        <AgentChat config={workflowChatConfig} resourceKey={id} context={{ draft, dirty, busy: !!busy, setBusy: value => setBusy(value ? "chat" : ""), reload: resource.reload, onOpenFile: path => { setFilePath(path); setSourceOpen(true); } }} />
+      </MaintenanceOwnerPanel>
       <section className="canvas-panel"><div className="panel-bar"><span><GitBranch size={15} />流程预览</span><span className="panel-bar-actions"><span>{graph?.nodes?.length ?? 0} 个节点</span><Button variant="ghost" size="icon" aria-label="重新渲染流程预览" title="重新渲染流程预览" disabled={!!busy || !!dirty} onClick={() => { resource.reload(); setPreviewKey(key => key + 1); }}><RefreshCw size={15} /></Button></span></div>{graph?.nodes && Array.isArray(graph.edges) ? <FlowCanvas key={previewKey} workflow={graph} layout={layout} onSelect={selectNode} /> : <div className="empty">流程定义暂时无法展示，请修复 JSON。</div>}</section>
       <aside className="node-panel"><div className="panel-bar node-config-header"><NodePicker nodes={graph?.nodes ?? []} value={selected || "__global"} onChange={value => value === "__global" ? setSelected("") : selectNode(value)} includeGlobal includeOutput /><span>{selected === "__end" ? "全局输出" : node?.type ?? "全局配置"}</span><SourcePreviewDialog files={files} path={filePath} onPath={setFilePath} onChange={locked ? undefined : (value, path) => { setFiles(current => ({ ...current, [path]: value })); setDirty(true); }} open={sourceOpen} onOpenChange={setSourceOpen} trigger={<Button variant="ghost" size="icon" disabled={!Object.keys(files).length} aria-label="全屏预览源码" title="全屏预览源码"><Maximize2 size={15} /></Button>} /></div><Tabs value={detailTab} onValueChange={selectDetailTab}><TabsList><TabsTrigger value="config">全局配置</TabsTrigger><TabsTrigger value="node">节点配置</TabsTrigger><TabsTrigger value="output">最终输出</TabsTrigger></TabsList><TabsContent value="config"><div className="detail-stack">
         <div className="field"><label htmlFor="workflow-name">工作流名称</label><Input id="workflow-name" value={graph?.name ?? ""} disabled={locked} onChange={e => editGraph(g => { g.name = e.target.value; })} /></div>

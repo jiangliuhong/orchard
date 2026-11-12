@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 export const AGENT_MODEL_SCHEMA = `
 CREATE TABLE agent_model_configs (
  id TEXT PRIMARY KEY,

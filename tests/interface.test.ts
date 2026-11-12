@@ -40,7 +40,15 @@ dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 dom.window.HTMLElement.prototype.hasPointerCapture = () => false;
 dom.window.HTMLElement.prototype.setPointerCapture = () => {};
 dom.window.HTMLElement.prototype.releasePointerCapture = () => {};
-const { render, screen, fireEvent, cleanup, waitFor, act } = await import("@testing-library/react");
+const { render: renderUi, screen, fireEvent, cleanup, waitFor, act } = await import("@testing-library/react");
+// These UI contracts exercise the preserved legacy pages before workspace migration.
+function render(...args: Parameters<typeof renderUi>) {
+  const fixtureFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => String(url).startsWith("/api/maintenance/owners/")
+    ? Response.json({ code: "MAINTENANCE_RUNTIME_REQUIRED", message: "维护运行时尚未启用" }, { status: 503 })
+    : fixtureFetch(url, options);
+  return renderUi(...args);
+}
 const { ProviderPicker } = await import("../src/web/features/ProviderPicker.js");
 const { AgentModelConfigPicker } = await import("../src/web/features/AgentModelConfigPicker.js");
 const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
@@ -674,10 +682,10 @@ test("script three-column workspace keeps Agent visible and preserves run input 
     render(createElement(ScriptPage, { id: "test" }));
     const runTab = await screen.findByRole("tab", { name: "运行参数" });
     assert.equal(runTab.getAttribute("aria-selected"), "true");
-    assert.ok(screen.getByRole("complementary", { name: "Agent 对话" }));
+    assert.ok(await screen.findByRole("complementary", { name: "Agent 对话" }));
     const testInput = screen.getByLabelText("测试输入 JSON");
     fireEvent.change(testInput, { target: { value: '{"message":"保留测试输入"}' } });
-    fireEvent.change(screen.getByLabelText("描述脚本需求或修复要求"), { target: { value: "保留这个需求" } });
+    fireEvent.change(await screen.findByLabelText("描述脚本需求或修复要求"), { target: { value: "保留这个需求" } });
     fireEvent.keyDown(runTab, { key: "ArrowRight" });
     const resultsTab = screen.getByRole("tab", { name: "运行结果" });
     assert.equal(document.activeElement, resultsTab);
@@ -686,9 +694,9 @@ test("script three-column workspace keeps Agent visible and preserves run input 
     const referencesTab = screen.getByRole("tab", { name: "引用" });
     assert.equal(document.activeElement, referencesTab);
     assert.equal(screen.getByRole("tabpanel", { name: "引用" }).getAttribute("aria-labelledby"), referencesTab.id);
-    assert.ok(screen.getByLabelText("描述脚本需求或修复要求"));
+    assert.ok(await screen.findByLabelText("描述脚本需求或修复要求"));
     assert.ok(screen.getByLabelText("新文件路径"));
-    assert.equal((screen.getByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "保留这个需求");
+    assert.equal((await screen.findByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "保留这个需求");
     fireEvent.keyDown(referencesTab, { key: "Home" });
     assert.equal(screen.getByRole("tabpanel", { name: "运行参数" }).getAttribute("aria-labelledby"), runTab.id);
     assert.equal((screen.getByLabelText("测试输入 JSON") as HTMLTextAreaElement).value, '{"message":"保留测试输入"}');
@@ -710,7 +718,7 @@ test("workflow script picker applies a fixed published version and retains the i
     await screen.findByRole("option", { name: "v1" });
     fireEvent.change(screen.getByLabelText("固定发布版本"), { target: { value: "version-1" } });
     fireEvent.click(screen.getByRole("button", { name: "应用此脚本版本" }));
-    assert.deepEqual(applied, [{ ...node, type: "script", config: { scriptId: "normalize", scriptVersionId: "version-1", timeoutMs: 60000 }, outputSchema: { type: "object" } }]);
+    assert.deepEqual(applied, [{ ...node, type: "script", config: { scriptId: "normalize", scriptVersionId: "version-1", timeoutMs: 60000 }, inputSchema: true, outputSchema: { type: "object" } }]);
     const shorter = { ...node, config: { ...node.config, timeoutMs: 5000 } };
     view.rerender(createElement(ScriptNodePicker, { node: shorter, disabled: false, onApply: value => applied.push(value) }));
     fireEvent.click(screen.getByRole("button", { name: "应用此脚本版本" }));
@@ -914,7 +922,7 @@ test("script Agent heading uses the first submitted prompt and resets for a new 
     const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
     render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => {}, onTestInput: () => {} }));
     await screen.findByRole("combobox", { name: "模型" });
-    fireEvent.change(screen.getByLabelText("描述脚本需求或修复要求"), { target: { value: firstPrompt } });
+    fireEvent.change(await screen.findByLabelText("描述脚本需求或修复要求"), { target: { value: firstPrompt } });
     const generate = screen.getByRole("button", { name: "发送" });
     await waitFor(() => assert.equal((generate as HTMLButtonElement).disabled, false));
     fireEvent.click(generate);
@@ -922,7 +930,7 @@ test("script Agent heading uses the first submitted prompt and resets for a new 
     assert.equal(heading.getAttribute("title"), firstPrompt);
     fireEvent.click(screen.getByRole("button", { name: "新对话" }));
     assert.ok(screen.getByRole("heading", { name: "新对话" }));
-    assert.equal((screen.getByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "");
+    assert.equal((await screen.findByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "");
   } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
 });
 
@@ -952,7 +960,7 @@ test("script Agent sends selected references and renders ordinary answers withou
     fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
     await screen.findByRole("option", { name: /failed/ });
     fireEvent.change(screen.getByLabelText("引用测试结果"), { target: { value: "failed-test" } });
-    fireEvent.change(screen.getByLabelText("描述脚本需求或修复要求"), { target: { value: "为什么失败" } });
+    fireEvent.change(await screen.findByLabelText("描述脚本需求或修复要求"), { target: { value: "为什么失败" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     assert.ok(await screen.findByText("输入日期格式不符合预期。"));
     assert.equal(requests.length, 1);
@@ -1092,10 +1100,10 @@ test("conversation Provider picker hides disabled CLIs and allows replacing a sa
   let choice = { providerId: "disabled-cli", modelId: "saved-model" };
   const onChange = (value: { providerId?: string; modelId?: string }) => { choice = { providerId: value.providerId ?? "", modelId: value.modelId ?? "" }; };
   const view = render(createElement(ProviderPicker, { providers, value: choice, enabledOnly: true, onChange }));
-  assert.ok(screen.getByRole("combobox", { name: "Provider" }).textContent?.includes("选择 Provider"));
+  assert.ok((await screen.findByRole("combobox", { name: "Provider" })).textContent?.includes("选择 Provider"));
   assert.equal((screen.getByRole("combobox", { name: "模型" }) as HTMLButtonElement).disabled, true);
   assert.ok(screen.getByText("请重新选择已启用的 Provider。"));
-  fireEvent.keyDown(screen.getByRole("combobox", { name: "Provider" }), { key: "Enter" });
+  fireEvent.keyDown(await screen.findByRole("combobox", { name: "Provider" }), { key: "Enter" });
   assert.ok(await screen.findByRole("option", { name: "Enabled CLI" }));
   assert.equal(screen.queryByRole("option", { name: /Disabled CLI/ }), null);
   assert.equal(screen.getByRole("option", { name: "Unready CLI · 未就绪" }).getAttribute("aria-disabled"), "true");
@@ -1106,7 +1114,7 @@ test("conversation Provider picker hides disabled CLIs and allows replacing a sa
   assert.ok(screen.getByRole("combobox", { name: "模型" }).textContent?.includes("Active model"));
   view.rerender(createElement(ProviderPicker, { providers: providers.filter(item => !item.enabled), value: {}, enabledOnly: true, onChange }));
   assert.ok(screen.getByText(/尚未启用 Provider/));
-  fireEvent.keyDown(screen.getByRole("combobox", { name: "Provider" }), { key: "Enter" });
+  fireEvent.keyDown(await screen.findByRole("combobox", { name: "Provider" }), { key: "Enter" });
   assert.equal(screen.queryAllByRole("option").length, 0);
 });
 test("settings previews all three default Agent prompts read-only", async () => {
@@ -1219,7 +1227,7 @@ test("model configuration settings create, revise, disable and inspect named con
     await screen.findByText("还没有 Agent 模型配置");
     fireEvent.click(screen.getAllByRole("button", { name: "新增配置" })[0]!);
     fireEvent.change(screen.getByLabelText("配置名称"), { target: { value: "xxx 分析" } });
-    fireEvent.keyDown(screen.getByRole("combobox", { name: "Provider" }), { key: "Enter" });
+    fireEvent.keyDown(await screen.findByRole("combobox", { name: "Provider" }), { key: "Enter" });
     fireEvent.click(await screen.findByRole("option", { name: "Third Agent" }));
     fireEvent.click(screen.getByRole("button", { name: "创建配置" }));
     await screen.findByRole("button", { name: "编辑模型配置 xxx 分析" });
@@ -1281,7 +1289,7 @@ test("workflow editor saves configuration IDs while authoring still selects a Pr
   try {
     render(createElement(DraftPage, { id: "model-config-draft" }));
     const picker = await screen.findByRole("combobox", { name: "工作流默认 Agent 模型配置" });
-    assert.ok(screen.getByRole("combobox", { name: "Provider" }));
+    assert.ok(await screen.findByRole("combobox", { name: "Provider" }));
     fireEvent.keyDown(picker, { key: "Enter" });
     fireEvent.click(await screen.findByRole("option", { name: "内容分析" }));
     fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
@@ -1464,7 +1472,7 @@ test("draft workspace switches views and preserves the shared Agent composer", a
       fireEvent.click(screen.getByRole("button", { name: selected.label }));
       assert.equal(workspace.getAttribute("data-mobile-tab"), selected.view);
       for (const button of buttons) assert.equal(screen.getByRole("button", { name: button.label }).getAttribute("aria-pressed"), String(button.view === selected.view));
-      assert.equal(screen.getByLabelText("描述工作流需求"), composer);
+      assert.equal(await screen.findByLabelText("描述工作流需求"), composer);
       assert.equal((composer as HTMLTextAreaElement).value, "切换视图后保留需求");
     }
     fireEvent.change(screen.getByLabelText("选择节点"), { target: { value: "b" } });
@@ -1496,7 +1504,7 @@ test("draft UI saves manual changes before conversation, supports cancel and res
     const view = render(createElement(DraftPage, { id: state.id }));
     const name = await screen.findByLabelText("工作流名称");
     await waitFor(() => assert.equal((name as HTMLInputElement).value, "检查并执行"));
-    fireEvent.change(screen.getByLabelText("描述工作流需求"), { target: { value: "change flow" } });
+    fireEvent.change(await screen.findByLabelText("描述工作流需求"), { target: { value: "change flow" } });
     fireEvent.change(name, { target: { value: "Edited name" } });
     assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
     fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
@@ -2049,7 +2057,7 @@ test("workflow conversation mode preserves unsent input, creates single sessions
   };
   try {
     const view = render(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context, resourceKey: draft.id }));
-    const input = screen.getByLabelText("描述工作流需求");
+    const input = await screen.findByLabelText("描述工作流需求");
     fireEvent.change(input, { target: { value: "保留这段未发送需求" } });
     fireEvent.change(screen.getByLabelText("对话模式"), { target: { value: "single" } });
     assert.equal((input as HTMLTextAreaElement).value, "保留这段未发送需求");
@@ -2198,7 +2206,7 @@ test("needs rebuild banner blocks sending and rebuild opens a fresh current conv
     fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
     assert.ok(screen.getByText("需要重建"));
     assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
-    fireEvent.change(screen.getByLabelText("描述工作流需求"), { target: { value: "继续需求" } });
+    fireEvent.change(await screen.findByLabelText("描述工作流需求"), { target: { value: "继续需求" } });
     assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false);
     fireEvent.click(screen.getAllByRole("button", { name: "重建上下文" })[0]!);
     await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-broken/rebuild"))));

@@ -20,7 +20,7 @@
     "postbuild": "node scripts/create-migration-integrity.mjs",
     "predev": "node scripts/check-migration-manifest.mjs --require-review && node scripts/generate-migration-bundle.mjs --check && node --import tsx scripts/agent-knowledge.mts --check",
     "pretest": "node scripts/check-migration-manifest.mjs --require-review && node scripts/generate-migration-bundle.mjs --check && node --import tsx scripts/agent-knowledge.mts --check",
-    "build": "tsc -p tsconfig.server.json && node --import tsx scripts/agent-knowledge.mts --copy && mkdir -p dist/web-bridge/extension && cp -R src/web-bridge/extension/. dist/web-bridge/extension && cp src/web-bridge/catalog.json dist/web-bridge/catalog.json && vite build",
+    "build": "tsc -p tsconfig.server.json && esbuild src/agent/maintenance-pi-extension.ts src/agent/maintenance-mcp-stdio.ts --bundle --platform=node --format=esm --target=node24 --outdir=dist/agent/maintenance-bundles --out-extension:.js=.mjs && node --import tsx scripts/agent-knowledge.mts --copy && mkdir -p dist/web-bridge/extension && cp -R src/web-bridge/extension/. dist/web-bridge/extension && cp src/web-bridge/catalog.json dist/web-bridge/catalog.json && vite build",
     "start": "node dist/server/main.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts"

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { setup } from "./helpers.js";
+import { setupLegacy as setup } from "./helpers.js";
 import { ScriptLibrary } from "../src/authoring/script-library.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
 import { workflowResourceMetadata } from "../src/authoring/resources.js";

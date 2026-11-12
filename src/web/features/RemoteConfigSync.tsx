@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import { api, pretty, requestId, send } from "../lib/api";
 import { useTheme } from "../lib/theme";
 import { Button } from "../components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { ErrorNotice } from "../components/common";
 import { adaptPreview, categories, type Binding, type Category, type Diff, type Operation, type Preview, type RecoveryPoint, type RepositoryStatus } from "./ConfigGitSettings";
@@ -25,7 +26,10 @@ const root = "/config-git";
 export function canApplyRemote(preview: Preview | undefined, confirmed: boolean, mappings: Record<string, string>, stale: boolean, now = Date.now()) {
   return !!preview && confirmed && !stale && !preview.nextCursor && !preview.noChanges && preview.expiresAt > now && !preview.blockers.length && !preview.diffs.some(d => d.blockingReason) && preview.requiredMappings.every(m => !!mappings[m.key]?.trim());
 }
-export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave }: { visible: boolean; binding?: Binding | null; status?: RepositoryStatus; onApplied: () => unknown; onLeave: () => void }) {
+export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave, leaveRef, onLeaveFocus }: {
+  visible: boolean; binding?: Binding | null; status?: RepositoryStatus; onApplied: () => unknown; onLeave: () => void;
+  leaveRef?: Ref<(trigger: HTMLButtonElement) => void>; onLeaveFocus?: () => void;
+}) {
   const theme = useTheme(), [source, setSource] = useState<RemoteSource>(), [restoreSource, setRestoreSource] = useState<Source>();
   const [scope, setScope] = useState<Category[]>([]), [mappings, setMappings] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<Preview>(), [confirmed, setConfirmed] = useState(false), [stale, setStale] = useState(true);
@@ -125,10 +129,40 @@ export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave 
   };
   const createPreview = () => work(async () => { setConfirmed(false); setPreview(old => old ? { ...old, expiresAt: 0 } : old); const { theme: appearance, clientId, preferenceRevision } = theme.getPreference(); await mutate("/restore-preview", { source: restoreSource, categories: scope, mappings, theme: appearance, clientId, preferenceRevision }, "preview"); });
   const available = restoreSource?.kind === "recovery-point" ? Object.keys(categories) as Category[] : source?.supportedCategories ?? [];
-  const leave = () => { if ((!preview && !Object.keys(mappings).length) || window.confirm("放弃当前同步预览及本机映射输入？已受理的操作会继续执行。")) { invalidate(); setMappings({}); onLeave(); } };
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const discardTrigger = useRef<HTMLButtonElement>(null);
+  const requestDiscard = (trigger: HTMLButtonElement) => {
+    discardTrigger.current = trigger;
+    setDiscardOpen(true);
+  };
+  useImperativeHandle(leaveRef, () => requestDiscard, []);
+  const leave = () => {
+    invalidate();
+    setMappings({});
+    onLeave();
+  };
   return <section hidden={!visible} className="remote-config-sync detail-stack" aria-label="从远端同步" aria-busy={locked}>
     <div className="config-git-sync-repository"><span title={binding?.remoteUrl}>{binding?.remoteUrl ?? "尚未绑定 Git 仓库"}</span><code>{binding?.branch}</code><span>领先 {status?.ahead ?? "—"} · 落后 {status?.behind ?? "—"}</span></div>
-    {!binding ? <a href="/settings?section=config-git">前往 Git 仓库配置</a> : <div className="actions"><Button disabled={locked} onClick={() => void work(async () => { invalidate(); setStale(true); await mutate("/remote-sync-source", {}, "fetch"); })}>获取远端配置</Button><Button variant="outline" disabled={locked} onClick={() => void work(async () => setPoints((await api<{ items: RecoveryPoint[] }>(`${root}/recovery-points`)).items))}>查看恢复点</Button><Button variant="ghost" onClick={leave}>返回备份</Button></div>}
+    {!binding ? <a href="/settings?section=config-git">前往 Git 仓库配置</a> : <div className="actions"><Button disabled={locked} onClick={() => void work(async () => { invalidate(); setStale(true); await mutate("/remote-sync-source", {}, "fetch"); })}>获取远端配置</Button><Button variant="outline" disabled={locked} onClick={() => void work(async () => setPoints((await api<{ items: RecoveryPoint[] }>(`${root}/recovery-points`)).items))}>查看恢复点</Button><Button variant="ghost" onClick={event => {
+      if (preview || Object.keys(mappings).length) requestDiscard(event.currentTarget);
+      else leave();
+    }}>返回备份</Button></div>}
+    <Dialog open={discardOpen} onOpenChange={setDiscardOpen}>
+      <DialogContent showCloseButton={false} onCloseAutoFocus={event => {
+        event.preventDefault();
+        if (discardTrigger.current?.closest("[hidden]")) onLeaveFocus?.();
+        else discardTrigger.current?.focus();
+      }}>
+        <DialogHeader>
+          <DialogTitle>放弃当前同步预览和映射输入？</DialogTitle>
+          <DialogDescription>已受理的操作会继续执行。</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setDiscardOpen(false)}>取消</Button>
+          <Button variant="destructive" onClick={() => { setDiscardOpen(false); leave(); }}>放弃并返回备份</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
     <ErrorNotice message={error} />
     {unacknowledged && <div role="status">原请求回执尚未确认；新同步操作已暂停。<Button variant="outline" disabled={busy || active} onClick={() => void work(resendPending)}>重试查询原请求</Button></div>}
     {operation && <div role="status">操作 {operation.operationId} · {operation.phase}{operation.phase === "recovery_required" && <Button variant="outline" disabled={busy} onClick={() => void work(() => mutate(`/operations/${encodeURIComponent(operation.operationId)}/recover`, {}, "apply"))}>重试恢复</Button>}</div>}

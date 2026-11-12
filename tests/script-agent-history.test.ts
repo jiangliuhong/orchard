@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { ScriptAgentService } from "../src/authoring/script-agent.js";
 import { ScriptLibrary } from "../src/authoring/script-library.js";
 import { ScriptJournal } from "../src/persistence/script-journal.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 
 const definition = (id = "history-script") => ({
   id, name: "History", description: "", runtime: "nodejs" as const, entryFile: "main.ts",

@@ -310,7 +310,7 @@ export function DictionaryPage({ id }: { id: string }) {
       {detail.deletedAt != null && <div className="notice">已删除：仅供查看，不能编辑或新增引用。彻底删除会清除全部历史版本，存在历史引用或运行绑定时不可执行。</div>}
       {!detail.enabled && <div className="notice">已禁用：阻止新发布与入队引用，不改写已创建运行的绑定。</div>}
       <div className="dictionary-workspace">
-        <fieldset className="m-0 min-w-0 border-0 p-0" disabled={detail.deletedAt != null}><EntriesEditor key={`${detail.revision}-${detail.currentVersionId}`} detail={detail} onDirtyChange={setDirty} onOperations={async () => { refresh(); }} /></fieldset>
+        <fieldset className="dictionary-editor-fieldset" disabled={detail.deletedAt != null}><EntriesEditor key={`${detail.revision}-${detail.currentVersionId}`} detail={detail} onDirtyChange={setDirty} onOperations={async () => { refresh(); }} /></fieldset>
         <aside className="panel dictionary-inspector" aria-label="字典检查器">
           <div className="dictionary-tabs" role="tablist" aria-label="字典详情">
             {tabs.map((item, index) => <button type="button" key={item.id} id={`dictionary-tab-${item.id}`} role="tab" aria-selected={tab === item.id} aria-controls={`dictionary-panel-${item.id}`} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)} onKeyDown={event => {

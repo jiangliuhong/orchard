@@ -1,3 +1,4 @@
+import { currentVersion } from "../src/migrations/frozen.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -53,7 +54,7 @@ test("v6 native-only migration preserves history, invalidates old sessions and g
   database.close();
   const store = new Store(root);
   t.after(() => { if (store.db.isOpen) store.close(); });
-  assert.equal(store.one("PRAGMA user_version")!.user_version, 10);
+  assert.equal(store.one("PRAGMA user_version")!.user_version, currentVersion);
   assert.deepEqual(store.all("PRAGMA foreign_key_check"), []);
   assert.equal(store.all("SELECT id FROM agent_conversations").length, records.length);
   for (const id of ["old-current", "old-idle", "old-needs"]) assert.equal(store.conversation(id)!.status, "needs_rebuild");
@@ -187,9 +188,9 @@ PRAGMA application_id = 1331110449;
 PRAGMA user_version = 2;
 `;
 
-test("approved schema has twenty-three tables and isolates unknown databases", t => {
+test("approved schema has the expected release tables and isolates unknown databases", t => {
   const root = temporary(t), store = new Store(root);
-  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, 23);
+  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, Number(currentVersion) === 11 ? 31 : 23);
   assert.throws(() => new Store(root), /INSTANCE_LOCKED/); store.close();
   const unknownRoot = temporary(t), database = new DatabaseSync(join(unknownRoot, "workbench.db"));
   database.exec("CREATE TABLE old_data(id TEXT)"); database.close();
@@ -243,7 +244,7 @@ test("schema v1 upgrades atomically and preserves runs, node references, events,
   insert("INSERT INTO command_receipts(scope,request_id,request_hash,result_json,created_at) VALUES('migration-test','request',?,?,?)", digest(canonicalJson({})), JSON.stringify({ id: runId }), now);
   database.close();
   const upgraded = new Store(root);
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 10);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, currentVersion);
   assert.equal(upgraded.one("PRAGMA foreign_keys")!.foreign_keys, 1);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   assert.deepEqual(upgraded.run(runId), { id: runId, workflowVersionId: versionId, draftId: null, draftRevision: null, snapshotPath: null, status: "succeeded", input, output: { done: true }, activeNodeId: null, error: undefined, createdAt: now, startedAt: now, endedAt: now });
@@ -300,7 +301,7 @@ test("v2 databases upgrade to the current schema and old rows keep NULL associat
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 10);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, currentVersion);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // 旧行保留且关联为 NULL；不自动创建对话。
   assert.equal(upgraded.one("SELECT conversation_id FROM authoring_turns WHERE id=?", legacyTurnId)!.conversation_id, null);
@@ -405,7 +406,7 @@ test("v3 databases upgrade to current: old multi conversations require rebuildin
   legacy.close();
   const upgraded = new Store(root);
   t.after(() => upgraded.close());
-  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, 10);
+  assert.equal(upgraded.one("PRAGMA user_version")!.user_version, currentVersion);
   assert.deepEqual(upgraded.all("PRAGMA foreign_key_check"), []);
   // §4.1/§4.2：存量 archived 为轮换产物 → idle；archived_at 取迁移前 updated_at 近似。
   const archived = upgraded.conversation("c-archived")!;

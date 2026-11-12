@@ -9,7 +9,7 @@ import { canonicalJson } from "../src/persistence/files.js";
 import { executeScript } from "../src/runtime/script.js";
 import { ScriptLibrary } from "../src/authoring/script-library.js";
 import { ScriptAgentService } from "../src/authoring/script-agent.js";
-import { setup, until } from "./helpers.js";
+import { setupLegacy as setup, until } from "./helpers.js";
 
 const draft = (runtime: "nodejs" | "shell"): ScriptDefinition => ({
   id: "prompt-example", name: "Example", description: "", runtime,

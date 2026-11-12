@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { setup, until, TestStore } from "./helpers.js";
+import { setupLegacy as setup, until, LegacyTestStore as TestStore } from "./helpers.js";
 import { ScriptLibrary } from "../src/authoring/script-library.js";
 import { ScriptTestRunner } from "../src/runtime/script-tests.js";
 import { ScriptAgentService } from "../src/authoring/script-agent.js";

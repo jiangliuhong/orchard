@@ -32,18 +32,36 @@ interface ConfigFile {
   enabledTools: Record<string, boolean>;
 }
 
+export interface BridgeConfigurationStorage {
+  readonly revision: number;
+  read(): string;
+  write(text: string): void;
+}
+
 export class WebBridgeConfig {
   private readonly path: string;
   private value: ConfigFile;
-  constructor(dataDir: string, readonly coordinator = new ConfigWriteCoordinator()) {
+  private readDepth = 0;
+  private read<T>(action: () => T): T {
+    // The DB remains authoritative even when another platform backend commits or
+    // an enclosing transaction rolls back. Nested getters share one validated
+    // view; getters inside a mutation must not replace its in-progress object.
+    if (!this.readDepth && this.storage && !this.coordinator.ownsDefinitionWrite) {
+      const value = validateBridgeConfigV1(this.storage.read()) as unknown as ConfigFile;
+      validateExecutions(value); this.value = value;
+    }
+    this.readDepth++;
+    try { return action(); } finally { this.readDepth--; }
+  }
+  constructor(dataDir: string, readonly coordinator = new ConfigWriteCoordinator(), private readonly storage?: BridgeConfigurationStorage) {
     const directory = join(dataDir, "config");
     this.path = join(directory, "web-bridge.json");
-    this.value = validateBridgeConfigV1(readFileSync(this.path, "utf8")) as unknown as ConfigFile;
+    this.value = validateBridgeConfigV1(this.storage ? this.storage.read() : readFileSync(this.path, "utf8")) as unknown as ConfigFile;
     validateExecutions(this.value);
   }
   /** Called inside the restore barrier after the configuration file is installed. */
   reloadAfterRestore() {
-    const value = validateBridgeConfigV1(readFileSync(this.path, "utf8")) as unknown as ConfigFile;
+    const value = validateBridgeConfigV1(this.storage ? this.storage.read() : readFileSync(this.path, "utf8")) as unknown as ConfigFile;
     validateExecutions(value);
     for (const environments of Object.values(value.environments)) for (const environment of environments) {
       environment.bound = false;
@@ -51,10 +69,11 @@ export class WebBridgeConfig {
     }
     this.value = value;
   }
+  get databaseRevision(): number | undefined { return this.storage?.revision; }
   applications(): WebBridgeApplication[] {
-    return Object.values(this.value.applications).map(application => ({ ...application, environments: this.environments(application.id) }));
+    return this.read(() => Object.values(this.value.applications).map(application => ({ ...application, environments: this.environments(application.id) })));
   }
-  application(id: string) { return this.value.applications[id]; }
+  application(id: string) { return this.read(() => this.value.applications[id]); }
   saveApplication(application: { id: string; name: string; enabled?: boolean }) {
     return this.coordinator.withWrite(() => {
       check(/^[a-z][a-z0-9-]{0,49}$/.test(application.id), "INVALID_APPLICATION", "应用 ID 必须是小写字母、数字和短横线");
@@ -74,7 +93,7 @@ export class WebBridgeConfig {
       this.flush(); return { applicationId: id, environments, tools };
     });
   }
-  environments(application: string) { return this.value.environments[application] ?? []; }
+  environments(application: string) { return this.read(() => this.value.environments[application] ?? []); }
   saveEnvironment(application: string, environment: Partial<WebBridgeEnvironment> & { id?: string }) {
     return this.coordinator.withWrite(() => {
       check(/^[a-z][a-z0-9-]{0,49}$/.test(application), "UNKNOWN_APPLICATION", "应用 ID 无效");
@@ -92,11 +111,15 @@ export class WebBridgeConfig {
       this.value.environments[application] = this.environments(application).filter(item => item.id !== id); this.flush();
     });
   }
-  tools(application?: string) { return Object.values(this.value.tools).filter(tool => !application || tool.application === application).map(tool => ({ ...tool, enabled: this.toolEnabled(tool.application, tool.toolId) })); }
+  tools(application?: string) { return this.read(() => Object.values(this.value.tools).filter(tool => !application || tool.application === application).map(tool => ({ ...tool, enabled: this.toolEnabled(tool.application, tool.toolId) }))); }
   authoringSnapshot(application: string) {
-    check(this.application(application), "NOT_FOUND", "应用不存在", 404);
-    const snapshot = structuredClone({ application: this.application(application)!, environments: this.environments(application), tools: this.tools(application) });
-    return { ...snapshot, hash: digest(canonicalJson(snapshot)) };
+    return this.read(() => {
+      check(this.application(application), "NOT_FOUND", "应用不存在", 404);
+      const snapshot = structuredClone({ application: this.application(application)!, environments: this.environments(application), tools: this.tools(application) });
+      const basis = this.storage ? { ...snapshot, revision: this.storage.revision,
+        environments: snapshot.environments.map(({ bound: _bound, tabAvailable: _tab, ...config }) => config) } : snapshot;
+      return { ...snapshot, hash: digest(canonicalJson(basis)) };
+    });
   }
   applyProposal(application: string, expectedHash: string, proposal: unknown) {
     return this.coordinator.withWrite(() => {
@@ -113,7 +136,7 @@ export class WebBridgeConfig {
       validateBridgeConfigV1(JSON.stringify(next));
       const previous = this.value;
       this.value = next;
-      try { this.flush(); } catch (error) { this.value = previous; throw error; }
+      try { this.flush(); } catch (error) { if (!this.storage) this.value = previous; throw error; }
       return this.authoringSnapshot(application);
     });
   }
@@ -131,13 +154,18 @@ export class WebBridgeConfig {
     return this.coordinator.withWrite(() => { delete this.value.tools[`${application}/${toolId}`]; delete this.value.enabledTools[`${application}/${toolId}`]; this.flush();
     });
   }
-  toolEnabled(application: string, tool: string) { return this.value.enabledTools[`${application}/${tool}`] ?? this.value.tools[`${application}/${tool}`]?.enabled ?? true; }
+  toolEnabled(application: string, tool: string) { return this.read(() => this.value.enabledTools[`${application}/${tool}`] ?? this.value.tools[`${application}/${tool}`]?.enabled ?? true); }
   setToolEnabled(application: string, tool: string, enabled: boolean) {
     return this.coordinator.withWrite(() => { this.value.enabledTools[`${application}/${tool}`] = enabled; this.flush();
     });
   }
   private flush() {
     validateBridgeConfigV1(JSON.stringify(this.value));
+    if (this.storage) {
+      try { this.storage.write(JSON.stringify(this.value)); }
+      catch (error) { this.value = validateBridgeConfigV1(this.storage.read()) as unknown as ConfigFile; throw error; }
+      return;
+    }
     const temp = `${this.path}.tmp-${process.pid}`;
     writeFileSync(temp, JSON.stringify(this.value, null, 2), { mode: 0o600 }); chmodSync(temp, 0o600); renameSync(temp, this.path);
   }

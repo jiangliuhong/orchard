@@ -239,7 +239,7 @@ export function WebBridgeSettings() {
               {applicationConflict && <Button className="self-start" size="sm" variant="outline" disabled={busy} onClick={() => {
                 setDraft({ ...draft, value: pretty({ ...draftDefinition, application: draft.application }) }); setEditorError("");
               }}>使用当前应用 ID</Button>}
-              {editorTab === "history" && draft.toolId ? <BridgeExecutionHistory application={draft.application} toolId={draft.toolId} disabled={dirty || test.busy || busy} onReuse={record => {
+              {editorTab === "history" && draft.toolId ? <BridgeExecutionHistory key={JSON.stringify([draft.application, draft.toolId])} application={draft.application} toolId={draft.toolId} disabled={dirty || test.busy || busy} onReuse={record => {
                 setTests(current => ({ ...current, [testKey]: { ...emptyTest(), args: pretty(record.args ?? {}), environmentId: record.environmentId, historySources: record.argSources,
                   historyNotice: record.legacy ? "旧历史未记录完整凭据来源，请重新选择字典或填写凭据。" : record.definitionChanged ? "工具定义已变化，将使用当前 Schema 校验和执行。" : "已载入历史参数和字典引用；未记录的手动值请重新填写。" } }));
                 const names = persistedTool?.execution?.transport === "browser" ? Object.keys(credentialProperties(persistedTool.execution)) : [];
@@ -308,7 +308,7 @@ export function WebBridgeSettings() {
           const width = Math.max(280, Math.min(600, right - event.clientX));
           setAgentWidth(width); saveBridgePreference("agentWidth", String(width));
         }} onPointerUp={event => { event.currentTarget.releasePointerCapture(event.pointerId); }} />
-        <BridgeAgentPanel key={selected.id} application={selected} toolId={draft?.toolId} testContext={draft?.toolId && (test.output || test.error) ? pretty({ toolId: draft.toolId, args: test.args, output: test.output.slice(0, 10000), error: test.error }).slice(0, 16000) : undefined} refresh={agentRefresh} onReview={reviewTurn} onClose={() => setAgentOpen(false)} />
+        <BridgeAgentPanel key={selected.id} application={selected} toolId={draft?.toolId} testContext={draft?.toolId && (test.output || test.error) ? pretty({ toolId: draft.toolId, args: test.args, output: test.output.slice(0, 10000), error: test.error }).slice(0, 16000) : undefined} refresh={agentRefresh} onReview={reviewTurn} onApplied={refresh} disabled={dirty || busy} onClose={() => setAgentOpen(false)} />
       </div>}
     </div>
     <Dialog open={connectionsOpen} onOpenChange={setConnectionsOpen}><DialogContent className="bridge-connections-dialog"><DialogHeader><DialogTitle>浏览器连接与插件配置</DialogTitle><DialogDescription>安装插件，并为当前浏览器资料设置名称。</DialogDescription></DialogHeader>
