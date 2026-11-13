@@ -2493,8 +2493,8 @@ export const declarations: MigrationDeclaration[] = [
   }
 ];
 export const approval = {"status":"approved","reviewer":"用户","date":"2026-11-12","contentDigest":"54c0a5fcb883887e0b5afec8a84a991a6cdec7339a36631f671bbb8a90dc9645"};
-export const releaseDigest = "e3fae68e0514f457467c10d872c1357a46fd52cd88d5579ac6f9e170cc78a008";
-export const manifestChecksum = "d027f3aa767a973879acdd9cb4dd0d468a0603f00e7c47c721173cc0922d23d8";
+export const releaseDigest = "6f758fbb750752e53e1bab4830c99a8134c62eb75fa6654067416fc627802367";
+export const manifestChecksum = "1588d5e64d7828976764b2d7eefc61504204757d304c61800f1860a600a453c5";
 export const releaseFiles: Record<string,string> = {
   "docs/features/2026-11-06-data-migration/execution-protocol.md": "d19242b2745323f1b2d76a23eab5118a990612d02fb6286ccac802632457f67e",
   "docs/features/2026-11-06-data-migration/release-v10.json": "a28280a0d5647ef4316b80b6788c4bdb62723029cff1d6194fef43346060c4bc",
@@ -2702,7 +2702,7 @@ export const releaseFiles: Record<string,string> = {
   "src/web-bridge/agent.ts": "b778fb7910a35ced0271a89489b76db684a74549948191c5b26c76fcb74519f3",
   "src/web-bridge/auth.ts": "489a36654e1aa0e88e8905b51082392107845b99b9a2deb6cb80c68789d2323b",
   "src/web-bridge/authoring.ts": "a700c51c6fe3c207967985acf2b6187df1c2d5dbb4973e00446c439ad87e9dc9",
-  "src/web-bridge/browser-execution.ts": "2bf972937269c4c51424f02c12b02cfe843690ced50fca6e2bed1f528287e915",
+  "src/web-bridge/browser-execution.ts": "b5db73d590757ca51221768b091c3c25c89de61e967c3a25160a6e643ff7e331",
   "src/web-bridge/catalog.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
   "src/web-bridge/catalog.ts": "c8b5243eece81df1460c1da638c9388de1197886426ebaefb8cc861b763e3a79",
   "src/web-bridge/client.ts": "8650628ecfda5f27a7b5cd7d1d3bc5f4149cd4d2ef373814ce9d7b5e0e31d974",
@@ -2714,11 +2714,11 @@ export const releaseFiles: Record<string,string> = {
   "src/web-bridge/credentials.ts": "1593af732403058076c1ad0c43e0ec8a5f0455f7a61fdc5a11a584028c468f10",
   "src/web-bridge/database-config.ts": "6f4b7f113a2c44e379a8b3920ba5808e1ad5de75c70b5740f17ee9a3e1042d5f",
   "src/web-bridge/execution.ts": "2abf4b936109ab699a4734feec245d32f50316dc0c534b183098b090f152de3f",
-  "src/web-bridge/extension/background.js": "e2f358837f01c0b7b0fa2daf4dce0791979c4b9e995c0df3edabe9d874f342e7",
+  "src/web-bridge/extension/background.js": "3fbd40e6ac79524caf3977f2470ab0d9e79c3c338591e58d08c08c0c846824e3",
   "src/web-bridge/extension/manifest.json": "8e383e542fcec7c8a0b6fbe97ec6e404c56b4b4d319c8ec128b31a41eabfacd8",
-  "src/web-bridge/extension/popup.css": "21ebd7a9081c304dcd1e5dbd6ab8ad9b627cece92cca9db3a59f3f2b824146b5",
-  "src/web-bridge/extension/popup.html": "fb3f7563032014ae223c9a18a1b479511c384ad2414f7af03311bf31ec1b0974",
-  "src/web-bridge/extension/popup.js": "d3772761f9ef15d726e5ecc8bfd0e27f755dbd443fbb9e956e9ae28e6250298b",
+  "src/web-bridge/extension/popup.css": "d0966e7078aef693cbbc9d7f400b533b4ec3fecd76d9bb24812c10d0a1f08461",
+  "src/web-bridge/extension/popup.html": "afe35139a74603e81e0fd5cee99440c2cff89c5296d7c7fd21a3b17ab7223df9",
+  "src/web-bridge/extension/popup.js": "41061c4c3319a35db50dc66e4808234440dba58950f3457359fe9fee91ec74fc",
   "src/web-bridge/gateway.ts": "c3877e4f3f67f1a6faa116fa283b9e8541183c8c84cdcfcb7af2986e7c634108",
   "src/web-bridge/history-policy.ts": "57ad19256f3eae213bd93de0f3c84e715de7c3b3c2d780e4ab8596754ea04dec",
   "src/web-bridge/history.ts": "c41e50417da6af3d650263513927a2379a9b0320ab37d037711ad3d56758391b",

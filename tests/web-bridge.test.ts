@@ -51,6 +51,8 @@ function extensionHarness(stored: Record<string, string> = {}, initiallyAvailabl
         id: extensionId, onInstalled: event("installed"), onStartup: event("startup"),
         onMessage: { addListener: (listener: typeof onMessage) => { onMessage = listener; } },
       },
+      tabs: { onRemoved: event("tab-removed"), onReplaced: event("tab-replaced"), onUpdated: event("tab-updated") },
+      permissions: { onRemoved: event("permission-removed") },
       storage: { local: {
         get: async () => ({ ...stored }),
         set: async (value: Record<string, string>) => { Object.assign(stored, value); },
@@ -263,6 +265,49 @@ test("popup automatically displays reconnection without overwriting an unsaved n
   assert.equal(timers.size, 1);
   dom.window.dispatchEvent(new dom.window.Event("pagehide"));
   assert.equal(timers.size, 0);
+});
+
+test("popup requires explicit selection of a main bridge tab and identifies the bound tab", async t => {
+  const dom = new JSDOM(readFileSync(new URL("../src/web-bridge/extension/popup.html", import.meta.url), "utf8"));
+  t.after(() => dom.window.close());
+  const { document } = dom.window;
+  const listener = { addListener() {} };
+  const origin = "https://gateway.test";
+  const first = { id: 7, windowId: 1, index: 0, title: "工作账号", available: true };
+  const second = { ...first, id: 8, index: 1, title: "测试账号", available: true };
+  let binding: number | undefined;
+  runInNewContext(readFileSync(new URL("../src/web-bridge/extension/popup.js", import.meta.url), "utf8"), {
+    document, URL, window: dom.window,
+    chrome: {
+      permissions: { getAll: async () => ({ origins: [origin + "/*"] }) },
+      tabs: { query: async () => [{ url: origin + "/home" }], onUpdated: listener, onRemoved: listener, onReplaced: listener },
+      runtime: {
+        sendMessage: async (message: { type: string; tabId?: number; origin?: string }) => {
+          if (message.type.startsWith("profile:")) return { ok: true, profile: { name: "Chrome", id: "work" }, servers: [] };
+          assert.equal(message.origin, origin);
+          if (message.type === "tab:bind") binding = message.tabId;
+          return { ok: true, tabs: [first, second], tabId: binding, state: binding ? "ready" : "select" };
+        },
+      },
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const select = document.querySelector<HTMLSelectElement>("#bridge-tab")!;
+  const button = document.querySelector<HTMLButtonElement>("#bind-tab")!;
+  const status = document.getElementById("bridge-tab-status")!;
+  assert.equal(select.value, "");
+  assert.equal(button.disabled, true);
+  assert.match(status.textContent!, /请选择/);
+  select.value = "8";
+  select.dispatchEvent(new dom.window.Event("change"));
+  assert.equal(button.disabled, false);
+  button.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(binding, 8);
+  assert.equal(select.value, "8");
+  assert.match(select.selectedOptions[0]!.textContent!, /测试账号.*主桥接页签/);
+  assert.equal(button.disabled, true);
+  assert.match(status.textContent!, /已绑定/);
 });
 
 test("profile renaming preserves bindings, migrates legacy IDs and expires disconnected profiles", t => {

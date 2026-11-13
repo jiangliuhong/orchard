@@ -14,6 +14,11 @@ let currentOrigin;
 let grantedOrigins = [];
 let permissionsReady = false;
 let permissionBusy = false;
+let tabBusy = false;
+let boundTabId;
+let tabRefresh = 0;
+const tabSelect = $("bridge-tab");
+const tabForm = $("bridge-tab-form");
 
 function showView(view, trigger) {
   if (trigger) returnTarget = trigger;
@@ -103,6 +108,7 @@ async function loadPermissions() {
     permissionsReady = true;
     $("sites-feedback").textContent = "";
     renderPermissions();
+    await refreshBridgeTabs();
   } catch {
     permissionsReady = false;
     $("sites-summary").textContent = "无法读取已授权站点";
@@ -117,7 +123,75 @@ function updateCurrentSite() {
   $("site-state").textContent = !currentOrigin ? "仅支持 HTTPS 或本机站点" : !permissionsReady ? "无法读取授权状态" : granted ? "✓ 已授权" : "未授权";
   $("grant-site").hidden = !!granted || !currentOrigin;
   $("grant-site").disabled = !currentOrigin || !permissionsReady || permissionBusy;
+  tabForm.hidden = !granted;
 }
+function updateTabButton() {
+  $("bind-tab").disabled = tabBusy || !tabSelect.value || Number(tabSelect.value) === boundTabId;
+}
+
+async function refreshBridgeTabs(selectedId) {
+  if (closed || tabForm.hidden || (tabBusy && selectedId === undefined)) return;
+  const refresh = ++tabRefresh;
+  const status = $("bridge-tab-status");
+  try {
+    const message = selectedId === undefined ? { type: "tab:status" } : { type: "tab:bind", tabId: selectedId };
+    const result = await chrome.runtime.sendMessage({ ...message, origin: currentOrigin });
+    if (closed || refresh !== tabRefresh) return;
+    if (!result?.ok) throw new Error(result?.error);
+    const previousSelection = tabSelect.value;
+    const previousBinding = boundTabId;
+    boundTabId = result.tabId;
+    tabSelect.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "选择页签";
+    tabSelect.append(placeholder);
+    for (const tab of result.tabs) {
+      const option = document.createElement("option");
+      option.value = String(tab.id);
+      option.textContent = `窗口 ${tab.windowId} · 页签 ${tab.index + 1} · ${tab.title || tab.url}`;
+      if (tab.id === boundTabId) option.textContent += "（主桥接页签）";
+      option.disabled = !tab.available;
+      tabSelect.append(option);
+    }
+    const choice = selectedId === undefined && previousBinding === boundTabId
+      ? result.tabs.find(tab => String(tab.id) === previousSelection && (tab.available || tab.id === boundTabId))
+      : undefined;
+    tabSelect.value = String(choice?.id ?? boundTabId ?? "");
+    tabSelect.disabled = result.tabs.length === 0;
+    status.dataset.state = result.state === "ready" ? "success" : "";
+    status.textContent = {
+      ready: "主桥接页签已绑定，已防止浏览器自动回收。",
+      select: result.tabs.length ? "请选择已登录所需账号的主桥接页签。" : "请打开站点并重新选择主桥接页签。",
+      missing: result.tabs.length ? "请先切换到业务页签使其恢复运行。" : "请打开业务页签。",
+      discarded: "主桥接页签已被回收，请切换到该页签恢复，或手动选择其他页签。",
+      frozen: "主桥接页签已冻结，请切换到该页签恢复，或手动选择其他页签。",
+      unavailable: "主桥接页签暂不可用，请检查业务页签。",
+    }[result.state];
+  } catch {
+    if (closed || refresh !== tabRefresh) return;
+    status.dataset.state = "error";
+    status.textContent = "无法更新桥接页签，请检查站点授权和页签状态后重试。";
+  } finally {
+    updateTabButton();
+  }
+}
+
+tabSelect.addEventListener("change", updateTabButton);
+tabForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if ($("bind-tab").disabled) return;
+  tabBusy = true;
+  tabSelect.disabled = true;
+  updateTabButton();
+  try { await refreshBridgeTabs(Number(tabSelect.value)); }
+  finally {
+    tabBusy = false;
+    tabSelect.disabled = tabSelect.options.length <= 1;
+    updateTabButton();
+  }
+});
+
 function matchesOrigin(pattern, origin) {
   if (!origin) return false;
   const match = pattern.match(/^(https?):\/\/([^/]+)\/\*$/);
@@ -211,6 +285,13 @@ async function initializeSite() {
     if (url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) currentOrigin = url.origin;
   } catch { $("current-site").textContent = "无法读取当前页面"; }
   await loadPermissions();
+  if (currentOrigin) {
+    chrome.tabs.onRemoved.addListener(() => { void refreshBridgeTabs(); });
+    chrome.tabs.onReplaced.addListener(() => { void refreshBridgeTabs(); });
+    chrome.tabs.onUpdated.addListener((_id, change) => {
+      if (["url", "title", "discarded", "frozen"].some(key => key in change)) void refreshBridgeTabs();
+    });
+  }
 }
 void initializeSite();
 void connect();

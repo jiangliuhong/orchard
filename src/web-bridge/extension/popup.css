@@ -1,18 +1,22 @@
 :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; color: #242424; background: #fafafa; --muted: #686868; --border: #dedede; --surface: #fff; --hover: #efefef; --accent: #5750ba; --success: #227244; --error: #b03030; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { width: 440px; min-width: 440px; }
-body { width: 440px; margin: 0; }
+body { width: 440px; max-width: 100%; margin: 0; }
 header { min-height: 52px; padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 h1 { margin: 0; font-size: 14px; font-weight: 600; }
+.popup-brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.popup-brand img { flex-shrink: 0; }
 h2, label { display: block; margin: 0 0 8px; font-size: 12px; font-weight: 600; }
 main { padding: 16px; }
 p { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
-button, input { min-height: 32px; border: 1px solid var(--border); border-radius: 5px; font: inherit; color: inherit; }
+button, input, select { min-height: 32px; border: 1px solid var(--border); border-radius: 5px; font: inherit; color: inherit; }
 button { padding: 5px 10px; cursor: pointer; background: var(--surface); white-space: nowrap; }
 button:hover:not(:disabled) { background: var(--hover); }
 button:disabled { opacity: .5; cursor: default; }
 input { width: 100%; min-width: 0; padding: 5px 8px; background: var(--surface); }
+#bridge-tab-form { margin-top: 14px; }
+#bridge-tab-form .input-row { flex-wrap: wrap; }
+#bridge-tab { flex: 1 1 160px; min-width: 0; max-width: 100%; padding: 5px 8px; background: var(--surface); text-overflow: ellipsis; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .input-row, .site-actions, .copy-row { display: flex; align-items: center; gap: 8px; }
 #save { background: #303030; border-color: #303030; color: #fff; }
@@ -33,11 +37,10 @@ input { width: 100%; min-width: 0; padding: 5px 8px; background: var(--surface);
 dl { margin: 18px 0 0; }
 dt { margin: 14px 0 4px; color: var(--muted); font-size: 12px; }
 dd { margin: 0; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; overflow-wrap: anywhere; white-space: pre-line; line-height: 1.6; }
-.copy-row > span { flex: 1; min-width: 0; }
+.copy-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .copy { flex-shrink: 0; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 footer { border-top: 1px solid var(--border); padding: 12px 16px; }
 footer > button { width: 100%; }
-.sites-main { max-height: 360px; overflow-y: auto; }
 #sites-list { list-style: none; padding: 0; margin: 8px 0 0; }
 .site-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .site-row:last-child { border-bottom: 0; }
@@ -47,6 +50,15 @@ footer > button { width: 100%; }
 .revoke { font-size: 12px; }
 .confirmation { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; }
 .danger { color: var(--error); }
+@media (max-width: 280px) {
+  header, main, footer, .navigation-row { padding-inline: 10px; }
+  #home-view > header { flex-wrap: wrap; gap: 2px 8px; }
+  #connection-link { margin-inline-start: auto; }
+  .site-section { margin-top: 14px; }
+  .site-actions, .site-row-main { flex-wrap: wrap; }
+  #bridge-tab-form .input-row { display: grid; grid-template-columns: minmax(0, 1fr); }
+  #bind-tab { white-space: normal; }
+}
 @media (prefers-color-scheme: dark) {
   :root { color: #ededed; background: #202020; --muted: #aaa; --border: #404040; --surface: #292929; --hover: #353535; --accent: #a49def; --success: #8ed5a6; --error: #ffaaaa; }
   #save { background: #dedede; border-color: #dedede; color: #202020; }

@@ -78,6 +78,13 @@ process.stdout.write(JSON.stringify(value));`;
   return { request, secrets: [...Object.values(credentials), ...Object.entries(request.headers).filter(([name]) => /authorization|signature|token|api-key/i.test(name)).map(([, value]) => value)] };
 }
 
+const tabErrors = new Map([
+  ["TAB_REQUIRED", "请打开并授权桥接站点，检查主桥接页签是否可用"],
+  ["TAB_SELECTION_REQUIRED", "请在 Orchard Web Bridge 扩展中选择主桥接页签"],
+  ["TAB_DISCARDED", "主桥接页签已被浏览器回收，请切换到该页签恢复"],
+  ["TAB_FROZEN", "主桥接页签已被冻结，请切换到该页签恢复"],
+]);
+
 export class BrowserChannel {
   private sessions = new Map<string, { token: string; extensionId: string }>();
   private pending = new Map<string, { profileId: string; payload: unknown; delivered: boolean; resolve: (value: unknown) => void; reject: (error: unknown) => void }>();
@@ -97,8 +104,10 @@ export class BrowserChannel {
   complete(profileId: string, id: string, result: unknown, error?: string) {
     const item = this.pending.get(id);
     check(item?.profileId === profileId && item.delivered, "UNKNOWN_CALL", "调用不存在");
-    if (error) item.reject(new AppError(["GATEWAY_AUTH_REQUIRED", "TAB_REQUIRED", "RESPONSE_TOO_LARGE", "INVALID_RESPONSE"].includes(error) ? error : "BROWSER_REQUEST_FAILED", "浏览器请求失败；请检查目标页签登录态、网关授权和接口权限"));
-    else item.resolve(result);
+    if (error) {
+      const code = tabErrors.has(error) || ["GATEWAY_AUTH_REQUIRED", "RESPONSE_TOO_LARGE", "INVALID_RESPONSE"].includes(error) ? error : "BROWSER_REQUEST_FAILED";
+      item.reject(new AppError(code, tabErrors.get(error) ?? "浏览器请求失败，请检查目标页签登录态、网关授权和接口权限"));
+    } else item.resolve(result);
   }
   async call(profileId: string, payload: unknown, signal: AbortSignal) {
     check(this.sessions.has(profileId), "BROWSER_NOT_CONNECTED", "浏览器资料尚未连接");

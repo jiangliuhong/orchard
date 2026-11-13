@@ -566,7 +566,7 @@
       "sha256": "dabcadb36345442ed2c7ded3821856634d264c24990dfa55f1c6247e31198859"
     }
   ],
-  "contentDigest": "e3fae68e0514f457467c10d872c1357a46fd52cd88d5579ac6f9e170cc78a008",
+  "contentDigest": "6f758fbb750752e53e1bab4830c99a8134c62eb75fa6654067416fc627802367",
   "review": {
     "status": "approved",
     "reviewer": "用户",
@@ -782,7 +782,7 @@
     "src/web-bridge/agent.ts": "b778fb7910a35ced0271a89489b76db684a74549948191c5b26c76fcb74519f3",
     "src/web-bridge/auth.ts": "489a36654e1aa0e88e8905b51082392107845b99b9a2deb6cb80c68789d2323b",
     "src/web-bridge/authoring.ts": "a700c51c6fe3c207967985acf2b6187df1c2d5dbb4973e00446c439ad87e9dc9",
-    "src/web-bridge/browser-execution.ts": "2bf972937269c4c51424f02c12b02cfe843690ced50fca6e2bed1f528287e915",
+    "src/web-bridge/browser-execution.ts": "b5db73d590757ca51221768b091c3c25c89de61e967c3a25160a6e643ff7e331",
     "src/web-bridge/catalog.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
     "src/web-bridge/catalog.ts": "c8b5243eece81df1460c1da638c9388de1197886426ebaefb8cc861b763e3a79",
     "src/web-bridge/client.ts": "8650628ecfda5f27a7b5cd7d1d3bc5f4149cd4d2ef373814ce9d7b5e0e31d974",
@@ -794,11 +794,11 @@
     "src/web-bridge/credentials.ts": "1593af732403058076c1ad0c43e0ec8a5f0455f7a61fdc5a11a584028c468f10",
     "src/web-bridge/database-config.ts": "6f4b7f113a2c44e379a8b3920ba5808e1ad5de75c70b5740f17ee9a3e1042d5f",
     "src/web-bridge/execution.ts": "2abf4b936109ab699a4734feec245d32f50316dc0c534b183098b090f152de3f",
-    "src/web-bridge/extension/background.js": "e2f358837f01c0b7b0fa2daf4dce0791979c4b9e995c0df3edabe9d874f342e7",
+    "src/web-bridge/extension/background.js": "3fbd40e6ac79524caf3977f2470ab0d9e79c3c338591e58d08c08c0c846824e3",
     "src/web-bridge/extension/manifest.json": "8e383e542fcec7c8a0b6fbe97ec6e404c56b4b4d319c8ec128b31a41eabfacd8",
-    "src/web-bridge/extension/popup.css": "21ebd7a9081c304dcd1e5dbd6ab8ad9b627cece92cca9db3a59f3f2b824146b5",
-    "src/web-bridge/extension/popup.html": "fb3f7563032014ae223c9a18a1b479511c384ad2414f7af03311bf31ec1b0974",
-    "src/web-bridge/extension/popup.js": "d3772761f9ef15d726e5ecc8bfd0e27f755dbd443fbb9e956e9ae28e6250298b",
+    "src/web-bridge/extension/popup.css": "d0966e7078aef693cbbc9d7f400b533b4ec3fecd76d9bb24812c10d0a1f08461",
+    "src/web-bridge/extension/popup.html": "afe35139a74603e81e0fd5cee99440c2cff89c5296d7c7fd21a3b17ab7223df9",
+    "src/web-bridge/extension/popup.js": "41061c4c3319a35db50dc66e4808234440dba58950f3457359fe9fee91ec74fc",
     "src/web-bridge/gateway.ts": "c3877e4f3f67f1a6faa116fa283b9e8541183c8c84cdcfcb7af2986e7c634108",
     "src/web-bridge/history-policy.ts": "57ad19256f3eae213bd93de0f3c84e715de7c3b3c2d780e4ab8596754ea04dec",
     "src/web-bridge/history.ts": "c41e50417da6af3d650263513927a2379a9b0320ab37d037711ad3d56758391b",
@@ -913,5 +913,5 @@
     "tsconfig.server.json": "0a2e5bc8dfcc1f5b5b1febb166d39cd2a4eccc6ee71575125cf7aa9af8396690",
     "vite.config.ts": "8fd36b5909b6236e56c3b141421280411150532c04e3969e9647fcb65f4541d7"
   },
-  "bundleChecksum": "0b127c3586f471319d8699fdc069da4d78183a8a2069a0c480ded3555a860942"
+  "bundleChecksum": "5702786ba9ed6eb2f3247a7de9655ea736a7b243b40b1f42a540ca35b11e9325"
 }

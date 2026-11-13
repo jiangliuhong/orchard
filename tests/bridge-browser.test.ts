@@ -94,16 +94,39 @@ test("extension sends exact body in same-origin tab with cookies and blocks gate
   let status = 200;
   let contentType = "application/json";
   const listener = { addListener() {} };
+  const history: Record<string, unknown> = { profileId: "work" };
+  const session: Record<string, unknown> = {};
+  const storage = (values: Record<string, unknown>) => ({
+    get: async () => structuredClone(values),
+    set: async (changes: Record<string, unknown>) => { Object.assign(values, structuredClone(changes)); },
+  });
+  const tabs = [
+    { id: 7, url: "https://gateway.test/home", active: true, autoDiscardable: true, discarded: false, frozen: false },
+  ];
+  let injectedTab: number | undefined;
+  let onTabRemoved: (id: number) => void = () => {};
+  let onMessage: (message: unknown, sender: unknown, respond: (result: { ok: boolean }) => void) => void;
+  const popupUrl = "chrome-extension://" + "a".repeat(32) + "/popup.html";
   const sandbox = {
     AbortSignal, URL, TextDecoder, Uint8Array, location: { origin: "https://gateway.test" },
     console: { warn() {} },
     chrome: {
-      runtime: { id: "a".repeat(32), onMessage: listener, onInstalled: listener, onStartup: listener },
+      runtime: { id: "a".repeat(32), getURL: () => popupUrl,
+        onMessage: { addListener: (callback: typeof onMessage) => { onMessage = callback; } },
+        onInstalled: listener, onStartup: listener },
       alarms: { onAlarm: listener, get: async () => ({ periodInMinutes: 0.5 }) },
-      storage: { local: { get: async () => ({ profileId: "work" }) } },
-      tabs: { query: async () => [{ id: 7, url: "https://gateway.test/home", active: true }] },
-      scripting: { executeScript: async (options: { world: string; func: (...args: unknown[]) => Promise<unknown>; args: unknown[] }) => {
+      storage: { local: storage(history), session: storage(session) },
+      permissions: { contains: async () => true, onRemoved: listener },
+      tabs: {
+        query: async () => tabs.map(tab => ({ ...tab })),
+        get: async (id: number) => tabs.find(tab => tab.id === id),
+        update: async (id: number, changes: { autoDiscardable: boolean }) => Object.assign(tabs.find(tab => tab.id === id)!, changes),
+        onRemoved: { addListener: (callback: typeof onTabRemoved) => { onTabRemoved = callback; } },
+        onUpdated: listener, onReplaced: listener,
+      },
+      scripting: { executeScript: async (options: { world: string; target: { tabId: number }; func: (...args: unknown[]) => Promise<unknown>; args: unknown[] }) => {
         assert.equal(options.world, "MAIN");
+        injectedTab = options.target.tabId;
         return [{ result: await options.func(...options.args) }];
       } },
     },
@@ -115,7 +138,32 @@ test("extension sends exact body in same-origin tab with cookies and blocks gate
   };
   runInNewContext(source, sandbox);
   const invoke = () => runInNewContext(`executeBrowserRequest(${JSON.stringify({ origin: "https://gateway.test", request: { ...defaults, body: '{ "中文": 1 }\n', headers: { Authorization: "Bearer ak" } }, maxBytes: 1000, timeoutMs: 1000 })})`, sandbox);
+  const bind = (tabId: number) => new Promise<{ ok: boolean }>(resolve => {
+    onMessage({ type: "tab:bind", origin: "https://gateway.test", tabId }, { id: "a".repeat(32), url: popupUrl }, resolve);
+  });
+  tabs.push({ ...tabs[0]!, id: 8, active: false });
+  await assert.rejects(invoke(), /TAB_SELECTION_REQUIRED/);
+  assert.ok(tabs.every(tab => tab.autoDiscardable));
+  const second = tabs.pop()!;
   assert.equal(JSON.stringify(await invoke()), '{"ok":true}');
+  assert.equal(tabs[0]!.autoDiscardable, false);
+  tabs.push(second);
+  assert.equal((await bind(8)).ok, true);
+  assert.deepEqual(tabs.map(tab => tab.autoDiscardable), [true, false]);
+  await invoke();
+  assert.equal(injectedTab, 8);
+  second.frozen = true;
+  await assert.rejects(invoke(), /TAB_FROZEN/);
+  second.frozen = false;
+  second.discarded = true;
+  await assert.rejects(invoke(), /TAB_DISCARDED/);
+  tabs.pop();
+  onTabRemoved(8);
+  await assert.rejects(invoke(), /TAB_SELECTION_REQUIRED/);
+  assert.equal(tabs[0]!.autoDiscardable, true);
+  assert.equal((await bind(7)).ok, true);
+  await invoke();
+  assert.equal(injectedTab, 7);
   assert.equal(pageFetch?.credentials, "include");
   assert.equal(pageFetch?.redirect, "error");
   assert.equal(pageFetch?.body, '{ "中文": 1 }\n');
@@ -123,6 +171,11 @@ test("extension sends exact body in same-origin tab with cookies and blocks gate
   await assert.rejects(invoke(), /GATEWAY_AUTH_REQUIRED/);
   status = 200; contentType = "text/html";
   await assert.rejects(invoke(), /GATEWAY_AUTH_REQUIRED/);
+  // A new browser session may reuse an old tab ID for another account.
+  delete session.bridgeTabBindings;
+  tabs[0]!.autoDiscardable = true;
+  await assert.rejects(invoke(), /TAB_SELECTION_REQUIRED/);
+  assert.equal(tabs[0]!.autoDiscardable, true);
 });
 
 test("HTTP browser channel executes reviewed actions only after confirmation, isolates profiles and rejects secret echoes", async t => {

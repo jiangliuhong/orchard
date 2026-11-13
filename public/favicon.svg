@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <style>
+    .mark { fill: #226449; }
+    @media (prefers-color-scheme: dark) {
+      .mark { fill: #9addbb; }
+    }
+  </style>
+  <g class="mark">
+    <path d="M28 10h8c10 0 18 8 18 18v8c0 10-8 18-18 18h-8c-10 0-18-8-18-18v-8c0-10 8-18 18-18Zm0 10c-4.4 0-8 3.6-8 8v8c0 4.4 3.6 8 8 8h8c4.4 0 8-3.6 8-8v-8c0-4.4-3.6-8-8-8Z"/>
+    <path d="M29 35c0-6.1 4.9-11 11-11v5c0 6.1-4.9 11-11 11Z"/>
+    <path d="M24 30c4.4 0 8 3.6 8 8v2c-4.4 0-8-3.6-8-8Z"/>
+  </g>
+</svg>

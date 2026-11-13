@@ -27,19 +27,116 @@ function startPolling(server, profileId, token) {
   };
   void poll();
 }
+const bindingKey = "bridgeTabBindings";
+let tabOperations = Promise.resolve();
+
+function withTabBindings(operation) {
+  const result = tabOperations.then(async () => {
+    const stored = await chrome.storage.session.get(bindingKey);
+    return operation(stored[bindingKey] ?? {});
+  });
+  tabOperations = result.catch(() => {});
+  return result;
+}
+
+function tabOrigin(url) {
+  try { return new URL(url).origin; } catch { return undefined; }
+}
+
+function canAccessOrigin(origin) {
+  return chrome.permissions.contains({ origins: [origin + "/*"] });
+}
+
+function saveBindings(bindings) {
+  return chrome.storage.session.set({ [bindingKey]: bindings });
+}
+
+async function releaseTab(bindings, origin, tab) {
+  const binding = bindings[origin];
+  if (tab && binding.restoreAutoDiscardable && tab.autoDiscardable === false) {
+    try { await chrome.tabs.update(tab.id, { autoDiscardable: true }); }
+    catch (error) {
+      // A closed tab has no setting left to restore.
+      if (await chrome.tabs.get(tab.id).catch(() => undefined)) throw error;
+    }
+  }
+  delete bindings[origin];
+  await saveBindings(bindings);
+}
+
+function manageBridgeTab(origin, selectedId) {
+  return withTabBindings(async bindings => {
+    const allTabs = await chrome.tabs.query({});
+    const tabs = allTabs.filter(tab => tab.id !== undefined && tabOrigin(tab.url) === origin);
+    let binding = bindings[origin];
+    let primary = allTabs.find(tab => binding && tab.id === binding.tabId);
+    if (binding && (!primary || tabOrigin(primary.url) !== origin || !await canAccessOrigin(origin))) {
+      await releaseTab(bindings, origin, primary);
+      primary = undefined;
+      binding = undefined;
+    }
+
+    const available = tabs.filter(tab => !tab.discarded && !tab.frozen &&
+      (!tab.pendingUrl || tabOrigin(tab.pendingUrl) === origin));
+    // Tab IDs are browser-session scoped. Keep only the fact of a previous
+    // binding across browser restarts so a replacement always requires consent.
+    const historyKey = "bridgeTabPreviouslyBound:" + origin;
+    const previouslyBound = (await chrome.storage.local.get(historyKey))[historyKey];
+    const selected = selectedId === undefined
+      ? (!binding && !previouslyBound && tabs.length === 1 ? available[0] : undefined)
+      : available.find(tab => tab.id === selectedId);
+    if (selectedId !== undefined && !selected) throw new Error("TAB_UNAVAILABLE");
+    if (selected && selected.id !== binding?.tabId) {
+      if (!await canAccessOrigin(origin)) throw new Error("TAB_REQUIRED");
+      if (binding) await releaseTab(bindings, origin, primary);
+      await chrome.storage.local.set({ [historyKey]: true });
+      binding = { tabId: selected.id, restoreAutoDiscardable: selected.autoDiscardable !== false };
+      bindings[origin] = binding;
+      await saveBindings(bindings);
+      primary = selected;
+    }
+    if (primary && !primary.discarded && primary.autoDiscardable !== false) {
+      primary = await chrome.tabs.update(primary.id, { autoDiscardable: false });
+    }
+    const ready = primary?.autoDiscardable === false && tabOrigin(primary.url) === origin && !primary.discarded && !primary.frozen &&
+      (!primary.pendingUrl || tabOrigin(primary.pendingUrl) === origin);
+    return {
+      tabId: binding?.tabId,
+      state: ready ? "ready" : primary?.discarded ? "discarded" : primary?.frozen ? "frozen"
+        : binding ? "unavailable" : previouslyBound || tabs.length > 1 ? "select" : "missing",
+      tabs: tabs.map(tab => ({
+        id: tab.id, windowId: tab.windowId, index: tab.index, title: tab.title, url: tab.url,
+        available: available.includes(tab),
+      })),
+    };
+  });
+}
+
+function reconcileBridgeTabs(tabId, removed, navigatedUrl) {
+  void withTabBindings(async bindings => {
+    for (const [origin, binding] of Object.entries(bindings)) {
+      if (tabId !== undefined && binding.tabId !== tabId) continue;
+      const tab = removed ? undefined : await chrome.tabs.get(binding.tabId).catch(() => undefined);
+      if (!tab || tabOrigin(tab.url) !== origin || (navigatedUrl && tabOrigin(navigatedUrl) !== origin) ||
+          !await canAccessOrigin(origin)) {
+        await releaseTab(bindings, origin, tab);
+      }
+    }
+  }).catch(error => console.warn("Orchard 无法更新桥接页签绑定", error));
+}
+
 async function executeBrowserRequest(payload) {
   const { origin, request, maxBytes, timeoutMs, deadline } = payload;
+  if (deadline && deadline <= Date.now()) throw new Error("BROWSER_REQUEST_FAILED");
+  const binding = await manageBridgeTab(origin);
+  if (binding.state !== "ready") {
+    const errors = { select: "TAB_SELECTION_REQUIRED", discarded: "TAB_DISCARDED", frozen: "TAB_FROZEN" };
+    throw new Error(errors[binding.state] || "TAB_REQUIRED");
+  }
   const remainingMs = deadline ? Math.min(timeoutMs, deadline - Date.now()) : timeoutMs;
   if (remainingMs <= 0) throw new Error("BROWSER_REQUEST_FAILED");
-  const tabs = (await chrome.tabs.query({})).filter(tab => {
-    try { return new URL(tab.url).origin === origin; } catch { return false; }
-  });
-  // Never silently choose another account/session when several tabs match.
-  const active = tabs.filter(tab => tab.active);
-  const tab = tabs.length === 1 ? tabs[0] : active.length === 1 ? active[0] : undefined;
-  if (!tab?.id) throw new Error("TAB_REQUIRED");
   const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id }, world: "MAIN",
+    target: { tabId: binding.tabId }, world: "MAIN",
     func: async (origin, request, maxBytes, timeoutMs) => {
       if (location.origin !== origin) return { error: "TAB_REQUIRED" };
       try {
@@ -159,8 +256,15 @@ const registerProfile = () => {
 
 const reconnect = () => { void registerProfile().catch(error => console.warn("Orchard 浏览器资料连接失败", error)); };
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (sender.id !== chrome.runtime.id || !["profile:register", "profile:save", "profile:status"].includes(message?.type)) return;
+  if (sender.id !== chrome.runtime.id || !["profile:register", "profile:save", "profile:status", "tab:status", "tab:bind"].includes(message?.type)) return;
   void (async () => {
+    if (message.type === "tab:status" || message.type === "tab:bind") {
+      const origin = message.origin;
+      if (sender.url !== chrome.runtime.getURL("popup.html") || typeof origin !== "string" ||
+          tabOrigin(origin) !== origin || !await canAccessOrigin(origin)) throw new Error("TAB_REQUIRED");
+      if (message.type === "tab:bind" && !Number.isInteger(message.tabId)) throw new Error("TAB_UNAVAILABLE");
+      return { ok: true, ...await manageBridgeTab(origin, message.tabId) };
+    }
     if (message.type === "profile:status") return { ok: true, ...(lastConnection ?? await registration) };
     if (message.type === "profile:save") {
       const name = typeof message.name === "string" ? message.name.trim() : "";
@@ -173,6 +277,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })().then(sendResponse, error => sendResponse({ ok: false, error: error.message }));
   return true;
 });
+chrome.tabs.onRemoved.addListener(tabId => reconcileBridgeTabs(tabId, true));
+chrome.tabs.onReplaced.addListener((_addedId, removedId) => reconcileBridgeTabs(removedId, true));
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.url) reconcileBridgeTabs(tabId, false, change.url);
+});
+chrome.permissions.onRemoved.addListener(() => reconcileBridgeTabs());
 chrome.runtime.onInstalled.addListener(reconnect);
 chrome.runtime.onStartup.addListener(reconnect);
 chrome.alarms.onAlarm.addListener(alarm => {
