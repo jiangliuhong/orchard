@@ -11,6 +11,7 @@ import { checkScriptSource } from "../runtime/script.js";
 import { schemaSubset, bindingSchema } from "../domain/schema-compatibility.js";
 import { validateBridgeConfigV1 } from "../web-bridge/config-validation.js";
 import { readConfiguredBridge } from "../web-bridge/configured.js";
+import { BRIDGE_BINDINGS_PATH, migrateBrowserBindings, readBrowserBindings } from "../web-bridge/local-bindings.js";
 import { DatabaseBridgeConfiguration, bridgeDeclaration } from "../web-bridge/database-config.js";
 import { workspaceSchemaInstalled, assertNoMaintenanceTask } from "../agent/workspace-business-hooks.js";
 import type { PortableSnapshot, PortableBridge, PortableProvider, PortableScript, PortableWorkflow, SnapshotCategory, SnapshotTheme, LocalRef } from "./snapshot-types.js";
@@ -61,7 +62,7 @@ export function databaseFingerprint(store: Store) {
   return digest(canonicalJson({ rows, artifacts, scriptArtifacts }));
 }
 export function targetFingerprint(store: Store) {
-  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: workspaceSchemaInstalled(store) ? rawBridge(store) : readOptional(store, "config/web-bridge.json"), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
+  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: workspaceSchemaInstalled(store) ? rawBridge(store) : readOptional(store, "config/web-bridge.json"), browserBindings: readOptional(store, BRIDGE_BINDINGS_PATH), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
 }
 /** Independent source copies live inside the recovery point JSON, never just artifact paths. */
 export function captureSnapshot(store: Store, theme: SnapshotTheme) {
@@ -74,9 +75,7 @@ export function captureSnapshot(store: Store, theme: SnapshotTheme) {
   }
   const bridge = rawBridge(store), webBridge: PortableBridge = { applications: bridge.applications, environments: {}, tools: bridge.tools, enabledTools: bridge.enabledTools };
   for (const [app, environments] of Object.entries(bridge.environments as Record<string, Row[]>)) webBridge.environments[app] = environments.map(env => {
-    const result: PortableBridge["environments"][string][number] = { id: env.id, origin: env.origin, enabled: env.enabled };
-    for (const field of ["profileId", "extensionId"] as const) if (env[field]) { const ref = localReference("webBridge", app, env.id, field); result[field] = ref; mappings[ref.localRef] = env[field]; }
-    return result;
+    return { id: env.id, ...(env.key === undefined ? {} : { key: env.key }), origin: env.origin, enabled: env.enabled };
   });
   const scripts: PortableScript[] = store.scripts().map(script => ({ id: script.id, name: script.name, description: script.description, runtime: script.runtime, archived: script.status === "archived", currentPublishedVersionId: script.currentPublishedVersionId, draft: script.currentDraftVersionId ? scriptDefinitionUnchecked(store, script.id, script.currentDraftVersionId) : null, versions: store.scriptVersions(script.id).filter(version => version.status === "published").map(version => ({ id: version.id, definition: scriptDefinitionUnchecked(store, script.id, version.id) })) }));
   const workflows = new Map<string, PortableWorkflow>();
@@ -170,12 +169,18 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
   let bridge = rawBridge(store);
   if (selected.has("webBridge")) {
     const before = canonicalJson(bridge); bridge = structuredClone(bridge);
+    const bindings = readBrowserBindings(store.root), priorBindings = canonicalJson(bindings);
+    migrateBrowserBindings(bindings, bridge.environments);
+    if (canonicalJson(bindings) !== priorBindings) result.files[BRIDGE_BINDINGS_PATH] = JSON.stringify(bindings);
+    // The restore plan contains shared definitions only. Local bindings survive independently.
+    for (const environments of Object.values(bridge.environments) as Row[][]) for (const environment of environments) { delete environment.profileId; delete environment.extensionId; }
     Object.assign(bridge.applications, snapshot.webBridge.applications); Object.assign(bridge.tools, snapshot.webBridge.tools); Object.assign(bridge.enabledTools, snapshot.webBridge.enabledTools);
     for (const [app, environments] of Object.entries(snapshot.webBridge.environments)) {
       const list = new Map<string, Row>((bridge.environments[app] ?? []).map((env: Row) => [env.id, env]));
       for (const env of environments) {
-        const previous = list.get(env.id), next: Row = { ...previous, id: env.id, origin: env.origin, enabled: env.enabled, bound: false, tabAvailable: false };
-        for (const field of ["profileId", "extensionId"] as const) if (env[field]) next[field] = localValue(env[field], previous?.[field], mappings);
+        const previous = list.get(env.id), key = env.key ?? previous?.key;
+        const next: Row = { ...previous, id: env.id, ...(key === undefined ? {} : { key }), origin: env.origin, enabled: env.enabled, bound: false, tabAvailable: false };
+        // Historical localRef fields are intentionally ignored, including explicit restore mappings.
         list.set(env.id, next);
       }
       bridge.environments[app] = [...list.values()];
@@ -299,7 +304,11 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
   if (selected.has("webBridge")) {
     const old = effective.webBridge, incoming = snapshot.webBridge;
     old.applications = { ...old.applications, ...incoming.applications }; old.tools = { ...old.tools, ...incoming.tools }; old.enabledTools = { ...old.enabledTools, ...incoming.enabledTools };
-    for (const [app, envs] of Object.entries(incoming.environments)) { const list = new Map((old.environments[app] ?? []).map(v => [v.id,v])); envs.forEach(v => list.set(v.id, { ...list.get(v.id), ...v })); old.environments[app] = [...list.values()]; }
+    for (const [app, envs] of Object.entries(incoming.environments)) {
+      const list = new Map((old.environments[app] ?? []).map(v => [v.id,v]));
+      envs.forEach(({ profileId: _profile, extensionId: _extension, ...v }) => list.set(v.id, { ...list.get(v.id), ...v }));
+      old.environments[app] = [...list.values()];
+    }
   }
   result.effective = effective;
   return result;

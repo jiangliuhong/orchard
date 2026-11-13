@@ -110,7 +110,7 @@ export class WorkspaceProjectionSource {
         tools.push(selected);
       }
       const definition = { id: application.id, name: application.name, enabled: application.enabled,
-        environments: snapshot.environments.map(({ id, origin, enabled }) => ({ id, origin, enabled })) };
+        environments: snapshot.environments.map(({ id, key, origin, enabled }) => ({ id, ...(key === undefined ? {} : { key }), origin, enabled })) };
       reserve(definition);
       projectedApplications.push({ id: application.id, revision: snapshot.hash, definition, tools });
     }

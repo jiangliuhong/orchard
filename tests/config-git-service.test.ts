@@ -49,6 +49,20 @@ test('restore collects mappings, consumes persisted mappings, delivers same save
   await service.apply({ token: general.token, requestId: 'theme' });
   assert.equal(restore.pendingGeneral('browser')[0]?.theme, 'dark');
 });
+test('legacy browser references do not block remote sync on an unbound machine', async t => {
+  const { service, publish, store } = await setup(t), source = snapshot();
+  source.webBridge.applications.crm = { id: 'crm', name: 'CRM', enabled: true };
+  source.webBridge.environments.crm = [{ id: 'shared-env', key: 'production', origin: 'https://example.com', enabled: true, profileId: localReference('webBridge', 'crm', 'shared-env', 'profileId') }];
+  const sha = await publish(source);
+  const preview = await service.restorePreview({ source: { kind: 'git', sha }, categories: ['webBridge'] });
+  assert.deepEqual(preview.requiredMappings, []);
+  assert.deepEqual(preview.blockers, []);
+  assert.ok(preview.warnings?.some(warning => warning.includes('浏览器绑定仅保存在本机')));
+  await service.apply({ token: preview.token, requestId: 'unbound-browser' });
+  const restored = JSON.parse(store.one<{ config_json: string }>("SELECT config_json FROM bridge_configuration WHERE id='current'")!.config_json).environments.crm[0];
+  assert.equal(restored.key, 'production');
+  assert.equal(restored.profileId, undefined);
+});
 test('model-config-only changes remain actionable in the provider restore preview', async t => {
   const { service, store, publish } = await setup(t), source = snapshot();
   const ref = localReference('providers', 'pi-cli', 'executable');

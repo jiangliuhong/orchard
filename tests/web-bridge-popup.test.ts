@@ -17,7 +17,12 @@ function harness(url = "https://example.com/account") {
     navigator: { clipboard: { writeText: async (value: string) => { copied.push(value); } } },
     chrome: {
       runtime: { sendMessage: async () => ({ ok: true, profile: { id: "profile-id", extensionId: "extension-id", name: "工作 Chrome" }, servers: connected ? ["http://127.0.0.1:7443"] : [] }) },
-      tabs: { query: async () => [{ url }] },
+      tabs: {
+        query: async () => [{ url }],
+        onRemoved: { addListener() {} },
+        onReplaced: { addListener() {} },
+        onUpdated: { addListener() {} },
+      },
       permissions: {
         getAll: async () => ({ origins }),
         request: async ({ origins: added }: { origins: string[] }) => { origins.push(...added); return true; },

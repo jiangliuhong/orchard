@@ -319,8 +319,60 @@ test("Web Bridge lists named browser profiles with details and refreshes names w
     fireEvent.click(screen.getByRole("button", { name: "刷新网页桥接" }));
     await screen.findByRole("option", { name: "财务工作浏览器 · ile-work · 已连接" });
     assert.equal(select.value, "profile-work");
-    assert.ok(screen.getByText("财务工作浏览器 · 已绑定"));
+    assert.ok(screen.getByText("财务工作浏览器 · 已连接"));
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("Web Bridge saves a named environment without a browser and validates duplicate keys", async () => {
+  clearBridgePreferences();
+  const originalFetch = globalThis.fetch;
+  const environments: { id: string; key: string; origin: string; profileId?: string; enabled: boolean }[] = [];
+  const writes: Record<string, unknown>[] = [];
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (path.endsWith("/applications/crm/environments") && options?.method === "POST") {
+      const body = JSON.parse(String(options.body)); writes.push(body);
+      environments.push({ ...body, id: "environment-uuid" });
+      return Response.json(environments[0]);
+    }
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments }] });
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "环境" }));
+    const button = screen.getByRole("button", { name: "添加环境" }) as HTMLButtonElement;
+    fireEvent.change(screen.getByLabelText("网站 Origin"), { target: { value: "https://example.test" } });
+    assert.equal(button.disabled, true);
+    fireEvent.change(screen.getByLabelText("环境标识"), { target: { value: "production" } });
+    assert.equal(button.disabled, false);
+    fireEvent.click(button);
+    await screen.findByText("本机未绑定浏览器");
+    assert.deepEqual(writes, [{ key: "production", origin: "https://example.test", profileId: "", enabled: true }]);
+    fireEvent.change(screen.getByLabelText("环境标识"), { target: { value: "production" } });
+    fireEvent.change(screen.getByLabelText("网站 Origin"), { target: { value: "https://another.test" } });
+    assert.equal(button.disabled, true);
+    assert.ok(screen.getByText("该应用中已存在相同的环境标识"));
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    assert.equal((screen.getByLabelText("环境标识") as HTMLInputElement).value, "production");
+    assert.equal((screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement).value, "");
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
+});
+
+test("Web Bridge preserves an offline profile while editing and clears selection when the website changes", async () => {
+  clearBridgePreferences();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async url => String(url).endsWith("/applications") ? Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [{ id: "uuid", key: "production", origin: "https://example.test", profileId: "offline", enabled: true }] }] }) : Response.json({ items: [] });
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "环境" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    const select = screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement;
+    assert.equal(select.value, "offline");
+    assert.equal((screen.getByRole("button", { name: "保存环境" }) as HTMLButtonElement).disabled, false);
+    fireEvent.change(screen.getByLabelText("网站 Origin"), { target: { value: "https://changed.test" } });
+    assert.equal(select.value, "");
+  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
 });
 
 function clearBridgePreferences() {

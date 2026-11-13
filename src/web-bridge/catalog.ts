@@ -26,7 +26,7 @@ export interface WebBridgeTool {
 export interface WebBridgeApplication {
   id: string;
   name: string;
-  environments: { id: string; origin: string; enabled: boolean; bound: boolean; tabAvailable: boolean }[];
+  environments: { id: string; key?: string; origin: string; enabled: boolean; bound: boolean; tabAvailable: boolean }[];
   enabled: boolean;
 }
 

@@ -129,7 +129,7 @@ export class ConfigRestoreService {
     check(databaseFingerprint(this.store) === receipt.databaseHash, "RECOVERY_REQUIRED", "恢复数据库或源码最终摘要不匹配", 503);
     check(!workspaceSchemaInstalled(this.store) || !operation.files.some(file => file.target === "config/web-bridge.json"), "WORKSPACE_LEGACY_RESTORE_PENDING", "旧浏览器文件恢复与数据库事实源不兼容，须先完成迁移恢复审核", 503);
     for (const file of operation.files) {
-      check(["config/web-bridge.json", "config-git/general.json", "config-git/local-mappings.json"].includes(file.target), "RECOVERY_REQUIRED", "恢复文件目标无效", 503);
+      check(["config/web-bridge.json", "config/web-bridge-bindings.json", "config-git/general.json", "config-git/local-mappings.json"].includes(file.target), "RECOVERY_REQUIRED", "恢复文件目标无效", 503);
       const content = readOptional(this.store, file.staged);
       check(content !== null && digest(content) === file.hash, "RECOVERY_REQUIRED", "恢复暂存文件缺失或损坏", 503);
       this.options.fault?.(`before_file:${file.target}`, operation);

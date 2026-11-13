@@ -11,7 +11,8 @@ export interface PortableProvider {
 }
 export interface PortableBridge {
   applications: Record<string, { id: string; name: string; enabled: boolean }>;
-  environments: Record<string, { id: string; origin: string; enabled: boolean; profileId?: LocalRef; extensionId?: LocalRef }[]>;
+  // profileId/extensionId are accepted only when reading historical snapshots.
+  environments: Record<string, { id: string; key?: string; origin: string; enabled: boolean; profileId?: LocalRef; extensionId?: LocalRef }[]>;
   tools: Record<string, WebBridgeTool>; enabledTools: Record<string, boolean>;
 }
 export interface PortableScript {

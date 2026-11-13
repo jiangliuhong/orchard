@@ -1,5 +1,7 @@
 import { parseConfigJson, inspectBridgeConfig as inspectHistoricalConfig, validateBridgeConfigV1 as validateHistoricalConfig, type BridgeConfig } from "../migrations/config.js";
 import { BRIDGE_HTTP_METHODS } from "./http-methods.js";
+import { validateEnvironmentKey } from "./local-bindings.js";
+import { check } from "../domain/errors.js";
 
 /** Extend live configuration validation without changing the reviewed v0→v1 migration. */
 export function validateBridgeConfigV1(source: string): BridgeConfig {
@@ -14,6 +16,15 @@ export function validateBridgeConfigV1(source: string): BridgeConfig {
     }
   }
   validateHistoricalConfig(JSON.stringify(projected));
+  for (const environments of Object.values((value as BridgeConfig).environments)) {
+    const keys = new Set<string>();
+    for (const environment of environments as unknown as { id: string; key?: string }[]) {
+      if (environment.key !== undefined) validateEnvironmentKey(environment.key);
+      const key = environment.key ?? environment.id;
+      check(!keys.has(key), "ENVIRONMENT_KEY_CONFLICT", "该应用中已存在相同的环境标识", 409);
+      keys.add(key);
+    }
+  }
   return value as BridgeConfig;
 }
 

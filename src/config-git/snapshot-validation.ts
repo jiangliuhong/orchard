@@ -87,9 +87,9 @@ export function validatePortableBridge(value: unknown): asserts value is Portabl
   const localEnvironments: Record<string, unknown[]> = Object.create(null);
   for (const [appId, raw] of Object.entries(environments)) {
     array(raw); localEnvironments[appId] = raw.map(v => {
-      const env = object(v, ["id", "origin", "enabled"], ["profileId", "extensionId"]); identity(env.id); string(env.origin); bool(env.enabled);
+      const env = object(v, ["id", "origin", "enabled"], ["key", "profileId", "extensionId"]); identity(env.id); string(env.origin); bool(env.enabled);
       for (const k of ["profileId", "extensionId"]) if (Object.hasOwn(env, k)) ref(env[k], localReference("webBridge", appId, env.id, k));
-      return { id: env.id, origin: env.origin, enabled: env.enabled, bound: false, tabAvailable: false };
+      return { id: env.id, ...(env.key === undefined ? {} : { key: env.key }), origin: env.origin, enabled: env.enabled, bound: false, tabAvailable: false };
     });
   }
   for (const raw of Object.values(object(b.tools))) object(raw, ["toolId", "application", "site", "description", "parameters", "path", "method", "fields", "risk", "approval", "timeoutMs", "catalogVersion", "enabled"], ["execution"]);

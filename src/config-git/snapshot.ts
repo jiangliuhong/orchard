@@ -177,8 +177,7 @@ export function exportSnapshot(store: Store, bridge: WebBridgeConfig | Record<st
   const portableBridge: PortableBridge = {
     applications: Object.fromEntries(Object.entries(applications).map(([id, raw]) => { const app = object(raw); return [id, { id: app.id, name: app.name, enabled: app.enabled }]; })) as PortableBridge["applications"],
     environments: Object.fromEntries(Object.entries(environments).map(([appId, raw]) => {
-      array(raw); return [appId, raw.map(v => { const e = object(v); string(e.id); return { id: e.id, origin: e.origin, enabled: e.enabled,
-        ...(e.profileId ? { profileId: localReference("webBridge", appId, e.id, "profileId") } : {}), ...(e.extensionId ? { extensionId: localReference("webBridge", appId, e.id, "extensionId") } : {}) }; })];
+      array(raw); return [appId, raw.map(v => { const e = object(v); string(e.id); return { id: e.id, ...(e.key === undefined ? {} : { key: e.key }), origin: e.origin, enabled: e.enabled }; })];
     })) as PortableBridge["environments"], tools: b.tools as PortableBridge["tools"], enabledTools: b.enabledTools as PortableBridge["enabledTools"],
   };
   const providers = store.all<{ id: string }>("SELECT id FROM provider_settings ORDER BY id").map(row => {

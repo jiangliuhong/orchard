@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Store } from "../persistence/store.js";
 import type { WebBridgeConfig } from "../web-bridge/config.js";
 import { readConfiguredBridge } from "../web-bridge/configured.js";
+import { readBrowserBindings } from "../web-bridge/local-bindings.js";
 import { AppError, check } from "../domain/errors.js";
 import { canonicalJson, digest } from "../persistence/files.js";
 import { configCoordinator } from "./coordinator.js";
@@ -90,6 +91,7 @@ export class ConfigGitService {
   }
   private localSecrets(): string[] {
     const values = Object.values(this.savedMappings());
+    for (const binding of Object.values(readBrowserBindings(this.store.root))) for (const field of ["profileId", "extensionId"] as const) if (binding[field]) values.push(binding[field]);
     for (const row of this.store.all<{ id: string }>("SELECT id FROM provider_settings")) { const config = this.store.provider(row.id)!.config; for (const value of Object.values(config)) if (typeof value === "string" && value !== "legacy" && value !== "native") values.push(value); }
     const bridge = readConfiguredBridge(this.store, true);
     for (const envs of Object.values(bridge.environments ?? {}) as Record<string, unknown>[][]) for (const env of envs) for (const field of ["profileId", "extensionId"]) if (typeof env[field] === "string") values.push(env[field] as string);
@@ -203,7 +205,6 @@ export class ConfigGitService {
       const requiredMappings: PreviewView["requiredMappings"] = [];
       const requireRef = (key: string, label: string) => { if (!mappings[key]?.trim()) requiredMappings.push({ key, label }); };
       if (selectedSet.has("providers")) for (const p of snapshot.providers) requireRef(p.config.executable.localRef, `${p.id} executable`);
-      if (selectedSet.has("webBridge")) for (const [app, envs] of Object.entries(snapshot.webBridge.environments)) for (const env of envs) for (const field of ["profileId", "extensionId"] as const) if (env[field]) requireRef(env[field].localRef, `${app}/${env.id} ${field}`);
       const secrets = [...this.localSecrets(), ...Object.values(mappings)], diffs: PreviewDiff[] = [], blockers: Blocker[] = [];
       const addDiff = (c: SnapshotCategory, id: string, before: unknown, after: unknown) => diffs.push({ ...safeDiff({ path: `${c}/${id}`, before: before === undefined ? null : canonicalJson(before), after: canonicalJson(after) }, secrets), category: c, objectId: id });
       for (const c of scope) {
@@ -248,7 +249,7 @@ export class ConfigGitService {
         }
       }
       const deliverGeneral = finalScope.includes("general") && (input.theme === undefined || input.theme !== snapshot.general.theme);
-      const view: PreviewView = { token, expiresAt, categories: finalScope, diffs: [], blockers: blockers.map(b => b.message), blockerDetails: blockers, requiredMappings, warnings: finalScope.filter(c => !(selected ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined)).includes(c)).map(c => `自动补入依赖类别: ${c}`), ...(input.source.kind === "git" ? { sourceSha: input.source.sha } : {}), noChanges: !deliverGeneral && diffs.every(d => d.changeType === "same") };
+      const view: PreviewView = { token, expiresAt, categories: finalScope, diffs: [], blockers: blockers.map(b => b.message), blockerDetails: blockers, requiredMappings, warnings: [...finalScope.filter(c => !(selected ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined)).includes(c)).map(c => `自动补入依赖类别: ${c}`), ...(finalScope.includes("webBridge") ? ["浏览器绑定仅保存在本机。同步后，未绑定的环境可前往 Web Bridge 环境设置选择本机浏览器资料。"] : [])], ...(input.source.kind === "git" ? { sourceSha: input.source.sha } : {}), noChanges: !deliverGeneral && diffs.every(d => d.changeType === "same") };
       this.previews.set(token, { view, diffs, cumulative: [], kind: blockers.length ? "blocked" : "restore" });
       return this.previewPage(token);
     });

@@ -127,7 +127,7 @@ export class WebBridgeGateway {
         try {
           if (tool.execution.transport === "browser") {
             const environment = environments[0];
-            check(environment.profileId, "PROFILE_REQUIRED", "浏览器环境需要绑定资料");
+            check(environment.profileId, "PROFILE_REQUIRED", `环境 ${environment.key ?? environment.id} 尚未绑定本机浏览器，请前往 Web Bridge 环境设置选择浏览器资料`);
             const resolveCredential: CredentialResolver = (dictionaryId, key) => {
               const explicit = Object.values(options.credentialBindings ?? {}).some(binding => binding.source === "dictionary" && binding.dictionaryId === dictionaryId && binding.key === key);
               const resolve = explicit && options.resolveCredential ? options.resolveCredential : this.httpDependencies.resolveCredential;
