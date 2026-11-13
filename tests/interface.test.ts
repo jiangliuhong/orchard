@@ -4,7 +4,6 @@ import { createElement, useState } from "react";
 import { JSDOM } from "jsdom";
 import { registerHooks } from "node:module";
 import type { AgentModelConfigView, Binding, ConversationView, ProviderView, NodeRun, StreamEvent, Workflow } from "../src/domain/types.js";
-import type { WorkflowChatContext } from "../src/web/agent-chat/adapters/workflow.js";
 import type { AgentChatConfig, ChatSubmission } from "../src/web/agent-chat/types.js";
 import { projectGraph, applyEventStatus, renderableWorkflow } from "../src/web/features/graph.js";
 import { mergeEvents } from "../src/web/lib/api.js";
@@ -40,15 +39,7 @@ dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 dom.window.HTMLElement.prototype.hasPointerCapture = () => false;
 dom.window.HTMLElement.prototype.setPointerCapture = () => {};
 dom.window.HTMLElement.prototype.releasePointerCapture = () => {};
-const { render: renderUi, screen, fireEvent, cleanup, waitFor, act } = await import("@testing-library/react");
-// These UI contracts exercise the preserved legacy pages before workspace migration.
-function render(...args: Parameters<typeof renderUi>) {
-  const fixtureFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => String(url).startsWith("/api/maintenance/owners/")
-    ? Response.json({ code: "MAINTENANCE_RUNTIME_REQUIRED", message: "维护运行时尚未启用" }, { status: 503 })
-    : fixtureFetch(url, options);
-  return renderUi(...args);
-}
+const { render, screen, fireEvent, cleanup, waitFor, act } = await import("@testing-library/react");
 const { ProviderPicker } = await import("../src/web/features/ProviderPicker.js");
 const { AgentModelConfigPicker } = await import("../src/web/features/AgentModelConfigPicker.js");
 const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
@@ -64,7 +55,7 @@ const { FinalResult } = await import("../src/web/features/FinalResult.js");
 const { BusinessApp: App } = await import("../src/web/App.js");
 const { ScriptPage, ScriptsPage } = await import("../src/web/features/ScriptPages.js");
 const { ScriptNodePicker } = await import("../src/web/features/ScriptNodePicker.js");
-const { ScriptAgentPanel, ScriptAgentPreview } = await import("../src/web/features/ScriptAgentPanel.js");
+
 const { AgentChat } = await import("../src/web/agent-chat/AgentChat.js");
 const { ArchiveConversationButton } = await import("../src/web/features/ArchiveConversationButton.js");
 const { ScriptCleanup, ScriptReferences } = await import("../src/web/features/ScriptVersionPanels.js");
@@ -591,50 +582,6 @@ test("Bridge tool forms preserve invalid JSON until corrected and failed deletio
   } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
 });
 
-test("Bridge Agent sends scoped conversations, reviews changes without mutation and applies explicitly", async () => {
-  clearBridgePreferences();
-  localStorage.setItem("orchard.bridge.provider", JSON.stringify({ providerId: "third-provider", modelId: "model" }));
-  const originalFetch = globalThis.fetch;
-  let turn: Record<string, unknown> | undefined, applied = 0;
-  let received: Record<string, unknown> | undefined;
-  globalThis.fetch = async (url, options) => {
-    const path = String(url);
-    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
-    if (path.endsWith("/tools")) return Response.json({ items: [] });
-    if (path.endsWith("/providers")) return Response.json({ items: [provider({ defaultModel: "model", models: [{ id: "model", name: "Model", source: "configured", enabled: true }] })] });
-    if (path.endsWith("/apply")) { applied++; return Response.json({ hash: "applied-hash" }); }
-    if (path.includes("/agent/turns")) {
-      if (options?.method === "POST") {
-        received = JSON.parse(String(options.body));
-        turn = { id: "turn", application: "crm", conversationId: received!.conversationId, prompt: received!.prompt, status: "succeeded", baseHash: "base", base: [], proposal: { summary: "建议新增查询工具", changes: [{ operation: "create", toolId: "query", definition: bridgeTestTool("crm") }] } };
-        return Response.json(turn);
-      }
-      return Response.json({ items: turn ? [turn] : [], conversations: turn ? [{ id: turn.conversationId, title: turn.prompt, updatedAt: 1 }] : [] });
-    }
-    return Response.json({ items: [] });
-  };
-  try {
-    render(createElement(WebBridgeSettings));
-    await screen.findByText("当前应用：CRM");
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true));
-    fireEvent.change(screen.getByLabelText("Agent 维护需求"), { target: { value: "请新增查询工具" } });
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    fireEvent.click(await screen.findByRole("button", { name: "审阅 1 项变更" }));
-    assert.ok(await screen.findByLabelText("变更差异：query.json"));
-    assert.equal(applied, 0);
-    assert.equal(received?.prompt, "请新增查询工具");
-    assert.equal(received?.providerId, "third-provider");
-    assert.equal(received?.testContext, undefined);
-    fireEvent.click(screen.getByRole("button", { name: "确认应用变更" }));
-    await waitFor(() => assert.equal(applied, 1));
-    await screen.findByRole("button", { name: "已应用" });
-    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
-    await waitFor(() => assert.equal(screen.getByRole("complementary", { name: "应用 Agent 维护" }).querySelector(".agent-chat-messages")!.textContent?.includes("请新增查询工具"), false));
-    assert.equal(applied, 1);
-  } finally { globalThis.fetch = originalFetch; clearBridgePreferences(); }
-});
-
 test("script list filters request server pagination and exposes script creation", async () => {
   const originalFetch = globalThis.fetch, requests: string[] = [];
   globalThis.fetch = async url => {
@@ -685,7 +632,7 @@ test("script three-column workspace keeps Agent visible and preserves run input 
     assert.ok(await screen.findByRole("complementary", { name: "Agent 对话" }));
     const testInput = screen.getByLabelText("测试输入 JSON");
     fireEvent.change(testInput, { target: { value: '{"message":"保留测试输入"}' } });
-    fireEvent.change(await screen.findByLabelText("描述脚本需求或修复要求"), { target: { value: "保留这个需求" } });
+    fireEvent.change(await screen.findByLabelText("Agent 维护需求"), { target: { value: "保留这个需求" } });
     fireEvent.keyDown(runTab, { key: "ArrowRight" });
     const resultsTab = screen.getByRole("tab", { name: "运行结果" });
     assert.equal(document.activeElement, resultsTab);
@@ -694,9 +641,9 @@ test("script three-column workspace keeps Agent visible and preserves run input 
     const referencesTab = screen.getByRole("tab", { name: "引用" });
     assert.equal(document.activeElement, referencesTab);
     assert.equal(screen.getByRole("tabpanel", { name: "引用" }).getAttribute("aria-labelledby"), referencesTab.id);
-    assert.ok(await screen.findByLabelText("描述脚本需求或修复要求"));
+    assert.ok(await screen.findByLabelText("Agent 维护需求"));
     assert.ok(screen.getByLabelText("新文件路径"));
-    assert.equal((await screen.findByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "保留这个需求");
+    assert.equal((await screen.findByLabelText("Agent 维护需求") as HTMLTextAreaElement).value, "保留这个需求");
     fireEvent.keyDown(referencesTab, { key: "Home" });
     assert.equal(screen.getByRole("tabpanel", { name: "运行参数" }).getAttribute("aria-labelledby"), runTab.id);
     assert.equal((screen.getByLabelText("测试输入 JSON") as HTMLTextAreaElement).value, '{"message":"保留测试输入"}');
@@ -744,39 +691,6 @@ test("script references link to the referenced historical workflow version", asy
     await waitFor(() => assert.ok(requests.some(url => url.endsWith("/versions/old-version"))));
     assert.equal(requests.some(url => url.endsWith("/versions/latest-version")), false);
   } finally { globalThis.fetch = originalFetch; window.history.replaceState({}, "", originalUrl); }
-});
-test("script Agent proposal requires explicit confirmation and saves one revision", async () => {
-  const originalFetch = globalThis.fetch, requests: unknown[] = [];
-  const script = { id: "normalize", currentDraftVersionId: "draft-v1", draft: { revision: 2 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-  const turn = { id: "turn-id", status: "succeeded", scriptId: script.id, draftVersionId: "draft-v1", baseRevision: 2, appliedRevision: null as number | null, validation: { valid: true, diagnostics: [] }, proposal: { summary: "增加清洗功能", changes: [], metadata: { name: "清洗脚本" } } };
-  globalThis.fetch = async (_url, options) => {
-    if (options?.method === "POST") { requests.push(JSON.parse(String(options.body))); turn.appliedRevision = 3; return Response.json({ version: { revision: 3 } }); }
-    return Response.json(turn);
-  };
-  let applied = 0;
-  try {
-    render(createElement(ScriptAgentPreview, { script, turnId: turn.id, disabled: false, onApplied: () => applied++, onTestInput: () => {} }));
-    await screen.findByText("增加清洗功能");
-    assert.equal(requests.length, 0);
-    fireEvent.click(screen.getByRole("button", { name: "确认应用变更…" }));
-    assert.equal(requests.length, 0);
-    fireEvent.click(screen.getByRole("button", { name: "确认并保存草稿" }));
-    await waitFor(() => assert.equal(requests.length, 1));
-    assert.equal((requests[0] as { expectedRevision: number }).expectedRevision, 2);
-    await waitFor(() => assert.equal(applied, 1));
-    await screen.findByText("已应用为草稿修订 3。");
-  } finally { globalThis.fetch = originalFetch; }
-});
-test("script Agent preview blocks stale revision application and retains readable proposal", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => Response.json({ id: "turn-id", status: "succeeded", draftVersionId: "old-draft", baseRevision: 0, appliedRevision: null, proposal: { summary: "历史提案", changes: [], metadata: { name: "new" } }, validation: { valid: true, diagnostics: [] } });
-  try {
-    const script = { id: "normalize", currentDraftVersionId: "new-draft", draft: { revision: 1 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-    render(createElement(ScriptAgentPreview, { script, turnId: "turn-id", disabled: false, onApplied: () => assert.fail("must not apply"), onTestInput: () => {} }));
-    await screen.findByText(/草稿已改变/);
-    assert.equal(screen.queryByRole("button", { name: "确认应用变更…" }), null);
-    assert.ok(screen.getByText("历史提案"));
-  } finally { globalThis.fetch = originalFetch; }
 });
 test("script cleanup previews a range before the destructive request", async () => {
   const originalFetch = globalThis.fetch, requests: { url: string; body: unknown }[] = [];
@@ -840,188 +754,6 @@ test("archive confirmation stays inside the drawer and above its trigger when sp
   }
 });
 
-test("script Agent starts blank and opens, continues and archives conversations through history", async () => {
-  const originalFetch = globalThis.fetch;
-  const requests: string[] = [];
-  let archived = false;
-  globalThis.fetch = async (url, options) => {
-    const path = String(url); requests.push(path);
-    if (options?.method === "POST" && path.endsWith("/archive")) { archived = true; return Response.json({ id: "old-chat" }); }
-    if (path.endsWith("/conversations")) return Response.json({ items: [{ id: "old-chat", draftVersionId: "draft-v1", title: "之前的脚本需求", updatedAt: 1, archived, active: false }] });
-    return Response.json({ items: [], total: 0, activeCount: 0 });
-  };
-  try {
-    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-    render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => {}, onTestInput: () => {} }));
-    await waitFor(() => assert.ok(requests.some(path => path.includes("conversationId="))));
-    assert.ok(screen.getByRole("heading", { name: "新对话" }));
-    assert.equal(screen.queryByText("与 Agent 创作"), null);
-    assert.ok(requests.filter(path => path.includes("conversationId=")).every(path => !path.endsWith("draft-v1")));
-    assert.equal(screen.queryByText("之前的脚本需求"), null);
-    const historyButton = screen.getByRole("button", { name: "历史对话" });
-    historyButton.focus();
-    fireEvent.click(historyButton);
-    const drawer = await screen.findByRole("dialog", { name: "历史对话" });
-    assert.ok(drawer.closest(".script-agent-panel"));
-    fireEvent.click(screen.getByRole("button", { name: "关闭历史对话" }));
-    await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "历史对话" }), null));
-    await waitFor(() => assert.equal(document.activeElement, historyButton));
-    fireEvent.click(historyButton);
-    fireEvent.keyDown(await screen.findByRole("dialog", { name: "历史对话" }), { key: "Escape" });
-    await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "历史对话" }), null));
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    assert.equal((await screen.findByRole("button", { name: "继续对话" })).getAttribute("data-variant"), "ghost");
-    fireEvent.click(await screen.findByRole("button", { name: "继续对话" }));
-    await waitFor(() => assert.ok(requests.some(path => path.endsWith("conversationId=old-chat"))));
-    assert.equal(screen.getByRole("heading", { name: "之前的脚本需求" }).getAttribute("title"), "之前的脚本需求");
-    assert.equal(screen.queryByRole("dialog", { name: "历史对话" }), null);
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "归档" }));
-    assert.equal(archived, false);
-    const confirmation = await screen.findByRole("dialog", { name: "确认归档此对话？" });
-    assert.ok(confirmation.hasAttribute("data-conversation-archive-confirm"));
-    assert.ok(screen.getByRole("button", { name: "归档" }));
-    assert.ok(screen.getByRole("dialog", { name: "历史对话" }));
-    await userEvent.setup({ document: dom.window.document }).click(screen.getByRole("button", { name: "取消" }));
-    await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "确认归档此对话？" }), null));
-    assert.equal(archived, false);
-    fireEvent.click(screen.getByRole("button", { name: "归档" }));
-    fireEvent.keyDown(await screen.findByRole("dialog", { name: "确认归档此对话？" }), { key: "Escape" });
-    await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "确认归档此对话？" }), null));
-    assert.ok(screen.getByRole("dialog", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "归档" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
-    await waitFor(() => assert.equal(archived, true));
-    await waitFor(() => assert.equal(screen.getByRole("button", { name: "历史对话" }).getAttribute("aria-expanded"), "false"));
-    assert.ok(screen.getByRole("heading", { name: "新对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    assert.ok(await screen.findByText(/已归档/));
-    assert.equal(screen.queryByRole("button", { name: "继续对话" }), null);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
-test("script Agent heading uses the first submitted prompt and resets for a new conversation", async () => {
-  const originalFetch = globalThis.fetch;
-  const firstPrompt = "请为这个脚本增加严格的输入校验，并保留详细的错误说明和兼容性检查";
-  let turn: { id: string; conversationId: string; prompt: string; status: string; baseRevision: number; appliedRevision: null } | undefined;
-  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
-  globalThis.fetch = async (url, options) => {
-    const path = String(url);
-    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
-    if (options?.method === "POST" && path.endsWith("/turns")) {
-      const input = JSON.parse(String(options.body));
-      turn = { id: "title-turn", conversationId: input.conversationId, prompt: input.prompt, status: "failed", baseRevision: 0, appliedRevision: null };
-      return Response.json(turn);
-    }
-    if (path.endsWith("/conversations")) return Response.json({ items: turn ? [{ id: turn.conversationId, title: firstPrompt, draftVersionId: "draft-v1", archived: false }] : [] });
-    if (path.endsWith("/turns/title-turn")) return Response.json(turn);
-    if (path.includes("/turns?")) return Response.json({ items: turn && path.endsWith(`conversationId=${turn.conversationId}`) ? [turn] : [], total: turn ? 1 : 0, activeCount: 0 });
-    return Response.json({ items: [] });
-  };
-  try {
-    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-    render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => {}, onTestInput: () => {} }));
-    await screen.findByRole("combobox", { name: "模型" });
-    fireEvent.change(await screen.findByLabelText("描述脚本需求或修复要求"), { target: { value: firstPrompt } });
-    const generate = screen.getByRole("button", { name: "发送" });
-    await waitFor(() => assert.equal((generate as HTMLButtonElement).disabled, false));
-    fireEvent.click(generate);
-    const heading = await screen.findByRole("heading", { name: firstPrompt });
-    assert.equal(heading.getAttribute("title"), firstPrompt);
-    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
-    assert.ok(screen.getByRole("heading", { name: "新对话" }));
-    assert.equal((await screen.findByLabelText("描述脚本需求或修复要求") as HTMLTextAreaElement).value, "");
-  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
-});
-
-test("script Agent sends selected references and renders ordinary answers without change controls", async () => {
-  const originalFetch = globalThis.fetch, requests: Record<string, unknown>[] = [];
-  let conversationId = "";
-  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
-  globalThis.fetch = async (url, options) => {
-    const path = String(url);
-    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
-    if (path.includes("/tests?")) return Response.json({ items: [{ id: "failed-test", status: "failed", createdAt: 0 }] });
-    if (options?.method === "POST") {
-      const input = JSON.parse(String(options.body));
-      requests.push(input); conversationId = input.conversationId;
-      return Response.json({ id: "answer" });
-    }
-    if (path.includes("/turns?")) return Response.json({
-      items: conversationId ? [{ id: "answer", conversationId, prompt: "为什么失败", summary: "输入日期格式不符合预期。", status: "succeeded", hasChanges: false, hasTestInput: false, appliedRevision: null }] : [],
-      total: conversationId ? 1 : 0, activeCount: 0,
-    });
-    return Response.json({ items: [] });
-  };
-  try {
-    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-    render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => assert.fail("conversation must not apply"), onTestInput: () => {} }));
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "添加引用" }) as HTMLButtonElement).disabled, false));
-    fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
-    await screen.findByRole("option", { name: /failed/ });
-    fireEvent.change(screen.getByLabelText("引用测试结果"), { target: { value: "failed-test" } });
-    fireEvent.change(await screen.findByLabelText("描述脚本需求或修复要求"), { target: { value: "为什么失败" } });
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    assert.ok(await screen.findByText("输入日期格式不符合预期。"));
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0]!.testId, "failed-test");
-    assert.equal(screen.queryByRole("button", { name: "查看变更" }), null);
-    assert.equal(screen.queryByText(/提案详情/), null);
-    assert.equal(screen.queryByRole("button", { name: "生成变更预览" }), null);
-  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
-});
-
-test("newly completed script tests become available as Agent repair context without reloading the page", async () => {
-  const originalFetch = globalThis.fetch;
-  let available = false;
-  globalThis.fetch = async url => {
-    if (String(url).includes("/tests?")) return Response.json({ items: available ? [{ id: "failed-test", status: "failed", createdAt: 0 }] : [] });
-    return Response.json({ items: [], total: 0, activeCount: 0 });
-  };
-  try {
-    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-    const props = { script, dirty: false, onApplied: () => {}, onTestInput: () => {} };
-    const view = render(createElement(ScriptAgentPanel, { ...props, testRefresh: 0 }));
-    assert.equal(screen.queryByLabelText("引用测试结果"), null);
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "添加引用" }) as HTMLButtonElement).disabled, false));
-    fireEvent.click(screen.getByRole("button", { name: "添加引用" }));
-    await waitFor(() => assert.ok(screen.getByLabelText("引用测试结果")));
-    assert.equal(screen.queryByRole("option", { name: /failed/ }), null);
-    available = true;
-    view.rerender(createElement(ScriptAgentPanel, { ...props, testRefresh: 1 }));
-    assert.ok(await screen.findByRole("option", { name: /failed/ }));
-    fireEvent.change(screen.getByLabelText("引用测试结果"), { target: { value: "failed-test" } });
-    await waitFor(() => assert.equal(screen.queryByLabelText("引用测试结果"), null));
-    assert.ok(screen.getByText(/^测试引用 ·/));
-    fireEvent.click(screen.getByRole("button", { name: /^移除引用：测试引用/ }));
-    assert.equal(screen.queryByText(/^测试引用 ·/), null);
-  } finally { globalThis.fetch = originalFetch; }
-});
-test("script Agent loads older conversation messages without pagination controls", async () => {
-  const originalFetch = globalThis.fetch;
-  const offsets: string[] = [];
-  globalThis.fetch = async url => {
-    const path = String(url);
-    if (path.includes("/turns?")) {
-      const params = new URL(path, "http://localhost").searchParams;
-      const offset = params.get("offset")!;
-      offsets.push(offset);
-      return Response.json({ items: [{ id: `turn-${offset}`, conversationId: params.get("conversationId"), prompt: offset === "0" ? "最新需求" : "较早需求", status: "failed", baseRevision: 0, appliedRevision: null }], total: 2, activeCount: 0 });
-    }
-    if (path.endsWith("/turns/turn-0")) return Response.json({ id: "turn-0", status: "failed", baseRevision: 0, appliedRevision: null });
-    return Response.json({ items: [] });
-  };
-  try {
-    const script = { id: "normalize", status: "draft", currentDraftVersionId: "draft-v1", draft: { revision: 0 } } as import("../src/web/features/ScriptPages.js").ScriptDetail;
-    render(createElement(ScriptAgentPanel, { script, dirty: false, onApplied: () => {}, onTestInput: () => {} }));
-    await waitFor(() => assert.ok(offsets.includes("1")));
-    assert.ok(await screen.findByText("较早需求", { selector: "p" }));
-    assert.ok(screen.getByText("最新需求"));
-    assert.equal(screen.queryByRole("button", { name: "上一页" }), null);
-    assert.equal(screen.queryByRole("button", { name: "下一页" }), null);
-    assert.equal(screen.queryByText("2 条记录"), null);
-  } finally { globalThis.fetch = originalFetch; }
-});
 function provider(overrides: Partial<ProviderView> = {}): ProviderView {
   return { id: "third-provider", name: "Third Agent", enabled: true, config: { executable: "/usr/local/bin/third" }, models: [], defaultModel: "", revision: 1, updatedAt: 0, configSchema: true, capabilities: { modelCatalog: true, structuredOutput: "validated", tools: false, nativeResume: false, textStream: false }, readiness: { state: "ready" }, ...overrides };
 }
@@ -1117,27 +849,6 @@ test("conversation Provider picker hides disabled CLIs and allows replacing a sa
   fireEvent.keyDown(await screen.findByRole("combobox", { name: "Provider" }), { key: "Enter" });
   assert.equal(screen.queryAllByRole("option").length, 0);
 });
-test("settings previews all three default Agent prompts read-only", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async url => Response.json(String(url).endsWith("/settings/agent-prompts") ? { items: [
-    { id: "workflow", name: "工作流", prompt: "workflow rules", schema: { type: "object" }, contextNote: "动态工作流上下文" },
-    { id: "web-bridge", name: "Web Bridge 工具", prompt: "bridge rules", schema: { type: "object" }, contextNote: "应用占位示例" },
-    { id: "script", name: "脚本", prompt: "script rules", schema: { type: "object" }, contextNote: "动态脚本上下文" },
-  ] } : { items: [] });
-  try {
-    render(createElement(SettingsPage));
-    fireEvent.click(screen.getByRole("button", { name: "Agent 提示词预览" }));
-    const workflow = await screen.findByLabelText("工作流默认提示词") as HTMLTextAreaElement;
-    assert.equal(workflow.value, "workflow rules");
-    assert.equal(workflow.readOnly, true);
-    fireEvent.click(screen.getByRole("button", { name: "Web Bridge 工具" }));
-    assert.equal((screen.getByLabelText("Web Bridge 工具默认提示词") as HTMLTextAreaElement).value, "bridge rules");
-    fireEvent.click(screen.getByRole("button", { name: "脚本" }));
-    assert.equal((screen.getByLabelText("脚本默认提示词") as HTMLTextAreaElement).value, "script rules");
-    assert.equal((screen.getByLabelText("脚本输出 Schema") as HTMLTextAreaElement).readOnly, true);
-  } finally { globalThis.fetch = originalFetch; }
-});
-
 test("settings restores all categories alongside repository configuration", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async url => {
@@ -1149,7 +860,7 @@ test("settings restores all categories alongside repository configuration", asyn
   };
   try {
     render(createElement(SettingsPage));
-    for (const name of ["常规", "Provider", "Agent 模型配置", "Agent 提示词预览", "Git 仓库配置", "加密字典密钥"]) assert.ok(screen.getByRole("button", { name }));
+    for (const name of ["常规", "Provider", "Agent 模型配置", "Agent 内置知识", "Git 仓库配置", "加密字典密钥"]) assert.ok(screen.getByRole("button", { name }));
     assert.ok(screen.getByRole("region", { name: "外观设置" }));
     assert.ok(screen.getByRole("region", { name: "通知设置" }));
     fireEvent.click(screen.getByRole("button", { name: "Git 仓库配置" }));
@@ -1274,7 +985,7 @@ test("model configuration picker supports inheritance and preserves unavailable 
   assert.equal(choice, undefined);
 });
 
-test("workflow editor saves configuration IDs while authoring still selects a Provider", async () => {
+test("workflow editor saves node configuration IDs independently of the maintenance model", async () => {
   const originalFetch = globalThis.fetch, files = exampleFiles("model-config-editor");
   let saved: Record<string, string> | undefined;
   const config: AgentModelConfigView = { id: "new-config", name: "内容分析", description: "", providerId: "test-provider", modelId: "test-model", enabled: true, available: true, revision: 1, createdAt: 1, updatedAt: 1, workflowCount: 0, draftCount: 0 };
@@ -1289,7 +1000,7 @@ test("workflow editor saves configuration IDs while authoring still selects a Pr
   try {
     render(createElement(DraftPage, { id: "model-config-draft" }));
     const picker = await screen.findByRole("combobox", { name: "工作流默认 Agent 模型配置" });
-    assert.ok(await screen.findByRole("combobox", { name: "Provider" }));
+    assert.ok(screen.getByRole("combobox", { name: "Provider" }));
     fireEvent.keyDown(picker, { key: "Enter" });
     fireEvent.click(await screen.findByRole("option", { name: "内容分析" }));
     fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
@@ -1459,7 +1170,7 @@ test("draft workspace switches views and preserves the shared Agent composer", a
   globalThis.fetch = async url => Response.json(String(url) === "/api/drafts/responsive-draft" ? draft : { items: [] });
   try {
     render(createElement(DraftPage, { id: draft.id }));
-    const composer = await screen.findByLabelText("描述工作流需求");
+    const composer = await screen.findByLabelText("Agent 维护需求");
     fireEvent.change(composer, { target: { value: "切换视图后保留需求" } });
     const workspace = document.querySelector(".studio-grid")!;
     const buttons = [
@@ -1472,7 +1183,7 @@ test("draft workspace switches views and preserves the shared Agent composer", a
       fireEvent.click(screen.getByRole("button", { name: selected.label }));
       assert.equal(workspace.getAttribute("data-mobile-tab"), selected.view);
       for (const button of buttons) assert.equal(screen.getByRole("button", { name: button.label }).getAttribute("aria-pressed"), String(button.view === selected.view));
-      assert.equal(await screen.findByLabelText("描述工作流需求"), composer);
+      assert.equal(await screen.findByLabelText("Agent 维护需求"), composer);
       assert.equal((composer as HTMLTextAreaElement).value, "切换视图后保留需求");
     }
     fireEvent.change(screen.getByLabelText("选择节点"), { target: { value: "b" } });
@@ -1480,46 +1191,6 @@ test("draft workspace switches views and preserves the shared Agent composer", a
     assert.equal(screen.getByRole("button", { name: "节点" }).getAttribute("aria-pressed"), "true");
     assert.ok(await screen.findByLabelText("节点提示词"));
   } finally { globalThis.fetch = originalFetch; }
-});
-test("draft UI saves manual changes before conversation, supports cancel and restores persisted messages", async () => {
-  const originalFetch = globalThis.fetch;
-  const files = exampleFiles("ui-example");
-  let state = {
-    id: "draft-ui", workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft", publishedVersionId: null,
-    validation: { valid: true, diagnostics: [] as string[] }, files, messages: [] as { id: string; role: string; content: { text: string } }[], turns: [] as { id: string; status: string }[],
-  };
-  const requests: string[] = [];
-  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
-  globalThis.fetch = async (url, options) => {
-    const path = String(url);
-    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
-    if (options?.method === "PATCH") {
-      const input = JSON.parse(String(options.body)); state = { ...state, files: input.files, revision: state.revision + 1 }; requests.push("save");
-    } else if (options?.method === "POST" && path.endsWith("/turns")) {
-      const input = JSON.parse(String(options.body)); state = { ...state, messages: [{ id: "m", role: "user", content: { text: input.prompt } }], turns: [{ id: "turn-ui", status: "running" }] }; requests.push("turn");
-    } else if (options?.method === "POST" && path.endsWith("/cancel")) { state = { ...state, turns: [{ id: "turn-ui", status: "cancelled" }] }; requests.push("cancel"); }
-    return Response.json(state);
-  };
-  try {
-    const view = render(createElement(DraftPage, { id: state.id }));
-    const name = await screen.findByLabelText("工作流名称");
-    await waitFor(() => assert.equal((name as HTMLInputElement).value, "检查并执行"));
-    fireEvent.change(await screen.findByLabelText("描述工作流需求"), { target: { value: "change flow" } });
-    fireEvent.change(name, { target: { value: "Edited name" } });
-    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
-    fireEvent.click(screen.getByRole("button", { name: /保存修改/ }));
-    await waitFor(() => assert.ok(requests.includes("save")));
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    const cancel = await screen.findByRole("button", { name: "停止生成" }); fireEvent.click(cancel);
-    await waitFor(() => assert.ok(requests.includes("cancel")));
-    view.unmount();
-    render(createElement(DraftPage, { id: state.id }));
-    await screen.findByLabelText("工作流名称");
-    assert.equal(screen.queryByText("change flow"), null);
-    fireEvent.change(screen.getByLabelText("选择节点"), { target: { value: "b" } });
-    assert.ok(await screen.findByLabelText("节点提示词"));
-  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
 });
 test("workflow node source preview opens from the header and preserves file selection and unsaved edits", async () => {
   const originalFetch = globalThis.fetch, files = exampleFiles("source-preview");
@@ -1600,7 +1271,8 @@ test("navigation supports keyboard access and settings defaults to general", asy
   globalThis.fetch = async () => Response.json({ items: [] });
   try {
     dom.window.history.replaceState({}, "", "/");
-    const view = render(createElement(App));
+    render(createElement(App));
+    const sidebar = screen.getByRole("complementary", { name: "侧栏" });
     assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "工作流定义");
     assert.equal(screen.queryByText("创建和编排流程，管理草稿与已发布版本。"), null);
     assert.equal(screen.getByRole("link", { name: "运行记录" }).getAttribute("href"), "/runs");
@@ -1613,13 +1285,18 @@ test("navigation supports keyboard access and settings defaults to general", asy
     assert.equal(document.activeElement?.getAttribute("aria-label"), "工作流");
     await user.tab();
     assert.equal(document.activeElement?.getAttribute("aria-current"), "page");
-    dom.window.history.replaceState({}, "", "/settings");
-    view.rerender(createElement(App));
+    await user.click(screen.getByRole("link", { name: "设置" }));
+    assert.equal(window.location.pathname, "/settings");
+    assert.equal(screen.getByRole("complementary", { name: "侧栏" }), sidebar);
     assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置常规");
     assert.equal(screen.getByRole("button", { name: "常规" }).getAttribute("aria-current"), "page");
     assert.ok(screen.getByRole("region", { name: "外观设置" }));
     fireEvent.click(screen.getByRole("button", { name: "Provider" }));
     assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Provider");
+    window.history.back();
+    await waitFor(() => assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "工作流定义"));
+    window.history.forward();
+    await waitFor(() => assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置常规"));
     fireEvent.click(screen.getByRole("button", { name: "配置同步" }));
     assert.ok(await screen.findByRole("dialog", { name: "配置同步" }));
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
@@ -1665,12 +1342,11 @@ test("web bridge has its own page and is removed from settings categories", asyn
   globalThis.fetch = async url => String(url).endsWith("/extension") ? Response.json({ directory: "/tmp/extension" }) : Response.json({ items: [] });
   try {
     dom.window.history.replaceState({}, "", "/web-bridge");
-    const view = render(createElement(App));
+    render(createElement(App));
     assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "网页桥接");
     assert.equal(screen.getByRole("link", { name: "网页桥接" }).getAttribute("aria-current"), "page");
     assert.ok(await screen.findByRole("heading", { name: "创建第一个网页应用" }));
-    dom.window.history.replaceState({}, "", "/settings");
-    view.rerender(createElement(App));
+    fireEvent.click(screen.getByRole("link", { name: "设置" }));
     assert.equal(screen.queryByRole("button", { name: /Web Bridge|网页桥接/ }), null);
     assert.equal(screen.queryByRole("region", { name: "网页桥接" }), null);
   } finally { globalThis.fetch = originalFetch; dom.window.history.replaceState({}, "", "/"); }
@@ -2043,175 +1719,57 @@ test("final result copies and downloads the displayed text or JSON without alter
   }
 });
 
-test("workflow conversation mode preserves unsent input, creates single sessions and locks while active", async () => {
-  const { workflowChatConfig } = await import("../src/web/agent-chat/adapters/workflow.js");
-  const originalFetch = globalThis.fetch;
-  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
-  const posts: { path: string; body: Record<string, unknown> }[] = [];
-  const draft = { id: "mode-draft", createdAt: 0, updatedAt: 0, workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft" as const, publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files: exampleFiles(), turns: [], conversations: [], currentConversation: null, messages: [] };
-  const context = { draft, dirty: false, busy: false, setBusy: () => {}, reload: () => {}, onOpenFile: () => {} };
-  globalThis.fetch = async (url, options) => {
-    if (String(url) === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
-    const body = JSON.parse(String(options?.body)); posts.push({ path: String(url), body });
-    return Response.json({ id: "single-conversation", mode: body.mode });
-  };
-  try {
-    const view = render(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context, resourceKey: draft.id }));
-    const input = await screen.findByLabelText("描述工作流需求");
-    fireEvent.change(input, { target: { value: "保留这段未发送需求" } });
-    fireEvent.change(screen.getByLabelText("对话模式"), { target: { value: "single" } });
-    assert.equal((input as HTMLTextAreaElement).value, "保留这段未发送需求");
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
-    fireEvent.click(screen.getByRole("button", { name: "发送" }));
-    await waitFor(() => assert.equal(posts.length, 2));
-    assert.equal(posts[0]!.body.mode, "single"); assert.equal(posts[1]!.body.mode, "single");
-    const conversation = { id: "single-conversation", mode: "single" as const, connectionState: "ready" as const, status: "current" as const } as ConversationView;
-    view.rerender(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context: { ...context, draft: { ...draft, conversations: [conversation], currentConversation: conversation.id, turns: [{ id: "active", conversationId: conversation.id, status: "running" } as never] } }, resourceKey: draft.id }));
-    assert.equal((screen.getByLabelText("对话模式") as HTMLSelectElement).disabled, true);
-    assert.ok(screen.getByText("已连接"));
-  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
-});
 
-test("workflow streams preserve text beyond 4000 characters and ignore replayed events", async () => {
-  const { workflowChatConfig } = await import("../src/web/agent-chat/adapters/workflow.js");
-  const originalFetch = globalThis.fetch, OriginalSource = globalThis.EventSource;
-  let source!: EventSourceStub;
-  class Stream extends EventSourceStub { constructor() { super(); source = this; } }
-  Object.defineProperty(globalThis, "EventSource", { value: Stream, configurable: true });
-  globalThis.fetch = async () => Response.json({ items: [] });
-  const conversation = { id: "stream-conversation", mode: "multi", status: "current", title: "Streaming", connectionState: "ready" } as ConversationView;
-  const draft = { id: "stream-draft", createdAt: 0, updatedAt: 0, workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft" as const, publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files: exampleFiles(), conversations: [conversation], currentConversation: conversation.id, messages: [], turns: [{ id: "stream-turn", conversationId: conversation.id, status: "running" } as never] };
-  try {
-    render(createElement(AgentChat<WorkflowChatContext>, { config: workflowChatConfig, context: { draft, dirty: false, busy: false, setBusy: () => {}, reload: () => {}, onOpenFile: () => {} }, resourceKey: draft.id }));
-    const text = "BEGIN-" + "中".repeat(5000) + "-END";
-    await act(async () => { for (let replay = 0; replay < 2; replay++) source.onmessage?.({ data: JSON.stringify({ sequence: 1, type: "provider.text", payload: { text } }) } as MessageEvent); });
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "Streaming" }));
-    assert.ok(screen.getByText(text));
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "Streaming" }));
-    assert.ok(screen.getByText(text));
-    assert.equal(screen.queryByText(text + text), null);
-  } finally { globalThis.fetch = originalFetch; Object.defineProperty(globalThis, "EventSource", { value: OriginalSource, configurable: true }); }
-});
-
-test("conversation panel lists history groups and wires resume, archive, rename and message filtering", async () => {
+test("maintenance chat restores native session history and sends follow-ups through maintenance only", async () => {
+  const { MaintenanceChat } = await import("../src/web/agent-chat/MaintenanceChat.js");
   const originalFetch = globalThis.fetch;
-  const files = exampleFiles("conversation-draft");
-  const conversations: ConversationView[] = [
-    { id: "c-hist", draftId: "conversation-draft", mode: "multi", contextMode: "native", status: "idle", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "native", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 1, updatedAt: 1, lastUsedAt: null, connectionState: "absent", title: "历史对话标题", archivedAt: null, lastUserMessage: "历史摘要", lastTurnStatus: "succeeded", activeTurnId: null },
-    { id: "c-cur", draftId: "conversation-draft", mode: "multi", contextMode: "native", status: "current", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "native", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 2, updatedAt: 2, lastUsedAt: null, connectionState: "absent", title: "当前对话标题", archivedAt: null, lastUserMessage: "当前摘要", lastTurnStatus: null, activeTurnId: null },
-    { id: "c-arch", draftId: "conversation-draft", mode: "multi", contextMode: "native", status: "archived", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "native", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 3, updatedAt: 3, lastUsedAt: null, connectionState: "absent", title: "归档对话标题", archivedAt: 3, lastUserMessage: null, lastTurnStatus: null, activeTurnId: null },
-  ];
-  const messages = [
-    { id: "m1", draftId: "conversation-draft", turnId: null, sequence: 1, role: "user", content: { text: "当前消息内容" }, createdAt: 1, conversationId: "c-cur" },
-    { id: "m2", draftId: "conversation-draft", turnId: null, sequence: 2, role: "assistant", content: { text: "历史回复内容" }, createdAt: 2, conversationId: "c-hist" },
-  ];
-  let state = { id: "conversation-draft", workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft", publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files, turns: [] as { id: string; status: string }[], conversations, currentConversation: "c-cur" as string | null, messages };
-  const calls: { method: string; url: string; body: Record<string, unknown> }[] = [];
-  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
-  globalThis.fetch = async (url, options) => {
-    const path = String(url), method = options?.method ?? "GET";
-    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
-    if (options?.method === "POST") {
-      const body = JSON.parse(String(options.body));
-      calls.push({ method: "POST", url: path, body });
-      const cid = path.match("/conversations/([^/]+)/(resume|rebuild|archive|restore|rename)")?.[1] ?? null;
-      if (path.endsWith("/resume")) { state = { ...state, currentConversation: cid!, conversations: state.conversations.map(c => ({ ...c, status: c.id === cid ? "current" : c.id === state.currentConversation ? "idle" : c.status })) }; }
-      if (path.endsWith("/archive")) { state = { ...state, currentConversation: state.currentConversation === cid ? null : state.currentConversation, conversations: state.conversations.map(c => ({ ...c, status: c.id === cid ? "archived" : c.status, archivedAt: c.id === cid ? 9 : c.archivedAt })) }; }
-      if (path.endsWith("/restore")) { state = { ...state, currentConversation: cid!, conversations: state.conversations.map(c => ({ ...c, status: c.id === cid ? "current" : c.status === "current" ? "idle" : c.status })) }; }
-      if (path.endsWith("/rename")) { state = { ...state, conversations: state.conversations.map(c => ({ ...c, title: c.id === cid ? String(body.title) : c.title })) }; }
-    }
-    return Response.json(state);
-  };
-  try {
-    render(createElement(DraftPage, { id: state.id }));
-    await screen.findByRole("button", { name: "历史对话" });
-    assert.ok(screen.getByRole("heading", { name: "新对话" }));
-    assert.equal(screen.queryByText("与 Agent 创作"), null);
-    assert.equal(screen.queryByText("当前消息内容"), null);
-    assert.equal(screen.queryByText("历史对话标题"), null);
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    assert.ok(screen.getByRole("dialog", { name: "历史对话" }).closest(".chat-panel"));
-    assert.ok(await screen.findByText("历史对话标题"));
-    assert.ok(screen.getByText("当前对话标题"));
-    assert.equal(screen.getByRole("button", { name: "继续对话" }).getAttribute("data-variant"), "ghost");
-    assert.equal(screen.getByRole("button", { name: "继续" }).getAttribute("data-variant"), "ghost");
-    fireEvent.click(screen.getByRole("button", { name: "继续对话" }));
-    assert.ok(screen.getByRole("heading", { name: "当前对话标题" }));
-    assert.ok(screen.getByText("当前消息内容"));
-    assert.equal(screen.queryByText("历史回复内容"), null);
-    // 查看历史对话：点击标题切换消息视图，再点返回当前。
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "历史对话标题" }));
-    assert.ok(await screen.findByText("历史回复内容"));
-    assert.ok(screen.getByRole("heading", { name: "历史对话标题" }));
-    assert.equal(screen.queryByText("当前消息内容"), null);
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "历史对话标题" }));
-    assert.ok(await screen.findByText("当前消息内容"));
-    assert.ok(screen.getByRole("heading", { name: "当前对话标题" }));
-    // 继续：POST resume 后视图切到新当前对话（c-hist），原当前 c-cur 转为历史。
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
-    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/resume"))));
-    await screen.findByText("历史回复内容");
-    // 改名当前对话：内联输入 + rename 请求。
-    fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    fireEvent.click(screen.getByRole("button", { name: "重命名对话 历史对话标题" }));
-    fireEvent.change(screen.getByLabelText("对话标题"), { target: { value: "改名后的标题" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存标题" }));
-    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/rename") && call.body.title === "改名后的标题")));
-    await screen.findByRole("heading", { name: "改名后的标题" });
-    // 归档当前：需要确认，确认后无 current、发送禁用。
-    fireEvent.click(await screen.findByRole("button", { name: "归档对话 改名后的标题" }));
-    await screen.findByRole("dialog", { name: "确认归档此对话？" });
-    assert.equal(calls.some(call => call.url.endsWith("/conversations/c-hist/archive")), false);
-    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
-    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/archive"))));
-    await waitFor(() => assert.ok(screen.getByText(/没有进行中的对话/)));
-    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
-    // 已归档分组默认折叠；展开后可恢复。
-    fireEvent.click(screen.getByText((content, element) => element?.tagName === "SUMMARY" && content.startsWith("已归档")));
-    fireEvent.click(screen.getAllByRole("button", { name: "恢复" })[0]!);
-    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-hist/restore"))));
-    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
-    assert.ok(screen.getByRole("heading", { name: "新对话" }));
-  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
-});
-
-test("needs rebuild banner blocks sending and rebuild opens a fresh current conversation", async () => {
-  const originalFetch = globalThis.fetch;
-  const files = exampleFiles("rebuild-draft");
-  const broken: ConversationView = { id: "c-broken", draftId: "rebuild-draft", mode: "multi", contextMode: "native", status: "needs_rebuild", providerId: "third-provider", providerRevision: 1, modelId: "test-model", transport: "native", cliVersion: null, syncedRevision: null, rebuildFromId: null, createdAt: 1, updatedAt: 1, lastUsedAt: null, connectionState: "broken", title: "中断对话标题", archivedAt: null, lastUserMessage: null, lastTurnStatus: "interrupted", activeTurnId: null };
-  let state = { id: "rebuild-draft", workflowId: null, baseVersionId: null, revision: 0, artifactPath: "", status: "draft", publishedVersionId: null, validation: { valid: true, diagnostics: [] }, files, turns: [] as { id: string; status: string }[], conversations: [broken], currentConversation: null as string | null, messages: [] as unknown[] };
-  const calls: { url: string; body: Record<string, unknown> }[] = [];
-  localStorage.setItem("orchard-workbench-agent", JSON.stringify({ providerId: "third-provider", modelId: "test-model" }));
+  const base = "/api/maintenance/owners/browser_application/crm";
+  const conversation = { id: "saved-session", title: "历史维护", providerId: "pi-cli", modelId: "pi-model", updatedAt: 1, mode: "multi", lifecycle: "active" };
+  let tasks = [{ id: "old", sessionId: conversation.id, prompt: "历史请求", text: "历史回复", status: "succeeded", proposals: [] }];
+  const calls: { prompt: string; sessionId?: string; providerId?: string; modelId?: string }[] = [];
   globalThis.fetch = async (url, options) => {
     const path = String(url);
-    if (path === "/api/providers") return Response.json({ items: [provider({ models: [{ id: "test-model", name: "Test", source: "configured" }] })] });
-    if (options?.method === "POST") {
-      const body = JSON.parse(String(options.body));
-      calls.push({ url: path, body });
-      if (path.endsWith("/rebuild")) {
-        const fresh: ConversationView = { ...broken, id: "c-fresh", status: "current", rebuildFromId: "c-broken", title: null, connectionState: "absent" };
-        state = { ...state, conversations: [broken, fresh], currentConversation: "c-fresh" };
-      }
+    if (path === "/api/providers") return Response.json({ items: [
+      provider({ id: "pi-cli", name: "Pi", defaultModel: "pi-model", models: [
+        { id: "pi-model", name: "Default model", source: "configured" },
+        { id: "alternate", name: "Alternate model", source: "configured" },
+      ] }),
+      provider({ id: "codex-cli", name: "Codex" }),
+    ] });
+    if (path.startsWith(base + "/chat")) return Response.json({ conversations: [conversation], tasks: path.includes("?") ? tasks : [] });
+    if (path === base + "/tasks") {
+      const input = JSON.parse(String(options?.body));
+      calls.push(input);
+      const task = { id: "next", sessionId: conversation.id, prompt: input.prompt, text: "", status: "running", proposals: [] };
+      tasks = [...tasks, task];
+      return Response.json(task);
     }
-    return Response.json(state);
+    assert.equal(path, "/api/maintenance/sessions/saved-session/tasks/next/cancel");
+    tasks = tasks.map(task => task.id === "next" ? { ...task, status: "cancelled" } : task);
+    return Response.json({});
   };
   try {
-    render(createElement(DraftPage, { id: state.id }));
-    assert.ok(await screen.findByText(/对话「中断对话标题」的后端上下文已中断/));
+    render(createElement(MaintenanceChat, { kind: "browser_application", ownerId: "crm", onApplied: () => {} }));
     fireEvent.click(screen.getByRole("button", { name: "历史对话" }));
-    assert.ok(screen.getByText("需要重建"));
-    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
-    fireEvent.change(await screen.findByLabelText("描述工作流需求"), { target: { value: "继续需求" } });
-    assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false);
-    fireEvent.click(screen.getAllByRole("button", { name: "重建上下文" })[0]!);
-    await waitFor(() => assert.ok(calls.some(call => call.url.endsWith("/conversations/c-broken/rebuild"))));
-    await new Promise(resolve => setTimeout(resolve, 100));
-    await waitFor(() => assert.equal(screen.queryByText(/对话「中断对话标题」/), null));
-    await waitFor(() => assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false));
-  } finally { globalThis.fetch = originalFetch; localStorage.clear(); }
+    fireEvent.click(await screen.findByRole("button", { name: "历史维护" }));
+    await screen.findByText("历史回复");
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "模型" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "Alternate model" }));
+    fireEvent.change(screen.getByLabelText("Agent 维护需求"), { target: { value: ">历史回复\n\n请继续" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    fireEvent.click(await screen.findByRole("button", { name: "停止生成" }));
+    await screen.findByText("已停止生成");
+    assert.ok(screen.getByText("可以为下一条消息切换模型，保留对话上下文"));
+    assert.equal(calls[0]?.sessionId, conversation.id);
+    assert.equal(calls[0]?.modelId, "alternate");
+    assert.equal(calls[0]?.prompt, ">历史回复\n\n请继续");
+    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "模型" }), { key: "Enter" });
+    fireEvent.click(await screen.findByRole("option", { name: "Alternate model" }));
+    fireEvent.change(screen.getByLabelText("Agent 维护需求"), { target: { value: "Use the alternate model" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.equal(calls[1]?.modelId, "alternate"));
+    assert.equal(calls[1]?.providerId, "pi-cli");
+    assert.equal(calls[1]?.sessionId, undefined);
+  } finally { globalThis.fetch = originalFetch; localStorage.removeItem("orchard-maintenance-agent"); }
 });

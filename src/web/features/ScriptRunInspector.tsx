@@ -22,7 +22,7 @@ type InspectorTab = typeof tabs[number]["id"];
 
 export function ScriptRunInspector({ script, version, disabled, suggestedInput, externalRefresh, onTestsChanged }: {
   script: ScriptDetail; version: ScriptVersion; disabled: boolean; suggestedInput?: { value: unknown; key: number };
-  externalRefresh: number; onTestsChanged: () => void;
+  externalRefresh?: number; onTestsChanged?: () => void;
 }) {
   const prefix = useId(), [tab, setTab] = useState<InspectorTab>("parameters");
   const [input, setInput] = useState("{}"), [tests, setTests] = useState<ScriptTest[]>([]), [error, setError] = useState("");
@@ -64,7 +64,7 @@ export function ScriptRunInspector({ script, version, disabled, suggestedInput, 
       safeInput = captureScriptInput(value.input, version.inputSchema, references);
       const test = await send<ScriptTest>(`/scripts/${script.id}/tests`, { ...value, requestId: commandKey({ value, submission }) });
       setSelected(test.id); setOffset(0); setRefresh(value => value + 1); setSubmission(value => value + 1);
-      selectTab("results", true); onTestsChanged();
+      selectTab("results", true); onTestsChanged?.();
     } catch (failure) { setError((failure as Error).message); } finally {
       setBusy(false);
       if (safeInput?.transient) {
@@ -80,7 +80,7 @@ export function ScriptRunInspector({ script, version, disabled, suggestedInput, 
     setReuseNotice(legacy ? "旧历史来源不完整，请核对参数后手动运行。" : "已载入参数与字典引用；将使用当前 Schema 和当前字典版本，请核对后手动运行。");
     selectTab("parameters", true);
   };
-  const changed = () => { setRefresh(value => value + 1); onTestsChanged(); };
+  const changed = () => { setRefresh(value => value + 1); onTestsChanged?.(); };
   const resultId = selected || tests[0]?.id;
   return <aside className="panel script-inspector" aria-label="运行与引用">
     <div className="script-page-tabs" role="tablist" aria-label="运行与引用">{tabs.map((item, index) => <button type="button" key={item.id} id={`${prefix}-tab-${item.id}`} role="tab" aria-selected={tab === item.id} aria-controls={`${prefix}-panel-${item.id}`} tabIndex={tab === item.id ? 0 : -1} onClick={() => selectTab(item.id)} onKeyDown={event => {

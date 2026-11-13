@@ -24,6 +24,7 @@ import { PrivateMaintenanceBridge } from "../src/agent/maintenance-ipc.js";
 import { MaintenanceBridgeClient } from "../src/agent/maintenance-ipc-client.js";
 import { MaintenanceMcpClient } from "../src/agent/maintenance-mcp-client.js";
 import { MaintenanceProcessRegistry } from "../src/agent/maintenance-processes.js";
+import { runMaintenancePiTurn } from "../src/agent/maintenance-pi-backend.js";
 import { launchMaintenancePi, launchMaintenancePiSingle } from "../src/agent/maintenance-pi-launcher.js";
 import { registerMaintenancePiTools, MAINTENANCE_PI_TOOLS, type MaintenancePiTool } from "../src/agent/maintenance-pi-tools.js";
 import { mac, nonce, type BridgeBootstrap, type BridgeRole } from "../src/agent/maintenance-ipc-wire.js";
@@ -45,7 +46,7 @@ async function fixture(t: TestContext) {
   f.store.exec("INSERT INTO bridge_configuration VALUES('current',1,?,?,?)", declaration, digest(declaration), Date.now());
   f.store.exec("INSERT INTO agent_workspace_workflow_bindings VALUES(?,?,?)", draft.id, resourceId, Date.now());
   f.store.exec("INSERT INTO agent_workspace_projection_state VALUES('maintenance',1,1,?,?,?,'ready',NULL,?)", K, K, hash, Date.now());
-  const target = { kind: "workflow_draft" as const, id: resourceId, scope: { draftId: draft.id } }, assets = new MaintenanceAssets(f.store, configuredWebBridge(f.store)), snapshot = assets.capture(target);
+  const target = { kind: "workflow_draft" as const, id: resourceId, scope: { draftId: draft.id } }, assets = new MaintenanceAssets(f.store, configuredWebBridge(f.store), () => f.providers), snapshot = assets.capture(target);
   f.store.exec("INSERT INTO agent_maintenance_sessions(id,actor_key,scenario,owner_kind,owner_id,owner_scope_json,mode,provider_id,model_id,contract_version,tool_policy_version,knowledge_hash,generation,revision,lifecycle,native_delete_state,created_at,updated_at) VALUES('session','local','workflow','workflow_draft',?,?,'multi','test-provider','test-model','orchard.maintenance.v1','readonly',?,1,1,'active','absent',?,?)", resourceId, canonicalJson(target.scope), K, Date.now(), Date.now());
   f.store.exec("INSERT INTO agent_maintenance_tasks(id,session_id,mode,request_id,request_hash,sequence,generation,projection_generation,projection_hash,baseline_json,status,process_state,created_at) VALUES('task','session','multi','turn',?,1,1,1,?,?,'running','running',?)", K, hash, canonicalJson(snapshot.baseline), Date.now());
   t.after(installWorkspaceBusinessTracking(f.store));
@@ -375,7 +376,7 @@ test("installed Pi dispatches maintenance tools and restores the exact native co
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address === "object");
   await writeFile(resolve(agentDir, "models.json"), JSON.stringify({ providers: { "orchard-fixture": {
-    baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", apiKey: "fixture", models: [{ id: "maintenance-test" }],
+    baseUrl: `http://127.0.0.1:${address.port}/v1`, api: "openai-completions", apiKey: "fixture", models: [{ id: "maintenance-test" }, { id: "maintenance-alternate" }],
   } } }), { mode: 0o600 });
   const extension = resolve(home, "extension.mjs"), helperEntry = resolve(home, "helper.mjs");
   await Promise.all([
@@ -426,7 +427,7 @@ test("installed Pi dispatches maintenance tools and restores the exact native co
   const resumeRegistry = new MaintenanceProcessRegistry();
   const resumeLease = resumeRegistry.reserve(binding);
   t.after(() => resumeRegistry.close());
-  const resumed = await launchMaintenancePi({ ...launchOptions, registry: resumeRegistry, lease: resumeLease, bridge },
+  const resumed = await launchMaintenancePi({ ...launchOptions, registry: resumeRegistry, lease: resumeLease, bridge, model: "orchard-fixture/maintenance-alternate" },
     { directory, id: sessionId, resumeFile });
   const resumeLines = createInterface({ input: resumed.pi.stdout });
   t.after(() => resumeLines.close());
@@ -445,13 +446,12 @@ test("installed Pi dispatches maintenance tools and restores the exact native co
   assert.equal(state.sessionId, sessionId);
   assert.equal(state.sessionFile, resumeFile);
   assert.match(JSON.stringify((await command("get_messages")).messages), /Proposal submitted/);
-  const secondTurn = new Promise<void>((resolve, reject) => {
-    resumeLines.on("line", line => { if (JSON.parse(line).type === "agent_settled") resolve(); });
-    void resumed.pi.exited.then(() => reject(new Error("Pi exited before the second turn settled")));
-  });
-  assert.equal((await command("prompt", { message: "Continue from the previous proposal." })).disposition, "started");
-  await secondTurn;
+  resumeLines.close();
+  const text = await runMaintenancePiTurn(resumed.pi, "orchard-fixture/maintenance-alternate", "Continue from the previous proposal.",
+    new AbortController().signal, { id: sessionId, resumeFile, record: file => assert.equal(file, resumeFile) });
+  assert.equal(text, "Proposal submitted.");
   assert.equal(requests.length, 3);
+  assert.equal(requests[2].model, "maintenance-alternate");
   assert.match(JSON.stringify(requests[2].messages), /Proposal submitted/);
   assert.match(JSON.stringify(requests[2].messages), /Continue from the previous proposal/);
   resumed.pi.stdin.end();

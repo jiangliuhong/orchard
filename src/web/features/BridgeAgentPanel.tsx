@@ -1,14 +1,17 @@
-import { AgentChat } from "../agent-chat/AgentChat";
-import { MaintenanceOwnerPanel } from "../agent-chat/MaintenanceOwnerPanel";
-import { browserApplicationChatConfig, type BrowserApplicationChatContext } from "../agent-chat/adapters/browser-application";
+import { MaintenanceChat } from "../agent-chat/MaintenanceChat";
 
-export { bridgePreference, saveBridgePreference } from "../agent-chat/adapters/browser-application";
-export type { BridgeAgentHistory, BridgeTurnView } from "../agent-chat/adapters/browser-application";
+export function bridgePreference(key: string, fallback = "") {
+  try { return localStorage.getItem(`orchard.bridge.${key}`) ?? fallback; } catch { return fallback; }
+}
 
-export function BridgeAgentPanel({ onClose, onApplied, disabled, ...context }: BrowserApplicationChatContext & { onClose: () => void; onApplied?: () => void; disabled?: boolean }) {
+export function saveBridgePreference(key: string, value: string) {
+  try { localStorage.setItem(`orchard.bridge.${key}`, value); } catch {}
+}
+
+export function BridgeAgentPanel({ applicationId, disabled, onApplied, onClose }: {
+  applicationId: string; disabled: boolean; onApplied: () => void; onClose: () => void;
+}) {
   return <aside className="bridge-agent" aria-label="应用 Agent 维护">
-    <MaintenanceOwnerPanel key={context.application.id} kind="browser_application" ownerId={context.application.id} onApplied={onApplied} onClose={onClose} disabled={disabled}>
-      <AgentChat config={browserApplicationChatConfig} context={context} resourceKey={context.application.id} onClose={onClose} />
-    </MaintenanceOwnerPanel>
+    <MaintenanceChat kind="browser_application" ownerId={applicationId} disabled={disabled} onApplied={onApplied} onClose={onClose} />
   </aside>;
 }

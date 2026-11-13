@@ -42,6 +42,19 @@ test("knowledge update uses the current package and makes old multi read-only wi
   assert.deepEqual(readdirSync(f.staging), []);
 });
 
+test("reformatting the package manifest leaves existing multi conversations usable", async t => {
+  const f = knowledgeFixture(t);
+  const first = await f.service.initialize(signal());
+  const conversation = multi(f, first.hash);
+  const manifestPath = join(f.sourceRoot, "manifest.json");
+  writeFileSync(manifestPath, JSON.stringify(JSON.parse(readFileSync(manifestPath, "utf8"))));
+  const next = await f.service.initialize(signal());
+  assert.equal(next.hash, first.hash);
+  assert.equal(next.changed, false);
+  assert.equal(f.store.conversation("local", conversation.id).usability, "usable");
+  await f.service.withWorkspace("workflow", first.hash, signal(), async () => {});
+});
+
 test("ordinary workspace tampering is repaired from package, unchanged hash keeps existing conversations usable", async t => {
   const f = knowledgeFixture(t), first = await f.service.initialize(signal()), conversation = multi(f, first.hash);
   const file = join(f.workspace, "AGENTS.md"); chmodSync(file, 0o644); writeFileSync(file, "not a platform override");

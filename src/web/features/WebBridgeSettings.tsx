@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useLeaveGuard } from "../lib/navigation";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ArrowLeft, Check, Copy, Globe, MessageSquare, Plus, RefreshCw, Save, Search, Trash2 } from "lucide-react";
 import type { WebBridgeTool } from "../../web-bridge/catalog";
 import { normalizeToolIdentity, validateToolId } from "../../web-bridge/tool-identity";
@@ -10,13 +11,13 @@ import { BridgeParameterInputs } from "./BridgeParameterInputs";
 import { BridgeExecutionHistory } from "./BridgeExecutionHistory";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
 import { Breadcrumbs, ErrorNotice, Loading } from "../components/common";
-import { BridgeAgentPanel, bridgePreference, saveBridgePreference, type BridgeTurnView } from "./BridgeAgentPanel";
+import { BridgeAgentPanel, bridgePreference, saveBridgePreference } from "./BridgeAgentPanel";
 import { BridgeToolForm } from "./BridgeToolForm";
 import { BridgeCredentialInputs } from "./BridgeCredentialInputs";
 import type { CredentialBindings } from "../../web-bridge/credential-inputs";
 import { credentialProperties, credentialRequired, missingCredentials } from "../../web-bridge/credential-schema";
 import { historyValue, pointerPart, restoredCredentials, type HistorySources } from "../../web-bridge/history-policy";
-import { ToastNotice } from "../components/ToastNotice";
+import { ToastNotice, WorkspaceError } from "../components/ToastNotice";
 
 interface Environment { id: string; origin: string; profileId?: string; extensionId?: string; enabled: boolean; bound: boolean; tabAvailable: boolean }
 interface Application { id: string; name: string; enabled: boolean; environments: Environment[] }
@@ -24,7 +25,6 @@ interface BrowserProfile { id: string; name: string; extensionId: string; connec
 interface ToolDraft { application: string; toolId?: string; value: string; original: string }
 interface TestState { environmentId?: string; args: string; output: string; error: string; busy: boolean; historySources?: HistorySources; historyNotice?: string }
 const emptyTest = (): TestState => ({ args: "{}", output: "", error: "", busy: false });
-const BridgeDiff = lazy(() => import("./CodeEditor").then(module => ({ default: module.CodeDiffEditor })));
 const newTool = (application: string): WebBridgeTool => ({
   application, toolId: "", site: application, description: "", parameters: { type: "object", properties: {}, additionalProperties: false },
   path: "/api/", method: "GET", fields: [], risk: "read", approval: "none", timeoutMs: 30000, catalogVersion: "1", enabled: true,
@@ -50,7 +50,6 @@ export function WebBridgeSettings() {
   const [tests, setTests] = useState<Record<string, TestState>>({});
   const [testParametersInvalid, setTestParametersInvalid] = useState(false);
   const [credentialBindings, setCredentialBindings] = useState<CredentialBindings>({});
-  const [review, setReview] = useState<BridgeTurnView>(), [agentRefresh, setAgentRefresh] = useState(0);
   const [deletion, setDeletion] = useState<{ title: string; description: string; action: () => Promise<void>; execution?: boolean }>();
   const [pendingNavigation, setPendingNavigation] = useState<{ action: () => void }>();
   const saving = useRef(false), saveCallback = useRef<(() => void) | undefined>(undefined);
@@ -69,8 +68,8 @@ export function WebBridgeSettings() {
   const persistedTool = selectedTools.find(tool => tool.toolId === draft?.toolId);
   useEffect(() => { setCredentialBindings({}); }, [testKey, selectedId]);
   useEffect(() => {
-    if (editorTab !== "test" || tab !== "tools" || review) setCredentialBindings(current => Object.fromEntries(Object.entries(current).filter(([, binding]) => binding.source === "dictionary")));
-  }, [editorTab, tab, review?.id]);
+    if (editorTab !== "test" || tab !== "tools") setCredentialBindings(current => Object.fromEntries(Object.entries(current).filter(([, binding]) => binding.source === "dictionary")));
+  }, [editorTab, tab]);
   const missing = persistedTool?.execution?.transport === "browser" ? missingCredentials(persistedTool.execution, credentialBindings) : [];
   const arrayPlaceholders = Object.entries(test.historySources ?? {}).filter(([path, source]) => {
     if (source.source !== "omitted") return false;
@@ -94,11 +93,11 @@ export function WebBridgeSettings() {
     if (!selected) return;
     const value = pretty(tool ?? newTool(selected.id));
     setDraft({ application: selected.id, toolId: tool?.toolId, value, original: tool ? value : "" });
-    setEditorTab("definition"); setEditorMode("form"); setFormInvalid(false); setEditorError(""); setReview(undefined);
+    setEditorTab("definition"); setEditorMode("form"); setFormInvalid(false); setEditorError("");
     saveBridgePreference(`${selected.id}.tool`, tool?.toolId ?? "");
   };
   const selectApplication = (application: Application) => guard(() => {
-    setSelectedId(application.id); setDraft(undefined); setFormInvalid(false); setReview(undefined); setEditorError(""); setToolQuery("");
+    setSelectedId(application.id); setDraft(undefined); setFormInvalid(false); setEditorError(""); setToolQuery("");
     setOrigin(""); setProfileId(""); setEnvironmentId(undefined); setTab("tools");
   });
   const saveTool = async (newId?: string) => {
@@ -125,21 +124,11 @@ export function WebBridgeSettings() {
   };
   saveCallback.current = () => { if (saveAsToolId === undefined) void saveTool(); };
   useEffect(() => {
-    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty) event.preventDefault(); };
     const keyboard = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s" && draft) { event.preventDefault(); saveCallback.current?.(); } };
-    window.addEventListener("beforeunload", beforeUnload); window.addEventListener("keydown", keyboard);
-    return () => { window.removeEventListener("beforeunload", beforeUnload); window.removeEventListener("keydown", keyboard); };
-  }, [dirty, !!draft]);
-  useEffect(() => {
-    const protectLinks = (event: MouseEvent) => {
-      const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
-      if (!dirty || !anchor || anchor.getAttribute("href")?.startsWith("#")) return;
-      event.preventDefault();
-      setPendingNavigation({ action: () => { window.location.href = anchor.getAttribute("href")!; } });
-    };
-    document.addEventListener("click", protectLinks);
-    return () => document.removeEventListener("click", protectLinks);
-  }, [dirty]);
+    window.addEventListener("keydown", keyboard);
+    return () => { window.removeEventListener("keydown", keyboard); };
+  }, [!!draft]);
+  useLeaveGuard(dirty, action => setPendingNavigation({ action }));
   useEffect(() => { if (selected) saveBridgePreference("application", selected.id); }, [selected?.id]);
   useEffect(() => { saveBridgePreference("tab", tab); }, [tab]);
   useEffect(() => { saveBridgePreference("agentOpen", String(agentOpen)); }, [agentOpen]);
@@ -176,7 +165,6 @@ export function WebBridgeSettings() {
     } catch (error) { setTests(current => ({ ...current, [key]: { ...current[key], busy: false, error: (error as Error).message } })); }
     finally { setCredentialBindings(current => Object.fromEntries(Object.entries(current).filter(([, binding]) => binding.source === "dictionary"))); }
   };
-  const reviewTurn = (turn: BridgeTurnView) => guard(() => { setReview(turn); setTab("tools"); });
   const askDeletion = (title: string, description: string, action: () => Promise<void>) => guard(() => setDeletion({ title, description, action }));
   const deleteApplication = () => {
     if (!selected) return;
@@ -184,7 +172,7 @@ export function WebBridgeSettings() {
     askDeletion("删除应用", `确定删除“${application.name}”吗？这会同时删除 ${application.environments.length} 个环境和 ${selectedTools.length} 个工具定义，且无法撤销。`, async () => {
       await api(`/web-bridge/applications/${application.id}`, { method: "DELETE" });
       saveBridgePreference(`${application.id}.tool`, "");
-      setDraft(undefined); setReview(undefined); setFormInvalid(false); setEditorError("");
+      setDraft(undefined); setFormInvalid(false); setEditorError("");
       setOrigin(""); setProfileId(""); setEnvironmentId(undefined); setToolQuery("");
       setTests(current => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${application.id}/`))));
       setSelectedId(apps.data?.items.find(item => item.id !== application.id)?.id ?? "");
@@ -197,7 +185,9 @@ export function WebBridgeSettings() {
       <Button variant="ghost" size="icon" aria-label="刷新网页桥接" onClick={refresh}><RefreshCw size={15} /></Button>
       <Button size="sm" onClick={() => guard(() => setCreateOpen(true))}><Plus size={14} />新建应用</Button>
     </div></header>
-    <ErrorNotice message={error || apps.error || tools.error} />
+    {apps.data
+      ? <WorkspaceError message={apps.error || tools.error || (!createOpen && !deletion && saveAsToolId === undefined && !pendingNavigation ? error : "")} />
+      : <ErrorNotice message={apps.error} />}
     <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     <div className={`bridge-workspace ${agentOpen && selected ? "has-agent" : ""}`} style={{ "--bridge-agent-width": `${agentWidth}px` } as CSSProperties}>
       <aside className="bridge-apps" aria-label="应用列表">
@@ -217,17 +207,9 @@ export function WebBridgeSettings() {
       <main className="bridge-main">
         {!selected ? <div className="bridge-empty"><Globe size={32} /><h2>创建第一个网页应用</h2><p>应用用于组织环境和工具，Agent 可以协助维护工具定义。</p><Button onClick={() => setCreateOpen(true)}><Plus size={14} />添加应用</Button></div> : <>
           <header className="bridge-pane-heading"><div><strong>{selected.name}</strong><small>{selected.id}</small></div><div className="actions">{!agentOpen && <Button variant="outline" size="sm" onClick={() => setAgentOpen(true)}><MessageSquare size={14} />Agent 维护</Button>}<Button variant="ghost" size="icon" aria-label={`删除应用 ${selected.name}`} title="删除应用" disabled={busy} onClick={deleteApplication}><Trash2 size={14} /></Button></div></header>
-          <nav className="bridge-tabs" aria-label="应用配置">{[["tools", "工具"], ["environments", "环境"], ["settings", "应用设置"]].map(([value, label]) => <button key={value} type="button" aria-current={tab === value ? "page" : undefined} className={tab === value ? "active" : ""} onClick={() => guard(() => { setTab(value); setReview(undefined); })}>{label}</button>)}</nav>
+          <nav className="bridge-tabs" aria-label="应用配置">{[["tools", "工具"], ["environments", "环境"], ["settings", "应用设置"]].map(([value, label]) => <button key={value} type="button" aria-current={tab === value ? "page" : undefined} className={tab === value ? "active" : ""} onClick={() => guard(() => { setTab(value); })}>{label}</button>)}</nav>
           <div className="bridge-main-scroll">
-            {review && tab === "tools" ? <div className="bridge-review">
-              <div className="bridge-toolbar"><Button variant="ghost" size="sm" onClick={() => setReview(undefined)}><ArrowLeft size={14} />返回</Button><strong>Agent 变更审阅</strong></div>
-              <p className="bridge-prewrap">{review.proposal?.summary}</p>
-              {review.proposal?.changes.map(change => <section key={change.toolId} className="bridge-change"><h3>{change.operation === "create" ? "新增" : change.operation === "delete" ? "删除" : "修改"} · {change.toolId}</h3><Suspense fallback={<Loading />}><BridgeDiff path={`${change.toolId}.json`} original={pretty(review.base?.find(tool => tool.toolId === change.toolId) ?? null)} modified={pretty(change.definition)} /></Suspense></section>)}
-              <Button disabled={busy || !!review.appliedHash || dirty} onClick={() => void run(async () => {
-                const result = await send<{ hash: string }>(`/web-bridge/applications/${selected.id}/agent/turns/${review.id}/apply`);
-                setReview({ ...review, appliedHash: result.hash }); setDraft(undefined); tools.reload(); setAgentRefresh(value => value + 1);
-              }, "Agent 变更已应用，请按需执行测试")}>{review.appliedHash ? "已应用" : busy ? "正在应用…" : "确认应用变更"}</Button>
-            </div> : tab === "tools" ? draft ? <div className="bridge-tool-editor">
+            {tab === "tools" ? draft ? <div className="bridge-tool-editor">
               <header className="bridge-editor-header">
               <div className="bridge-toolbar"><Button variant="ghost" size="sm" onClick={() => guard(() => { setDraft(undefined); saveBridgePreference(`${selected.id}.tool`, ""); })}><ArrowLeft size={14} />工具列表</Button><strong>{draft.toolId ?? "新增工具"}{dirty ? " · 未保存" : ""}</strong>{draft.toolId && <Button size="sm" variant="outline" disabled={busy || formInvalid} onClick={() => {
                 setEditorError(""); setError("");
@@ -308,7 +290,7 @@ export function WebBridgeSettings() {
           const width = Math.max(280, Math.min(600, right - event.clientX));
           setAgentWidth(width); saveBridgePreference("agentWidth", String(width));
         }} onPointerUp={event => { event.currentTarget.releasePointerCapture(event.pointerId); }} />
-        <BridgeAgentPanel key={selected.id} application={selected} toolId={draft?.toolId} testContext={draft?.toolId && (test.output || test.error) ? pretty({ toolId: draft.toolId, args: test.args, output: test.output.slice(0, 10000), error: test.error }).slice(0, 16000) : undefined} refresh={agentRefresh} onReview={reviewTurn} onApplied={refresh} disabled={dirty || busy} onClose={() => setAgentOpen(false)} />
+        <BridgeAgentPanel applicationId={selected.id} onApplied={() => { setDraft(undefined); refresh(); }} disabled={dirty || busy} onClose={() => setAgentOpen(false)} />
       </div>}
     </div>
     <Dialog open={connectionsOpen} onOpenChange={setConnectionsOpen}><DialogContent className="bridge-connections-dialog"><DialogHeader><DialogTitle>浏览器连接与插件配置</DialogTitle><DialogDescription>安装插件，并为当前浏览器资料设置名称。</DialogDescription></DialogHeader>
@@ -322,7 +304,7 @@ export function WebBridgeSettings() {
     </DialogContent></Dialog>
     <Dialog open={createOpen} onOpenChange={open => { if (!busy) setCreateOpen(open); }}><DialogContent><DialogHeader><DialogTitle>新建网页应用</DialogTitle><DialogDescription>应用用于组织网站环境和可调用的工具。</DialogDescription></DialogHeader><label htmlFor="bridge-app-id">应用 ID</label><Input id="bridge-app-id" placeholder="如 crm" value={applicationId} disabled={busy} onChange={event => setApplicationId(event.target.value)} /><label htmlFor="bridge-app-name">应用名称</label><Input id="bridge-app-name" placeholder="如客户系统" value={applicationName} disabled={busy} onChange={event => setApplicationName(event.target.value)} /><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setCreateOpen(false)}>取消</Button><Button disabled={busy || !applicationId.trim() || !applicationName.trim()} onClick={() => void run(async () => {
       if (apps.data?.items.some(application => application.id === applicationId.trim())) throw new Error("应用 ID 已存在");
-      await send("/web-bridge/applications", { id: applicationId.trim(), name: applicationName.trim() }); setSelectedId(applicationId.trim()); setDraft(undefined); setReview(undefined); setTab("tools"); setCreateOpen(false); setApplicationId(""); setApplicationName(""); apps.reload();
+      await send("/web-bridge/applications", { id: applicationId.trim(), name: applicationName.trim() }); setSelectedId(applicationId.trim()); setDraft(undefined); setTab("tools"); setCreateOpen(false); setApplicationId(""); setApplicationName(""); apps.reload();
     }, "应用已创建")}>{busy ? "创建中…" : "创建应用"}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={saveAsToolId !== undefined} onOpenChange={open => { if (!open && !busy) setSaveAsToolId(undefined); }}><DialogContent><DialogHeader><DialogTitle>另存为新工具</DialogTitle><DialogDescription>将当前编辑内容保存到当前应用，并打开新工具。原工具保留。</DialogDescription></DialogHeader>
       <form className="grid gap-3" onSubmit={event => { event.preventDefault(); if (saveAsToolId?.trim()) void saveTool(saveAsToolId); }}>

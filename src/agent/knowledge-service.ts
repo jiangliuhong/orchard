@@ -6,7 +6,7 @@ import { DirectoryLease } from "../migrations/lock.js";
 import { durable, safe, syncDirectory } from "../migrations/journal.js";
 import { parseConfigJson } from "../migrations/config.js";
 import { AsyncReadWriteLock } from "./locks.js";
-import { loadKnowledgeBundle, installedKnowledgeDirectory, type KnowledgeBundle, type KnowledgeProfile } from "./knowledge-bundle.js";
+import { loadKnowledgeBundle, type KnowledgeBundle, type KnowledgeProfile } from "./knowledge-bundle.js";
 
 export interface KnowledgeInstallationOperation { id: string; hash: string; hadWorkspace: boolean; succeeded: boolean }
 export interface KnowledgeInstallationHost {
@@ -192,7 +192,7 @@ export class KnowledgeService {
       this.bundle = undefined; this.error = undefined;
       try {
         this.options.lease.assert(this.options.dataRoot);
-        const source = loadKnowledgeBundle(this.options.sourceRoot ?? installedKnowledgeDirectory());
+        const source = loadKnowledgeBundle(this.options.sourceRoot);
         await this.options.host.quiesce(signal); signal.throwIfAborted();
         this.options.lease.assert(this.options.dataRoot); this.directories();
         this.recoverJournal();

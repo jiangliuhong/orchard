@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { createKnowledgeManifest, installedKnowledgeDirectory, loadKnowledgeBundle, REQUIRED_KNOWLEDGE_FILES } from "../src/agent/knowledge-bundle.js";
 import { temporaryKnowledgeRoot } from "./knowledge-fixtures.js";
 const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
-function source(t: import("node:test").TestContext) { const root = temporaryKnowledgeRoot(t), directory = join(root, "knowledge"); cpSync(resolve(installedKnowledgeDirectory()), directory, { recursive: true }); return { root, directory }; }
+function source(t: import("node:test").TestContext) { const root = temporaryKnowledgeRoot(t), directory = join(root, "knowledge"); cpSync(resolve(installedKnowledgeDirectory()), directory, { recursive: true }); writeFileSync(join(directory, "manifest.json"), loadKnowledgeBundle().manifestText); return { root, directory }; }
 function rewrite(directory: string, update: (manifest: ReturnType<typeof createKnowledgeManifest>) => void) {
   const file = join(directory, "manifest.json"), manifest = JSON.parse(readFileSync(file, "utf8")); update(manifest); writeFileSync(file, JSON.stringify(manifest));
 }
@@ -28,6 +28,14 @@ test("source manifest generation is deterministic and reading is independent of 
   assert.deepEqual(first, second);
   assert.equal(loadKnowledgeBundle(directory + "/").hash, loadKnowledgeBundle(directory).hash);
   assert.throws(() => loadKnowledgeBundle("relative/knowledge"), { code: "KNOWLEDGE_BUNDLE_INVALID" });
+});
+
+test("manifest formatting and key order do not change the installed knowledge identity", t => {
+  const { directory } = source(t);
+  const original = loadKnowledgeBundle(directory);
+  const reordered = Object.fromEntries(Object.entries(original.manifest).reverse());
+  writeFileSync(join(directory, "manifest.json"), JSON.stringify(reordered));
+  assert.equal(loadKnowledgeBundle(directory).hash, original.hash);
 });
 
 test("manifest rejects traversal, duplicate paths, unsupported versions, profiles and missing files", t => {

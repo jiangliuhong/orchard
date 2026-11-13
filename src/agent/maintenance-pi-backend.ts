@@ -1,7 +1,4 @@
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute } from "node:path";
 import { check } from "../domain/errors.js";
-import { assertSchema } from "../domain/validation.js";
 import { canonicalJson, digest } from "../persistence/files.js";
 import type { MaintenanceManagedProcess } from "./maintenance-processes.js";
 
@@ -14,24 +11,9 @@ export interface MaintenancePiConfig {
   agentDir: string;
 }
 
-export function readMaintenancePiConfig(path: string): MaintenancePiConfig {
-  const stat = lstatSync(path);
-  check(isAbsolute(path) && realpathSync(path) === path && stat.isFile() && stat.nlink === 1 &&
-    stat.uid === process.getuid?.() && (stat.mode & 0o077) === 0 && stat.size <= 8192,
-  "MAINTENANCE_PACKAGE_INVALID", "维护后端配置必须为本机私有文件", 503);
-  const entry = { type: "object", required: ["path", "sha256"], additionalProperties: false,
-    properties: { path: { type: "string", minLength: 1 }, sha256: { type: "string", pattern: "^[a-f0-9]{64}$" } } };
-  const directory = { type: "string", minLength: 1 };
-  const properties = { pi: entry, extension: entry, helper: entry, privateHome: directory, agentDir: directory,
-    model: { type: "string", pattern: "^[a-zA-Z0-9][a-zA-Z0-9_./:-]{0,199}$" } };
-  const config: unknown = JSON.parse(readFileSync(path, "utf8"));
-  assertSchema(config, { type: "object", properties, required: Object.keys(properties), additionalProperties: false }, "维护 Pi 配置");
-  return config as MaintenancePiConfig;
-}
-
 export const maintenancePiFingerprint = (config: MaintenancePiConfig) => digest(canonicalJson(config));
 
-export async function runMaintenancePiTurn(pi: MaintenanceManagedProcess, model: string, prompt: string, abort: AbortSignal): Promise<string> {
+export async function runMaintenancePiTurn(pi: MaintenanceManagedProcess, model: string, prompt: string, abort: AbortSignal, session?: { id: string; resumeFile?: string; record(file: string): void }): Promise<string> {
   const signal = AbortSignal.any([abort, AbortSignal.timeout(120_000)]);
   signal.throwIfAborted();
   const output = pi.stdout.iterator({ destroyOnReturn: false });
@@ -57,6 +39,8 @@ export async function runMaintenancePiTurn(pi: MaintenanceManagedProcess, model:
           check(event.success && !event.data?.isStreaming &&
             (actual?.id === model || `${actual?.provider}/${actual?.id}` === model),
           "BACKEND_UNAVAILABLE", "Pi 未启用已配置的维护模型", 503);
+          if (session) check(event.data.sessionId === session.id && (!session.resumeFile || event.data.sessionFile === session.resumeFile),
+            "BACKEND_REFERENCE_INVALID", "Pi 未打开指定的维护会话", 409);
           prompted = true;
           send({ id: "maintenance", type: "prompt", message: prompt });
         } else if (event.type === "response" && event.id === "maintenance") {
@@ -69,6 +53,13 @@ export async function runMaintenancePiTurn(pi: MaintenanceManagedProcess, model:
             .map((part: { text: string }) => part.text).join("") : "";
         } else if (event.type === "agent_settled" && accepted) {
           check(!event.aborted && finalText.length > 0, "INVALID_AGENT_OUTPUT", "Pi 未返回维护结果");
+          if (!session) return finalText;
+          send({ id: "session", type: "get_state" });
+        } else if (session && event.type === "response" && event.id === "session") {
+          check(event.success && !event.data?.isStreaming && event.data?.sessionId === session.id &&
+            typeof event.data.sessionFile === "string" && (!session.resumeFile || event.data.sessionFile === session.resumeFile),
+          "BACKEND_REFERENCE_INVALID", "Pi 未保存指定的维护会话", 409);
+          session.record(event.data.sessionFile);
           return finalText;
         }
       }

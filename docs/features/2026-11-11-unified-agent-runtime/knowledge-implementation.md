@@ -4,18 +4,12 @@
 
 ## 源码与构建
 
-- `src/agent/knowledge/`：公共 AGENTS.md、三个场景文档、三个 SKILL.md、声明式 `.agents/mcp.json`、manifest，共 9 个资源。
+- `src/agent/knowledge/`：公共 AGENTS.md、三个场景文档、三个 SKILL.md、声明式 `.agents/mcp.json`，共 8 个源资源。
 - `src/agent/knowledge-bundle.ts`：模块相对路径定位，不依赖启动 cwd；校验必需文件、profile/契约/策略版本、精确文件清单、UTF-8、逐文件字节/SHA-256、大小/数量预算、路径/符号链接、重复 JSON 键与额外目录。
 - 文件数最多 64、单文件最多 1 MiB、资源总计最多 4 MiB；manifest 最多 64 KiB。返回冻结的 metadata 和不可变 UTF-8 字符串，不暴露可变 Buffer。
 - `.agents/mcp.json` 只能包含固定只读工具声明，拒绝 token、endpoint、command 等配置。它不是 CLI 自动启用 MCP/Skills 的证据；实际授权和传输由后续 Provider/Gateway 实现。
-- `scripts/agent-knowledge.mts` 提供显式生成、校验和构建复制；predev/pretest/prebuild 会校验，build 将全部资源（含隐藏目录）复制到 dist/agent/knowledge，postbuild integrity 自动记录这些字节。
-
-更新源码知识后显式更新版本和 manifest，不支持用户知识 overrides：
-
-```sh
-node --import tsx scripts/agent-knowledge.mts --update --bundle-version <reviewed-version>
-node --import tsx scripts/agent-knowledge.mts --check
-```
+- 开发启动从源资源生成清单。构建脚本将资源和生成的清单写入 `dist/agent/knowledge`，并重新加载校验；已安装包要求清单存在并逐文件校验。
+- 知识哈希使用固定字段顺序和序列化格式，保留原版清单的哈希算法和字节布局。仅调整清单 JSON 的空白或字段顺序不会影响续聊。需要调整显示版本时更新 `KNOWLEDGE_BUNDLE_VERSION`。
 
 复制脚本只处理清洁构建下的固定 dist 目标，不覆盖已有目标或跟随父目录 symlink。已安装包在无 src/scripts、不同 cwd 下可从模块位置加载。
 

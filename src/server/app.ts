@@ -4,7 +4,6 @@ import { registerProjectRoutes } from "../project-git/routes.js";
 import { StorageUsageService } from "../storage/usage.js";
 import { BridgeExecutionHistory } from "../web-bridge/history.js";
 import { NotificationFeed } from "./notifications.js";
-import { defaultAgentPromptPreviews } from "../authoring/prompt-preview.js";
 import { agentKnowledgeSettings } from "../agent/settings.js";
 import staticPlugin from "@fastify/static";
 import { existsSync } from "node:fs";
@@ -96,7 +95,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
         const dispose = installWorkspaceBusinessTracking(opened);
         add("workspaceTracking", true, dispose);
       }
-      const maintenanceRuntime = migrated && maintenanceFactory ? add("maintenanceRuntime", createMaintenanceAuthority(opened, maintenanceFactory)) : undefined;
+      const maintenanceRuntime = migrated && maintenanceFactory ? add("maintenanceRuntime", createMaintenanceAuthority(opened, maintenanceFactory, () => providers)) : undefined;
       if (maintenanceRuntime) {
         cleanup.push(() => maintenanceRuntime.close());
         // Validate the trusted authority before calling its recovery hook.
@@ -143,7 +142,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       gateway.httpDependencies.resolveCredential = dictionaryCredentials(opened, secretsService);
       add("dictionaries", new DictionaryService(opened, secretsService));
       if (maintenanceRuntime) {
-        const maintenance = add("maintenance", new MaintenanceService(opened, new MaintenanceAssets(opened, gateway.config!), maintenanceRuntime.boundary));
+        const maintenance = add("maintenance", new MaintenanceService(opened, new MaintenanceAssets(opened, gateway.config!, () => registry), maintenanceRuntime.boundary));
         const worker = new MaintenanceApplyWorker(opened, maintenance, { synchronize: true });
         add("maintenanceWorker", worker, () => worker.close());
       }
@@ -277,7 +276,6 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     check(message && message.length <= 4000 && !message.includes("\\0"), "INVALID_MESSAGE", "Agent 未返回有效变更描述", 422);
     return { message };
   });
-  app.get("/api/settings/agent-prompts", async () => defaultAgentPromptPreviews());
   app.get("/api/settings/agent-knowledge", async (_request, reply) => {
     reply.header("Cache-Control", "no-store");
     return agentKnowledgeSettings();

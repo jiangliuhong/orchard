@@ -1,3 +1,5 @@
+import { UnsavedChanges } from "../components/UnsavedChanges";
+import { navigate } from "../lib/navigation";
 import { useEffect, useState } from "react";
 import { BookOpen, KeyRound, Lock, Plus, Save, ShieldCheck, Trash2, Undo2, Unlock } from "lucide-react";
 import { api, requestId, send, useCommandKey, useResource } from "../lib/api";
@@ -8,7 +10,7 @@ import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { EmptyState, ErrorNotice, Loading, PageHeading, Status } from "../components/common";
 import { DeleteDictionaryButton } from "./DeleteDictionaryButton";
-import { ToastNotice } from "../components/ToastNotice";
+import { ToastNotice, WorkspaceError } from "../components/ToastNotice";
 import type { DictionaryReadiness } from "../../secrets/service.js";
 
 export interface DictionaryListView {
@@ -74,7 +76,7 @@ export function DictionariesPage() {
   const [deleted, setDeleted] = useState(false), [message, setMessage] = useState("");
   const { data, error, reload } = useResource<{ items: DictionaryListView[]; nextCursor: string | null }>(`/dictionaries?${new URLSearchParams({ ...(deleted ? { deleted: "true" } : {}), ...(kind === "all" ? {} : { kind }), ...(cursor ? { cursor } : {}) })}`);
   return <>
-    <PageHeading title="字典"><CreateDictionaryDialog onCreated={id => { window.location.href = `/dictionaries/${id}`; }} /></PageHeading>
+    <PageHeading title="字典"><CreateDictionaryDialog onCreated={id => { navigate(`/dictionaries/${id}`); }} /></PageHeading>
     <div className="section-label"><span>{deleted ? "已删除字典" : "共享配置与访问凭据"}</span>
       <Button variant="outline" size="sm" aria-pressed={deleted} onClick={() => { setDeleted(value => !value); setCursor(""); }}>{deleted ? "返回正常字典" : "已删除"}</Button>
       <Select value={kind} onValueChange={value => { setKind(value); setCursor(""); }}><SelectTrigger className="w-40" aria-label="按类型筛选"><SelectValue /></SelectTrigger>
@@ -91,7 +93,7 @@ export function DictionariesPage() {
           <time dateTime={new Date(item.updatedAt).toISOString()}>{new Date(item.updatedAt).toLocaleDateString("zh-CN")}</time>
         </a>
         <DeleteDictionaryButton dictionary={item} compact onDeleted={() => { setMessage(item.deletedAt != null ? "字典已彻底删除" : "字典已移入已删除列表"); reload(); }} />
-      </div>)}</div> : deleted ? <div className="panel"><EmptyState title="没有已删除字典" description="删除的字典将在这里显示，可按需彻底删除。" /></div> : <div className="panel"><EmptyState title="还没有字典" description="创建共享配置字典或加密凭据字典，供工作流与脚本引用。" symbol={<CreateDictionaryDialog iconOnly onCreated={id => { window.location.href = `/dictionaries/${id}`; }} />} /></div>}
+      </div>)}</div> : deleted ? <div className="panel"><EmptyState title="没有已删除字典" description="删除的字典将在这里显示，可按需彻底删除。" /></div> : <div className="panel"><EmptyState title="还没有字典" description="创建共享配置字典或加密凭据字典，供工作流与脚本引用。" symbol={<CreateDictionaryDialog iconOnly onCreated={id => { navigate(`/dictionaries/${id}`); }} />} /></div>}
     <div className="entry-actions">{cursor && <Button variant="outline" onClick={() => setCursor("")}>返回第一页</Button>}
       {data?.nextCursor && <Button variant="outline" onClick={() => setCursor(data.nextCursor!)}>下一页字典</Button>}</div>
   </>;
@@ -113,11 +115,6 @@ function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: Dictio
   const dirty = hasEdits || !!newKey || !!newValue;
   const [query, setQuery] = useState("");
   useEffect(() => { onDirtyChange(dirty || busy); }, [dirty, busy, onDirtyChange]);
-  useEffect(() => {
-    const warn = (event: BeforeUnloadEvent) => { if (dirty) event.preventDefault(); };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
   const commandKey = useCommandKey();
   const parseValue = (type: string, value: string): unknown => {
     if (type === "string") return value;
@@ -166,7 +163,7 @@ function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: Dictio
       <Button size="sm" disabled={busy || !hasEdits && !newKey.trim() && !pending} onClick={() => void save()}><Save size={14} />保存修改</Button></div>
     </div>
     <div className="dictionary-search"><Input aria-label="搜索字典键" placeholder="按键名搜索…" value={query} onChange={event => setQuery(event.target.value)} /><span className="field-hint">{entries.length} / {detail.keyCount} 个键</span></div>
-    <ErrorNotice message={error} />
+    <WorkspaceError message={error} title="字典条目未保存" />
     <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     {pending && <div className="notice error" role="alert">
       <p>移除以下正在被引用的键需要确认：</p>
@@ -291,15 +288,15 @@ export function DictionaryPage({ id }: { id: string }) {
     catch (error) { setActionError((error as Error).message); } finally { setHistoryBusy(false); }
   };
   const tabs = [{ id: "info", label: "字典信息" }, { id: "history", label: "修订历史" }, { id: "references", label: "引用影响" }, ...(detail?.kind === "encrypted" ? [{ id: "security", label: "密钥管理" }] : [])];
-  return <div className="dictionary-desktop">
+  return <div className="dictionary-desktop"><UnsavedChanges dirty={dirty} />
     <PageHeading parents={[{ label: "字典", href: "/dictionaries" }]} title={detail?.name ?? "字典详情"}>
-      {detail && <><span className={`dictionary-state ${detail.enabled && detail.deletedAt == null ? "is-enabled" : ""}`}>{detail.deletedAt != null ? "已删除" : detail.enabled ? "已启用" : "已禁用"}</span>
-        <DeleteDictionaryButton dictionary={detail} disabled={busy || dirty} onDeleted={() => { window.location.href = "/dictionaries"; }} />
+      {detail && <><span className={`dictionary-state ${detail.enabled && detail.deletedAt == null ? "is-enabled" : ""}`}>{detail.deletedAt != null ? "已删除 · 只读" : detail.enabled ? "已启用" : "已禁用"}</span>
+        <DeleteDictionaryButton dictionary={detail} disabled={busy || dirty} onDeleted={() => { navigate("/dictionaries"); }} />
         <Button variant="outline" disabled={busy || dirty || detail.deletedAt != null} onClick={() => { setActionError(""); setToggleOpen(true); }}>
           {detail.enabled ? <><Lock size={14} />禁用字典</> : <><Unlock size={14} />启用字典</>}
         </Button></>}
     </PageHeading>
-    <ErrorNotice message={error || actionError} />
+    {detail ? <WorkspaceError message={error || (!toggleOpen ? actionError : "")} /> : <ErrorNotice message={error} />}
     {!detail ? !error && <Loading /> : <>
       <div className="dictionary-summary" role="status" aria-label="字典状态">
         <span>{detail.kind === "encrypted" ? <KeyRound size={15} /> : <BookOpen size={15} />}{detail.kind === "encrypted" ? "加密字典" : "普通字典"}</span>
@@ -307,8 +304,6 @@ export function DictionaryPage({ id }: { id: string }) {
         {detail.kind === "encrypted" && <span>密钥状态 <Status value={detail.readiness === "ready" ? "成功" : "失败"} /> · {readinessLabels[detail.readiness]}{detail.missingKeyIds.length > 0 && `（缺少 ${detail.missingKeyIds.join("、")}）`}</span>}
         {detail.kind === "encrypted" && detail.readiness !== "ready" && <a href="/settings?section=dictionary-keys">前往密钥设置 →</a>}
       </div>
-      {detail.deletedAt != null && <div className="notice">已删除：仅供查看，不能编辑或新增引用。彻底删除会清除全部历史版本，存在历史引用或运行绑定时不可执行。</div>}
-      {!detail.enabled && <div className="notice">已禁用：阻止新发布与入队引用，不改写已创建运行的绑定。</div>}
       <div className="dictionary-workspace">
         <fieldset className="dictionary-editor-fieldset" disabled={detail.deletedAt != null}><EntriesEditor key={`${detail.revision}-${detail.currentVersionId}`} detail={detail} onDirtyChange={setDirty} onOperations={async () => { refresh(); }} /></fieldset>
         <aside className="panel dictionary-inspector" aria-label="字典检查器">

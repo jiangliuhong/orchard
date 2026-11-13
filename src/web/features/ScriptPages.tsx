@@ -1,3 +1,6 @@
+import { UnsavedChanges } from "../components/UnsavedChanges";
+import { navigate } from "../lib/navigation";
+import { ToastNotice, WorkspaceError, WorkspaceMessage } from "../components/ToastNotice";
 import { DictionaryDeclarationEditor } from "./DictionaryEditors";
 import { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
@@ -34,8 +37,9 @@ function CreateScript({ copy, iconOnly = false }: { copy?: { id: string; version
     try {
       const input = copy ? { id, name, versionId: copy.versionId } : { id, name, description: "", runtime, entryFile: runtime === "shell" ? "main.sh" : "main.ts", inputSchema: true, outputSchema: true, files: emptyFiles(runtime) };
       const result = await send<{ script: ScriptView }>(copy ? `/scripts/${copy.id}/copy` : "/scripts", { ...input, requestId: commandKey(input) });
-      window.location.assign(`/scripts/${result.script.id}`);
-    } catch (error) { setError((error as Error).message); setBusy(false); }
+      setOpen(false);
+      navigate(`/scripts/${result.script.id}`);
+    } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
   };
   return <><Button variant={iconOnly ? "ghost" : copy ? "outline" : "default"} className={iconOnly ? "empty-symbol h-auto" : undefined} aria-label={iconOnly ? "添加脚本" : undefined} onClick={() => { setError(""); setName(copy ? `${copy.name}（副本）` : ""); setOpen(true); }}>{iconOnly ? <Plus className="size-[25px]" /> : copy ? "复制为新脚本" : "新建脚本"}</Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent><DialogHeader><DialogTitle>{copy ? "复制脚本" : "新建脚本"}</DialogTitle><DialogDescription>新脚本从未发布的草稿开始，脚本 ID 创建后不能修改。</DialogDescription></DialogHeader>
@@ -65,44 +69,41 @@ export function ScriptPage({ id }: { id: string }) {
   const resource = useResource<ScriptDetail>(`/scripts/${id}`), [selected, setSelected] = useState(""), [error, setError] = useState("");
   const [dirty, setDirty] = useState(false);
   const [generation, setGeneration] = useState(0);
-  const [suggestedInput, setSuggestedInput] = useState<{ value: unknown; key: number }>();
-  const [agentTestRefresh, setAgentTestRefresh] = useState(0);
+  const [notice, setNotice] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false), [busy, setBusy] = useState(false);
   const script = resource.data;
   if (!script) return <><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title="脚本详情" /><ErrorNotice message={resource.error} /><Loading /></>;
   const versionId = selected || script.currentDraftVersionId || script.currentPublishedVersionId || "";
-  const reload = () => { setDirty(false); setSelected(""); setGeneration(value => value + 1); resource.reload(); };
+  const reload = (message = "") => { setNotice(message); setDirty(false); setSelected(""); setGeneration(value => value + 1); resource.reload(); };
   const archive = async () => {
     setBusy(true); setError("");
     try { await send(`/scripts/${id}/archive`); setArchiveOpen(false); resource.reload(); }
     catch (error) { setError((error as Error).message); }
     finally { setBusy(false); }
   };
-  return <div className="script-desktop"><div className="script-page-header"><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title={script.name}><Status value={script.status} />{versionId && <CreateScript copy={{ id, versionId, name: script.name }} />}<Button variant="outline" disabled={dirty || script.status === "archived"} onClick={() => setArchiveOpen(true)}>归档脚本</Button><DeleteScriptButton id={id} name={script.name} disabled={dirty || busy} onDeleted={() => window.location.assign("/scripts")} /></PageHeading></div>
-    <ErrorNotice message={error || resource.error} />
-    {script.status === "archived" && <div className="notice">此脚本已归档，只读保留。已发布工作流仍使用绑定版本运行。</div>}
+  return <div className="script-desktop"><UnsavedChanges dirty={dirty} /><div className="script-page-header"><PageHeading parents={[{ label: "脚本库", href: "/scripts" }]} title={script.name}><Status value={script.status} />{versionId && <CreateScript copy={{ id, versionId, name: script.name }} />}<Button variant="outline" disabled={dirty || script.status === "archived"} onClick={() => setArchiveOpen(true)}>归档脚本</Button><DeleteScriptButton id={id} name={script.name} disabled={dirty || busy} onDeleted={() => navigate("/scripts")} /></PageHeading></div>
+    <WorkspaceError message={resource.error} title="无法刷新脚本" />
+    <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     <div className="script-page-toolbar"><div className="script-version-picker"><label htmlFor="script-version">查看版本</label><select id="script-version" value={versionId} disabled={dirty} onChange={event => setSelected(event.target.value)}>{script.versions.map(version => <option key={version.id} value={version.id}>v{version.number} · {version.status === "draft" ? `草稿修订 ${version.revision}` : "已发布"}{version.id === script.currentPublishedVersionId ? " · 当前发布" : ""}</option>)}</select>{dirty && <span className="field-hint">未保存</span>}</div></div>
     <div className="script-three-columns"><aside className="script-agent-column" aria-label="Agent 对话">
-    <ScriptAgentPanel script={script} dirty={dirty} onApplied={reload} testRefresh={agentTestRefresh} onTestInput={value => setSuggestedInput({ value, key: Date.now() })} />
+    <ScriptAgentPanel script={script} dirty={dirty} onApplied={reload} />
     </aside><section className="script-page-workspace" aria-label="脚本信息与运行">
-    {versionId && <ScriptWorkspace key={`${versionId}:${script.updatedAt}:${generation}`} script={script} versionId={versionId} onDirtyChange={setDirty} onSaved={reload} suggestedInput={suggestedInput} testRefresh={0} onTestsChanged={() => setAgentTestRefresh(value => value + 1)} />}
+    {versionId && <ScriptWorkspace key={`${versionId}:${script.updatedAt}:${generation}`} script={script} versionId={versionId} onDirtyChange={setDirty} onSaved={reload} />}
     </section></div>
     <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}><DialogContent><DialogHeader><DialogTitle>归档“{script.name}”？</DialogTitle><DialogDescription>归档后禁止编辑、发布、测试及新工作流引用。历史版本和已有工作流的运行保留。</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setArchiveOpen(false)}>取消</Button><Button disabled={busy} onClick={() => void archive()}>确认归档</Button></DialogFooter></DialogContent></Dialog>
   </div>;
 }
 
 interface ScriptWorkspaceProps {
-  script: ScriptDetail; versionId: string; onSaved: () => void; onDirtyChange: (dirty: boolean) => void;
-  suggestedInput?: { value: unknown; key: number }; testRefresh: number;
-  onTestsChanged: () => void;
+  script: ScriptDetail; versionId: string; onSaved: (message?: string) => void; onDirtyChange: (dirty: boolean) => void;
 }
-function ScriptWorkspace({ script, versionId, onSaved, onDirtyChange, suggestedInput, testRefresh, onTestsChanged }: ScriptWorkspaceProps) {
+function ScriptWorkspace({ script, versionId, onSaved, onDirtyChange }: ScriptWorkspaceProps) {
   const resource = useResource<ScriptVersion & { files: SourceFiles }>(`/scripts/${script.id}/versions/${versionId}`);
   if (!resource.data || resource.data.id !== versionId) return <><ErrorNotice message={resource.error} /><Loading /></>;
-  return <ScriptEditor script={script} version={resource.data} onSaved={onSaved} onDirtyChange={onDirtyChange} suggestedInput={suggestedInput} testRefresh={testRefresh} onTestsChanged={onTestsChanged} />;
+  return <ScriptEditor script={script} version={resource.data} onSaved={onSaved} onDirtyChange={onDirtyChange} />;
 }
 
-function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput, testRefresh, onTestsChanged }: Omit<ScriptWorkspaceProps, "versionId"> & { version: ScriptVersion & { files: SourceFiles } }) {
+function ScriptEditor({ script, version, onSaved, onDirtyChange }: Omit<ScriptWorkspaceProps, "versionId"> & { version: ScriptVersion & { files: SourceFiles } }) {
   const [name, setName] = useState(version.name ?? script.name), [description, setDescription] = useState(version.description ?? script.description);
   const [files, setFiles] = useState(version.files), [path, setPath] = useState(version.entryFile), [entryFile, setEntryFile] = useState(version.entryFile);
   const [inputSchema, setInputSchema] = useState(pretty(version.inputSchema)), [outputSchema, setOutputSchema] = useState(pretty(version.outputSchema)), [timeoutMs, setTimeoutMs] = useState(version.timeoutMs);
@@ -115,11 +116,6 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
   const commandKey = useCommandKey();
   const readOnly = version.status === "published" || script.status === "archived";
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
-  useEffect(() => {
-    const warn = (event: BeforeUnloadEvent) => { if (dirty) event.preventDefault(); };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
   const action = async (run: () => Promise<void>) => {
     setBusy(true); setError("");
     try { await run(); } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
@@ -132,12 +128,16 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
       expectedRevision: version.revision, expectedDraftVersionId: version.id,
     };
     await api(`/scripts/${script.id}/draft`, { method: "PATCH", body: JSON.stringify({ ...input, requestId: commandKey(input) }) });
-    setDirty(false); onSaved();
+    setDirty(false); onSaved("脚本修改已保存");
   };
   return <><div className="script-workspace"><section className="panel script-editor"><div className="section-heading"><h2>v{version.number} · {version.status === "draft" ? `草稿修订 ${version.revision}` : "只读发布版本"}</h2><div className="actions">
-    {!readOnly && <><Button variant="ghost" disabled={busy || !dirty} onClick={onSaved}>放弃修改</Button><Button variant="outline" disabled={busy || !dirty || inputInvalid || outputInvalid} onClick={() => void action(() => save())}>保存修改</Button><Button disabled={busy || dirty || !version.validation.valid} onClick={() => setPublishOpen(true)}>发布版本</Button></>}
+    {!readOnly && <><Button variant="ghost" disabled={busy || !dirty} onClick={() => onSaved()}>放弃修改</Button><Button variant="outline" disabled={busy || !dirty || inputInvalid || outputInvalid} onClick={() => void action(() => save())}>保存修改</Button><Button disabled={busy || dirty || !version.validation.valid} onClick={() => setPublishOpen(true)}>发布版本</Button></>}
     {version.status === "published" && script.status !== "archived" && <Button disabled={busy} onClick={() => setRestoreOpen(true)}>{script.currentDraftVersionId ? "还原此版本…" : "复制此版本为新草稿"}</Button>}
-    </div></div><ErrorNotice message={error} />{!version.validation.valid && <div className="notice warning"><div>源码尚未通过校验，可继续编辑并保存。{version.validation.diagnostics.map((diagnostic, index) => <pre key={index}>{diagnostic}</pre>)}</div></div>}{dirty && <div className="notice">修改尚未保存。保存后才能测试、发布或切换版本；也可以放弃修改。</div>}
+    </div></div>
+    {!publishOpen && !restoreOpen && <WorkspaceError message={error} />}
+    {!version.validation.valid && <WorkspaceMessage tone="warning"
+      message={version.validation.diagnostics.length ? `源码校验未通过 · ${version.validation.diagnostics.length} 条` : "源码校验未通过"}
+      description={readOnly ? undefined : "可以继续编辑并保存。"} details={version.validation.diagnostics} />}
     <details className="script-settings"><summary>脚本配置 · 名称、入口、超时与 Schema</summary><fieldset disabled={readOnly || busy} className="script-fields">
       <label>名称<Input value={name} onChange={event => { setName(event.target.value); setDirty(true); }} /></label>
       <label>说明<Textarea value={description} onChange={event => { setDescription(event.target.value); setDirty(true); }} /></label>
@@ -159,7 +159,7 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange, suggestedInput,
     <div className="script-source"><SourceTabs files={files} path={path} onPath={setPath} onChange={readOnly || busy ? undefined : (value, selected) => { setFiles(current => ({ ...current, [selected]: value })); setDirty(true); }} /></div>
     <span className="field-hint">Node.js 默认导出函数接收并返回 JSON。Shell 从 stdin 读取输入；JSON 协议须将合法 JSON 写入 $ORCHARD_RESULT_FILE，stdout 仅作为日志。</span>
     {version.metadataSnapshot === false && <p className="field-hint">旧版本未保存名称和说明快照，此处展示当前脚本元数据；原始源码、Schema 和超时保持原版本。</p>}
-  </section><ScriptRunInspector script={script} version={version} disabled={dirty || busy || script.status === "archived"} suggestedInput={suggestedInput} externalRefresh={testRefresh} onTestsChanged={onTestsChanged} />
+  </section><ScriptRunInspector script={script} version={version} disabled={dirty || busy || script.status === "archived"} />
     <Dialog open={templateOpen} onOpenChange={setTemplateOpen}><DialogContent><DialogHeader><DialogTitle>替换返回结果 Schema？</DialogTitle><DialogDescription>使用 stdout、stderr、exitCode 的进程输出结构，现有结果定义将被替换。确认后仍需保存。</DialogDescription></DialogHeader><Payload value={processOutputSchema} /><DialogFooter><Button variant="outline" onClick={() => setTemplateOpen(false)}>取消</Button><Button disabled={readOnly || busy} onClick={() => { setOutputSchema(pretty(processOutputSchema)); setOutputGeneration(value => value + 1); setDirty(true); setTemplateOpen(false); }}>替换定义</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={publishOpen} onOpenChange={setPublishOpen}><DialogContent><DialogHeader><DialogTitle>发布脚本 v{version.number}</DialogTitle><DialogDescription>发布草稿修订 {version.revision}，校验源码后创建只读版本。已有工作流继续使用原来绑定的版本；此操作不会运行脚本。</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setPublishOpen(false)}>取消</Button><Button disabled={busy || dirty} onClick={() => void action(async () => { const input = { expectedRevision: version.revision }; await send(`/scripts/${script.id}/publish`, { ...input, requestId: commandKey(input) }); setPublishOpen(false); onSaved(); })}>确认发布</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={restoreOpen} onOpenChange={setRestoreOpen}><DialogContent><DialogHeader><DialogTitle>还原 v{version.number} 到草稿</DialogTitle><DialogDescription>{script.draft ? `将替换当前草稿修订 ${script.draft.revision} 的源码、Schema 和元数据，旧提案将因修订变化失效。` : "将创建新的可编辑草稿，保留原发布版本。"}确认后不会运行或自动发布。</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setRestoreOpen(false)}>取消</Button><Button disabled={busy} onClick={() => void action(async () => {

@@ -28,10 +28,11 @@ export function useCommandKey() {
   };
 }
 export const pretty = (value: unknown) => JSON.stringify(value, null, 2) ?? "—";
-export function useResource<T>(path: string) {
+export function useResource<T>(path: string | undefined) {
   const [data, setData] = useState<T>(), [error, setError] = useState(""), [revision, setRevision] = useState(0);
   useEffect(() => {
     const controller = new AbortController(); setError("");
+    if (!path) return;
     void api<T>(path, { signal: controller.signal }).then(value => { if (!controller.signal.aborted) setData(value); }).catch(error => { if (!controller.signal.aborted) setError(error.message); });
     return () => controller.abort();
   }, [path, revision]);

@@ -1,4 +1,15 @@
 import { spawn } from "node:child_process";
+import { build } from "esbuild";
+
+await build({
+  entryPoints: ["src/agent/maintenance-pi-extension.ts", "src/agent/maintenance-mcp-stdio.ts"],
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node24",
+  outdir: "dist/agent/maintenance-bundles",
+  outExtension: { ".js": ".mjs" },
+});
 
 const processes = [
   spawn(process.execPath, ["--import", "tsx", "src/server/main.ts", "--port", "7443"], { stdio: "inherit", env: { ...process.env, ORCHARD_DEV: "1" } }),

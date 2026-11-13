@@ -28,7 +28,7 @@ async function fixture(t: TestContext) {
   f.store.exec("INSERT INTO agent_workspace_projection_state VALUES('maintenance',1,1,?,?,?,'ready',NULL,?)", K, K, P, Date.now());
   f.store.exec("INSERT INTO agent_workspace_workflow_bindings VALUES(?,?,?)", draft.id, resourceId, draft.createdAt);
   const releaseTracking = installWorkspaceBusinessTracking(f.store); t.after(releaseTracking);
-  const bridge = configuredWebBridge(f.store), business = new MaintenanceAssets(f.store, bridge);
+  const bridge = configuredWebBridge(f.store), business = new MaintenanceAssets(f.store, bridge, () => f.providers);
   // Explicit unit-test policies, not real CLI certification or OS exit evidence.
   const state = { allowed: true, verified: true, stopped: false, fingerprint: F, knowledge: K, toolPolicy: "test-readonly-v1", proofs: [] as string[], revoked: [] as string[] };
   const boundary: MaintenanceSessionBoundary = {
@@ -309,4 +309,40 @@ test("large user prompts use private artifact references and malformed admission
   const task = f.sessions.enqueue("local", sessionId, input), row = f.store.one<{ input_ref: string }>("SELECT input_ref FROM agent_maintenance_tasks WHERE id=?", task.id)!;
   assert.ok(JSON.parse(row.input_ref).artifactId); assert.equal((f.sessions.claim(task.id).input as { prompt: string }).prompt, input.prompt);
   assert.ok(!JSON.stringify(f.sessions.tasks("local", sessionId)).includes("artifactId"));
+});
+
+test("owner chat restores only authorized messages and does not return private references", async t => {
+  const f = await fixture(t);
+  const session = f.make();
+  const task = f.sessions.enqueue("local", session, f.input(session, "first", "Inspect this workflow"));
+  const claim = f.sessions.claim(task.id);
+  f.sessions.recordDisplay(claim.handle, "The workflow is ready for review.");
+  f.state.stopped = true;
+  f.sessions.settle(claim.handle, "succeeded");
+  const history = f.sessions.ownerHistory("local", "workflow_draft", f.draft.id, session);
+  assert.equal(history.conversations[0]?.title, "Inspect this workflow");
+  assert.equal(history.tasks[0]?.prompt, "Inspect this workflow");
+  assert.equal(history.tasks[0]?.text, "The workflow is ready for review.");
+  assert.equal(f.sessions.ownerHistory("local", "workflow_draft", "other-draft", session).tasks.length, 0);
+  assert.equal(f.sessions.ownerHistory("other-actor", "workflow_draft", f.draft.id, session).tasks.length, 0);
+  assert.equal(f.sessions.retry("local", session, "first", "Inspect this workflow")?.id, task.id);
+  assert.throws(() => f.sessions.retry("local", session, "first", "Different request"), { code: "REQUEST_CONFLICT" });
+});
+
+
+test("switching the model admits a new turn on the same native session", async t => {
+  const f = await fixture(t);
+  const session = f.make();
+  const first = f.sessions.enqueue("local", session, f.input(session));
+  const claim = f.sessions.claim(first.id);
+  const ref = { providerId: "test-provider", version: 1, opaque: { owner: session, nativeId: "native-1" } };
+  f.sessions.attachReference(claim.handle, ref);
+  f.state.stopped = true;
+  f.sessions.settle(claim.handle, "succeeded");
+  const input = { ...f.input(session, "next"), modelId: "other-model" };
+  const next = f.sessions.enqueue("local", session, input);
+  assert.equal(f.sessions.retry("local", session, input.requestId, input.prompt, input.modelId)?.id, next.id);
+  const resumed = f.sessions.claim(next.id);
+  assert.deepEqual(resumed.reference, ref);
+  assert.equal(resumed.modelId, "other-model");
 });

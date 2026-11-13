@@ -1,3 +1,4 @@
+import { replaceRoute } from "../lib/navigation";
 import { DictionaryExecutionMetadata, RedactedPayload, type RedactionFlags } from "./DictionaryEditors";
 import { useEffect, useRef, useState } from "react";
 import { Clock3, GitBranch, RefreshCw, Square } from "lucide-react";
@@ -13,14 +14,13 @@ import { FinalResult } from "./FinalResult";
 
 interface RunDetail extends Run, RedactionFlags { version: Version | null; execution: RunExecution; agentBindings?: RunAgentBinding[]; nodes: (NodeRun & RedactionFlags)[]; lastSequence: number; attempts: { id: string; nodeRunId: string; execution: unknown; status: string }[] }
 export function RunsPage() {
-  const [filters, setFilters] = useState(() => new URLSearchParams(window.location.search));
+  const filters = new URLSearchParams(window.location.search);
   const { data, error, reload } = useResource<{ items: RunSummary[] }>(`/runs?${filters}`);
   const workflows = useResource<{ items: { id: string; name: string }[] }>("/workflows");
   const changeFilter = (key: string, value: string) => {
     const next = new URLSearchParams(filters);
     if (value) next.set(key, value); else next.delete(key);
-    window.history.replaceState({}, "", `/runs${next.size ? `?${next}` : ""}`);
-    setFilters(next);
+    replaceRoute(`/runs${next.size ? `?${next}` : ""}`);
   };
   const returnTo = `/runs${filters.size ? `?${filters}` : ""}`;
   useEffect(() => { const timer = setInterval(reload, 3000); return () => clearInterval(timer); }, []);
@@ -29,7 +29,7 @@ export function RunsPage() {
       <label>工作流<select aria-label="筛选工作流" value={filters.get("workflowId") ?? ""} onChange={event => changeFilter("workflowId", event.target.value)}><option value="">全部工作流</option>{workflows.data?.items.map(workflow => <option key={workflow.id} value={workflow.id}>{workflow.name}</option>)}</select></label>
       <label>运行类型<select aria-label="筛选运行类型" value={filters.get("type") ?? ""} onChange={event => changeFilter("type", event.target.value)}><option value="">全部类型</option><option value="formal">正式运行</option><option value="test">草稿测试</option></select></label>
       <label>状态<select aria-label="筛选运行状态" value={filters.get("status") ?? ""} onChange={event => changeFilter("status", event.target.value)}><option value="">全部状态</option>{["queued", "running", "cancel_requested", "succeeded", "failed", "cancelled", "interrupted"].map(status => <option key={status} value={status}>{statuses[status]}</option>)}</select></label>
-      {!!filters.size && <Button variant="ghost" onClick={() => { window.history.replaceState({}, "", "/runs"); setFilters(new URLSearchParams()); }}>清除筛选</Button>}
+      {!!filters.size && <Button variant="ghost" onClick={() => replaceRoute("/runs")}>清除筛选</Button>}
     </div>
     <ErrorNotice message={error || workflows.error} />{!data ? !error && <Loading /> : data.items.length ? <div className="panel run-table"><div className="run-table-header"><span>工作流 / 运行</span><span>状态</span><span>开始时间 / 创建时间</span></div>{data.items.map(run => <a href={`/runs/${run.id}?returnTo=${encodeURIComponent(returnTo)}`} className="run-table-row" key={run.id}><div><strong>{run.workflowName}</strong><small>{run.draftId ? `草稿测试 · 修订 ${run.draftRevision}` : `正式运行 · v${run.versionNumber}`} · {run.id.slice(0, 8)}</small></div><Status value={run.status} /><span>{new Date(run.startedAt ?? run.createdAt).toLocaleString("zh-CN")}</span></a>)}</div> : <EmptyState title={filters.size ? "没有符合条件的运行记录" : "还没有运行记录"} description={filters.size ? "调整筛选条件后重试。" : "可以在草稿中运行测试，或运行已发布的工作流。"} />}
     {data && <p className="page-footnote">展示符合条件的最近 200 次运行。</p>}

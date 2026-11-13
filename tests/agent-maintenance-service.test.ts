@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
-import { setup, prepareMaintenanceFixture } from "./helpers.js";
+import { setup, prepareMaintenanceFixture, exampleFiles } from "./helpers.js";
+import { workflowRepairModelContext } from "../src/agent/maintenance-production.js";
 import { MaintenanceAssets } from "../src/agent/maintenance-assets.js";
 import { MaintenanceService, type MaintenanceBoundary } from "../src/agent/maintenance-service.js";
 import { MAINTENANCE_CONTRACT, type MaintenanceTarget } from "../src/agent/maintenance-protocol.js";
@@ -17,10 +18,18 @@ import { registerMaintenanceRoutes } from "../src/agent/maintenance-routes.js";
 import { MaintenanceApplyWorker } from "../src/agent/maintenance-worker.js";
 
 const H = "a".repeat(64), K = "b".repeat(64), signal = () => new AbortController().signal;
-async function fixture(t: TestContext, kind: "workflow" | "script" | "browser" = "workflow") {
-  const { store, authoring } = setup(t); t.after(async () => { await authoring.close(); store.close(); });
+async function fixture(t: TestContext, kind: "workflow" | "script" | "browser" = "workflow", legacyWorkflow = false) {
+  const { store, authoring, providers } = setup(t); t.after(async () => { await authoring.close(); store.close(); });
   const draft = await authoring.create(undefined, "maintenance-draft");
-  const source = store.files.readTree(draft.artifactPath).files, resourceId = JSON.parse(source["workflow.json"]!).id;
+  const initial = store.files.readTree(draft.artifactPath).files, resourceId = JSON.parse(initial["workflow.json"]!).id;
+  const source = legacyWorkflow ? exampleFiles(resourceId) : initial;
+  if (legacyWorkflow) {
+    const workflow = JSON.parse(source["workflow.json"]!);
+    delete workflow.defaults;
+    Object.assign(workflow.nodes[1].config, { providerId: "test-provider", modelId: "test-model" });
+    source["workflow.json"] = JSON.stringify(workflow);
+    store.exec("UPDATE drafts SET artifact_path=? WHERE id=?", store.files.saveTree(source).path, draft.id);
+  }
   const library = new ScriptLibrary(store);
   if (kind === "script") await library.create({ id: "sample", name: "Sample", description: "", runtime: "nodejs", entryFile: "main.ts", files: { "main.ts": "export default async () => 1;" }, inputSchema: true, outputSchema: true });
   prepareMaintenanceFixture(store);
@@ -36,7 +45,7 @@ async function fixture(t: TestContext, kind: "workflow" | "script" | "browser" =
   const target: MaintenanceTarget = kind === "workflow" ? { kind: "workflow_draft", id: resourceId, scope: { draftId: draft.id } }
     : kind === "script" ? { kind: "script_draft", id: "sample", scope: { draftVersionId: store.script("sample").currentDraftVersionId } }
       : { kind: "browser_application", id: "crm", scope: {} };
-  const assets = new MaintenanceAssets(store, bridge), snapshot = assets.capture(target);
+  const assets = new MaintenanceAssets(store, bridge, () => providers), snapshot = assets.capture(target);
   const scenario = kind === "workflow" ? "workflow" : kind === "script" ? "script" : "web-bridge";
   store.exec("INSERT INTO agent_maintenance_sessions(id,actor_key,scenario,owner_kind,owner_id,owner_scope_json,mode,provider_id,model_id,contract_version,tool_policy_version,knowledge_hash,generation,revision,lifecycle,native_delete_state,created_at,updated_at) VALUES('session','local',?,?,?,?,'single','test-provider','test-model',?,'readonly',?,1,1,'active','absent',?,?)", scenario, target.kind, target.id, canonicalJson(target.scope), MAINTENANCE_CONTRACT, K, Date.now(), Date.now());
   const generation = store.one<{ target_generation: number }>("SELECT target_generation FROM agent_workspace_projection_state")!.target_generation;
@@ -54,13 +63,45 @@ async function fixture(t: TestContext, kind: "workflow" | "script" | "browser" =
       : { operation: "tools", changes: [{ operation: "create", toolId: "read", definition: { application: "crm", toolId: "read", site: "crm", description: "Read", path: "/api/read", method: "GET", parameters: { type: "object" }, fields: [], risk: "read", approval: "none", timeoutMs: 1000, catalogVersion: "1", enabled: true } }] };
   const input = { contractVersion: MAINTENANCE_CONTRACT, requestId: "submit", summary: "Exact proposed change", target, baseline: snapshot.baseline, change };
   const finish = () => store.exec("UPDATE agent_maintenance_tasks SET status='succeeded',process_state='stopped',ended_at=? WHERE id='task'", clock);
-  return { store, authoring, draft, bridge, assets, target, input, service, boundary, finish,
+  return { store, authoring, providers, draft, bridge, assets, target, input, service, boundary, finish,
     syncFail(value: boolean) { syncFails = value; }, stopped(value: boolean) { quiescent = value; }, deny(value: boolean) { deny = value; }, tick(ms: number) { clock += ms; }, get syncCalls() { return syncCalls; } };
 }
 function confirm(f: Awaited<ReturnType<typeof fixture>>, id: string) {
   const view = f.service.view("local", id);
   return f.service.decideByUser("local", id, "confirm", view.contentHash, view.diffHash, "confirm");
 }
+
+test("legacy workflow model configuration can be repaired through a reviewed proposal", async t => {
+  const f = await fixture(t, "workflow", true);
+  f.providers.modelConfigs.create({ name: "Disabled", providerId: "test-provider", modelId: "test-model", enabled: false, requestId: "disabled-config" });
+  const context = workflowRepairModelContext(f.providers, []);
+  assert.match(context.join("\n"), /agentConfigId/);
+  const metadata = context.at(-1)!;
+  const choices = JSON.parse(metadata!.slice(metadata!.indexOf("[")));
+  assert.equal(choices.length, 1);
+  assert.equal(choices[0].id, "test-agent-config");
+  assert.equal(choices[0].modelId, "test-model");
+
+  const files = { ...f.input.change.files };
+  const workflow = JSON.parse(files["workflow.json"]!);
+  const { providerId, modelId, ...config } = workflow.nodes[1].config;
+  assert.equal(providerId, choices[0].providerId);
+  assert.equal(modelId, choices[0].modelId);
+  workflow.nodes[1].config = { ...config, agentConfigId: "missing" };
+  files["workflow.json"] = JSON.stringify(workflow);
+  const input = { ...f.input, change: { operation: "replace", files } };
+  await assert.rejects(f.service.submit("local", "session", "task", input, signal()), { code: "NOT_FOUND" });
+  workflow.nodes[1].config.agentConfigId = choices[0].id;
+  files["workflow.json"] = JSON.stringify(workflow);
+  const proposal = await f.service.submit("local", "session", "task", input, signal());
+  assert.equal(f.store.draft(f.draft.id).revision, 0);
+  confirm(f, proposal.id);
+  const queued = f.service.enqueue("local", proposal.id, "apply-repair");
+  f.finish();
+  assert.equal((await f.service.process("local", queued.id, signal())).status, "applied");
+  const repaired = f.store.files.readTree(f.store.draft(f.draft.id).artifactPath).files;
+  assert.deepEqual(JSON.parse(repaired["workflow.json"]!).nodes[1].config, { ...config, agentConfigId: choices[0].id });
+});
 
 test("retention requires a current preview and preserves application replay after deleting audit rows", async t => {
   const f = await fixture(t);

@@ -32,7 +32,7 @@ export default function CodeEditor({ value, path, onChange }: { value: string; p
   return <div className="code-editor" ref={container} aria-label={`代码：${path}`} />;
 }
 
-export function CodeDiffEditor({ original, modified, path }: { original: string; modified: string; path: string }) {
+export function CodeDiffEditor({ original, modified, path, compact = false }: { original: string; modified: string; path: string; compact?: boolean }) {
   const container = useRef<HTMLDivElement>(null);
   const { resolvedTheme } = useTheme();
   useEffect(() => {
@@ -40,9 +40,13 @@ export function CodeDiffEditor({ original, modified, path }: { original: string;
     const language = path.endsWith(".json") ? "json" : path.endsWith(".sh") ? "shell" : "typescript";
     const originalModel = monaco.editor.createModel(original, language), modifiedModel = monaco.editor.createModel(modified, language);
     const editor = monaco.editor.createDiffEditor(container.current, { readOnly: true, originalEditable: false, automaticLayout: true, renderSideBySide: false, minimap: { enabled: false }, fontSize: 12, maxComputationTime: 1000, scrollBeyondLastLine: false });
+    if (compact) editor.updateOptions({
+      hideUnchangedRegions: { enabled: true, contextLineCount: 3, minimumLineCount: 4 },
+      renderIndicators: true, renderOverviewRuler: false, diffWordWrap: "on",
+    });
     editor.setModel({ original: originalModel, modified: modifiedModel });
     return () => { editor.dispose(); originalModel.dispose(); modifiedModel.dispose(); };
-  }, [original, modified, path]);
+  }, [original, modified, path, compact]);
   useEffect(() => {
     const styles = getComputedStyle(document.documentElement);
     monaco.editor.defineTheme("orchard", editorTheme(resolvedTheme, name => styles.getPropertyValue(name)));

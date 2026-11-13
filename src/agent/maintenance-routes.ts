@@ -8,6 +8,10 @@ import type { MaintenanceTaskApi } from "./maintenance-composition.js";
 const id = { type: "string", minLength: 1, maxLength: 200 };
 const hash = { type: "string", pattern: "^[a-f0-9]{64}$" };
 const body = (properties: Record<string, unknown>) => ({ type: "object", properties, required: Object.keys(properties), additionalProperties: false });
+const taskInput = {
+  type: "object", required: ["requestId", "prompt"], additionalProperties: false,
+  properties: { requestId: id, prompt: { type: "string", minLength: 1, maxLength: 100000 }, sessionId: id, providerId: id, modelId: id },
+};
 const ownerParams = body({ kind: { enum: ["workflow_draft", "script_draft", "browser_application"] }, id });
 
 /** Installed by the new runtime composition root only after migration/capability
@@ -31,13 +35,25 @@ export function registerMaintenanceRoutes(app: FastifyInstance, options: {
     assertSchema(request.params, ownerParams, "维护对象");
     return { items: options.service.listForOwner(user, kind, owner) };
   });
+  app.get<{ Params: { kind: MaintenanceTarget["kind"]; id: string }; Querystring: { sessionId?: string } }>("/api/maintenance/owners/:kind/:id/chat", async request => {
+    const user = actor(request), tasks = options.tasks?.();
+    check(tasks, "BACKEND_UNAVAILABLE", "维护任务服务不可用", 503);
+    assertSchema(request.params, ownerParams, "维护对象");
+    assertSchema(request.query, { type: "object", properties: { sessionId: id }, additionalProperties: false }, "维护会话查询");
+    return tasks.history(user, request.params.kind, request.params.id, request.query.sessionId);
+  });
+  app.post<{ Params: { id: string; taskId: string } }>("/api/maintenance/sessions/:id/tasks/:taskId/cancel", async request => {
+    const user = actor(request), tasks = options.tasks?.();
+    check(tasks, "BACKEND_UNAVAILABLE", "维护任务服务不可用", 503);
+    return tasks.cancel(user, request.params.id, request.params.taskId);
+  });
   app.post<{ Params: { kind: MaintenanceTarget["kind"]; id: string } }>("/api/maintenance/owners/:kind/:id/tasks", { bodyLimit: 270336 }, async (request, reply) => {
     const user = actor(request), tasks = options.tasks?.();
     check(tasks, "BACKEND_UNAVAILABLE", "维护任务服务不可用", 503);
     assertSchema(request.params, ownerParams, "维护对象");
-    assertSchema(request.body, body({ requestId: id, prompt: { type: "string", minLength: 1, maxLength: 100000 } }), "维护任务");
+    assertSchema(request.body, taskInput, "维护任务");
     reply.code(202);
-    return tasks.start(user, request.params.kind, request.params.id, request.body as { requestId: string; prompt: string });
+    return tasks.start(user, request.params.kind, request.params.id, request.body as { requestId: string; prompt: string; sessionId?: string; providerId?: string; modelId?: string });
   });
   app.get<{ Params: { id: string } }>("/api/maintenance/sessions/:id/tasks", async request => {
     const user = actor(request), tasks = options.tasks?.();

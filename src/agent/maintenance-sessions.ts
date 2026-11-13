@@ -22,7 +22,7 @@ interface Session {
 interface Task {
   id: string; session_id: string; mode: Mode; request_hash: string; sequence: number; generation: number;
   projection_generation: number; projection_hash: string; baseline_json: string; input_ref: string | null;
-  status: Status; process_state: string; error_code: string | null; created_at: number; started_at: number | null; ended_at: number | null;
+  display_output_ref: string | null; status: Status; process_state: string; error_code: string | null; created_at: number; started_at: number | null; ended_at: number | null;
 }
 export interface MaintenanceProcessBinding { taskId: string; sessionId: string; generation: number }
 export interface MaintenanceBackendPolicy {
@@ -63,7 +63,7 @@ const taskDto = (t: Task) => ({ id: t.id, sessionId: t.session_id, mode: t.mode,
   createdAt: t.created_at, startedAt: t.started_at, endedAt: t.ended_at });
 
 /** Eight-table storage/admission kernel. No implicit SQL installation, native
- * process spawning, history replay, latest-session discovery or default policy.
+ * process spawning, history replay or default policy.
  * Host-only methods/capabilities MUST NOT be registered as HTTP/MCP tools. */
 export class MaintenanceSessions {
   private claims = new WeakMap<MaintenanceTaskHandle, Claim>();
@@ -121,6 +121,32 @@ export class MaintenanceSessions {
     return this.store.all<Session>("SELECT * FROM agent_maintenance_sessions WHERE actor_key=? AND owner_kind=? AND owner_id=? AND owner_scope_json=? ORDER BY updated_at DESC,id LIMIT ?",
       actor, target.kind, target.id, canonicalJson(target.scope), limit).map(session => this.dto(session));
   }
+  ownerHistory(actor: string, kind: MaintenanceTarget["kind"], owner: string, selected?: string) {
+    id(actor); id(owner);
+    const ownerColumn = kind === "workflow_draft" ? "json_extract(owner_scope_json,'$.draftId')" : "owner_id";
+    const rows = this.store.all<Session>(`SELECT * FROM agent_maintenance_sessions WHERE actor_key=? AND owner_kind=?
+      AND ${ownerColumn}=? ORDER BY (id=?) DESC,updated_at DESC,id LIMIT 100`, actor, kind, owner, selected ?? "");
+    const safeText = (ref: string | null, key: string) => {
+      if (!ref) return "";
+      let text: unknown;
+      try { text = (this.store.dereference(ref) as Record<string, unknown> | null)?.[key]; }
+      catch { return "历史内容不可用"; }
+      if (typeof text !== "string") return "";
+      try { assertQuerySafe(text, secrets); return text; }
+      catch { return "内容因包含敏感信息而隐藏"; }
+    };
+    const secrets = [...this.boundary.knownSecrets(), this.store.root, homedir()];
+    const conversations = rows.map(session => {
+      this.authorize(actor, targetOf(session), "read");
+      const first = this.store.one<Task>("SELECT input_ref FROM agent_maintenance_tasks WHERE session_id=? ORDER BY sequence LIMIT 1", session.id);
+      return { ...this.dto(session), title: safeText(first?.input_ref ?? null, "prompt").split("\n")[0]!.slice(0, 100) || "维护对话" };
+    });
+    const session = rows.find(row => row.id === selected);
+    const tasks = session ? this.store.all<Task>("SELECT * FROM agent_maintenance_tasks WHERE session_id=? ORDER BY sequence DESC LIMIT 100", session.id)
+      .reverse().map(task => ({ ...taskDto(task), prompt: safeText(task.input_ref, "prompt"), text: safeText(task.display_output_ref, "text"),
+        proposals: this.store.all<{ id: string }>("SELECT id FROM agent_maintenance_proposals WHERE task_id=? AND actor_key=? ORDER BY created_at,id", task.id, actor) })) : [];
+    return { conversations, tasks };
+  }
   tasks(actor: string, sessionId: string, before = Number.MAX_SAFE_INTEGER, limit = 50) {
     const session = this.session(actor, sessionId); this.authorize(actor, targetOf(session), "read");
     check(Number.isSafeInteger(before) && before > 0 && Number.isSafeInteger(limit) && limit >= 1 && limit <= 100, "INVALID_REQUEST", "任务分页无效");
@@ -143,8 +169,18 @@ export class MaintenanceSessions {
       return { sessionId };
     }).sessionId;
   }
-  enqueue(actor: string, sessionId: string, input: { requestId: string; prompt: string; expectedRevision: number; expectedGeneration: number }) {
-    onlyKeys(input, ["requestId", "prompt", "expectedRevision", "expectedGeneration"]); id(input.requestId);
+  retry(actor: string, sessionId: string, requestId: string, prompt: string, modelId?: string) {
+    const session = this.session(actor, sessionId);
+    this.authorize(actor, targetOf(session), "maintain");
+    const task = this.store.one<Task>("SELECT * FROM agent_maintenance_tasks WHERE session_id=? AND request_id=?", sessionId, requestId);
+    if (!task) return undefined;
+    const saved = this.store.dereference(task.input_ref) as { prompt?: string; modelId?: string } | null;
+    check(saved?.prompt === prompt && (!modelId || (saved.modelId ?? session.model_id) === modelId), "REQUEST_CONFLICT", "请求标识已用于不同消息", 409);
+    return taskDto(task);
+  }
+  enqueue(actor: string, sessionId: string, input: { requestId: string; prompt: string; expectedRevision: number; expectedGeneration: number; modelId?: string }) {
+    onlyKeys(input, ["requestId", "prompt", "expectedRevision", "expectedGeneration", "modelId"], ["requestId", "prompt", "expectedRevision", "expectedGeneration"]); id(input.requestId);
+    if (input.modelId !== undefined) id(input.modelId);
     check(typeof input.prompt === "string" && input.prompt.trim().length > 0 && input.prompt.length <= 100000 && Buffer.byteLength(input.prompt) <= 256 * 1024,
       "INVALID_REQUEST", "维护消息为空或超过预算");
     check(Number.isSafeInteger(input.expectedRevision) && input.expectedRevision > 0 && Number.isSafeInteger(input.expectedGeneration) && input.expectedGeneration > 0,
@@ -158,12 +194,23 @@ export class MaintenanceSessions {
       check(!this.store.one("SELECT id FROM agent_maintenance_tasks WHERE status IN ('queued','running','stopping') LIMIT 1"), "WORKSPACE_BUSY", "已有共享维护任务", 409);
       check(!this.store.one("SELECT id FROM agent_maintenance_apply_requests WHERE state='queued' LIMIT 1"), "MAINTENANCE_APPLY_PENDING", "须先处理已确认应用请求", 409);
       if (current.mode === "single") check(!this.store.one("SELECT id FROM agent_maintenance_tasks WHERE session_id=?", sessionId), "SINGLE_TASK_SETTLED", "单轮会话不能继续或重放，请新建会话", 409);
+      const modelId = input.modelId ?? current.model_id;
+      const changedModel = modelId !== current.model_id;
+      if (changedModel) {
+        check(current.mode === "multi", "SESSION_MODEL_CONFLICT", "单轮会话不能切换模型", 409);
+        const policy = this.policy({ ...current, model_id: modelId });
+        check(policy.knowledgeHash === current.knowledge_hash && policy.toolPolicyVersion === current.tool_policy_version,
+          "SESSION_CONTRACT_CHANGED", "规则或工具策略已变化，请新建维护会话", 409);
+        if (current.native_ref_json) validateSessionReference(JSON.parse(current.native_ref_json), policy.references);
+        this.store.exec("UPDATE agent_maintenance_sessions SET model_id=?,provider_fingerprint=?,revision=revision+1 WHERE id=?",
+          modelId, current.provider_fingerprint ? policy.fingerprint : null, sessionId);
+      }
       const p = this.ready(current), snapshot = this.business.capture(targetOf(current));
       const sequence = Number(this.store.one<{ n: number }>("SELECT coalesce(max(sequence),0)+1 n FROM agent_maintenance_tasks WHERE session_id=?", sessionId)!.n);
       check(Number.isSafeInteger(sequence) && sequence > 0, "TASK_SEQUENCE_EXHAUSTED", "维护任务序号已耗尽", 409);
       const taskId = randomUUID(), now = this.now();
       this.store.exec(`INSERT INTO agent_maintenance_tasks(id,session_id,mode,request_id,request_hash,sequence,generation,projection_generation,projection_hash,baseline_json,status,process_state,input_ref,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,'queued','absent',?,?)`, taskId, sessionId, current.mode, input.requestId, requestHash, sequence, current.generation, p.synced_generation, p.content_hash, canonicalJson(snapshot.baseline), this.store.reference({ prompt: input.prompt }), now);
+        VALUES(?,?,?,?,?,?,?,?,?,?,'queued','absent',?,?)`, taskId, sessionId, current.mode, input.requestId, requestHash, sequence, current.generation, p.synced_generation, p.content_hash, canonicalJson(snapshot.baseline), this.store.reference({ prompt: input.prompt, ...(input.modelId ? { modelId } : {}) }), now);
       this.store.exec("UPDATE agent_maintenance_sessions SET updated_at=? WHERE id=?", now, sessionId);
       return taskDto(this.task(taskId));
     }));
@@ -195,7 +242,8 @@ export class MaintenanceSessions {
       check(!reference || reference.version === session.native_ref_version, "BACKEND_REFERENCE_VERSION_UNSUPPORTED", "持久化原生引用版本不一致", 409);
       check(session.mode !== "single" || !reference, "SINGLE_REFERENCE_FORBIDDEN", "单轮任务不能恢复原生历史", 409);
       const input = this.store.dereference(task.input_ref);
-      onlyKeys(input, ["prompt"]);
+      onlyKeys(input, ["prompt", "modelId"], ["prompt"]);
+      check(input.modelId === undefined || input.modelId === session.model_id, "SESSION_MODEL_CONFLICT", "任务模型与会话不一致", 409);
       check(typeof input.prompt === "string" && input.prompt.trim().length > 0 && input.prompt.length <= 100000 && Buffer.byteLength(input.prompt) <= 256 * 1024,
         "INVALID_TASK_INPUT", "维护任务输入缺失、损坏或超过预算", 409);
       this.store.exec("UPDATE agent_maintenance_tasks SET status='running',process_state='starting',started_at=? WHERE id=?", this.now(), taskId);

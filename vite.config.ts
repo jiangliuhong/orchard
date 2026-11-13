@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": fileURLToPath(new URL("./src/web", import.meta.url)) } },
+  // CodeEditor is lazy loaded, so dependency discovery otherwise happens on the first edit.
+  optimizeDeps: { include: [
+    "monaco-editor/editor/editor.api.js",
+    "monaco-editor/languages/definitions/typescript/register.js",
+    "monaco-editor/languages/definitions/shell/register.js",
+  ] },
   build: { outDir: "dist/web", emptyOutDir: false },
   server: {
     host: "127.0.0.1", port: 7441,

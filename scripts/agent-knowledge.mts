@@ -1,17 +1,13 @@
 import { mkdirSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createKnowledgeManifest, loadKnowledgeBundle } from "../src/agent/knowledge-bundle.js";
+import { generateSourceKnowledgeBundle, loadKnowledgeBundle } from "../src/agent/knowledge-bundle.js";
 
 const source = resolve(fileURLToPath(new URL("../src/agent/knowledge/", import.meta.url)));
 const target = resolve(fileURLToPath(new URL("../dist/agent/knowledge/", import.meta.url)));
 const args = process.argv.slice(2), mode = args[0];
-if (mode === "--update" && args.length === 3 && args[1] === "--bundle-version") {
-  const manifest = createKnowledgeManifest(source, args[2]!);
-  writeFileSync(join(source, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
-  console.log(`Updated built-in knowledge manifest: ${manifest.bundleVersion}`);
-} else if ((mode === "--check" || mode === "--copy") && args.length === 1) {
-  const bundle = loadKnowledgeBundle(source);
+if ((mode === "--check" || mode === "--copy") && args.length === 1) {
+  const bundle = generateSourceKnowledgeBundle(source);
   if (mode === "--copy") {
     if (existsSync(target)) throw new Error("Knowledge build target already exists; run the normal clean build");
     // Only the package dist target, never the runtime data directory. Write validated immutable text,
@@ -26,6 +22,6 @@ if (mode === "--update" && args.length === 3 && args[1] === "--bundle-version") 
   }
   console.log(`Verified built-in knowledge: ${bundle.hash}`);
 } else {
-  console.error("Usage: node --import tsx scripts/agent-knowledge.mts --check|--copy|--update --bundle-version <version>");
+  console.error("Usage: node --import tsx scripts/agent-knowledge.mts --check|--copy");
   process.exitCode = 1;
 }

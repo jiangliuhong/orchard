@@ -34,14 +34,18 @@ interface LaunchOptions {
   model?: string;
 }
 
-function nativeArgs(session: NativeSession | undefined): string[] {
+function nativeArgs(session: NativeSession | undefined, workspace: string): string[] {
   if (!session) return ["--no-session"];
   check(isAbsolute(session.directory) && realpathSync(session.directory) === session.directory &&
     lstatSync(session.directory).isDirectory() && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(session.id),
   "BACKEND_REFERENCE_INVALID", "Pi 原生会话目录或标识无效", 409);
   if (!session.resumeFile) return ["--session-dir", session.directory, "--session-id", session.id];
-  const file = session.resumeFile;
-  check(isAbsolute(file) && dirname(file) === session.directory && realpathSync(file) === file && file.endsWith(".jsonl"),
+  assertNativeMaintenanceSession(session.resumeFile, session.directory, session.id, workspace);
+  return ["--session", session.resumeFile];
+}
+
+export function assertNativeMaintenanceSession(file: string, directory: string, id: string, workspace: string) {
+  check(isAbsolute(file) && dirname(file) === directory && realpathSync(file) === file && file.endsWith(".jsonl"),
     "BACKEND_REFERENCE_INVALID", "Pi 原生会话文件不在受管目录内", 409);
   const stat = lstatSync(file);
   check(stat.isFile() && stat.nlink === 1 && stat.size <= 64 * 1024 * 1024,
@@ -59,9 +63,8 @@ function nativeArgs(session: NativeSession | undefined): string[] {
       try { header = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(head.subarray(0, newline))); } catch { /* Reject below. */ }
     }
   } finally { closeSync(fd); }
-  check(header && typeof header === "object" && "type" in header && header.type === "session" && "id" in header && header.id === session.id,
+  check(header && typeof header === "object" && "type" in header && header.type === "session" && "id" in header && header.id === id && "cwd" in header && header.cwd === workspace,
     "BACKEND_REFERENCE_INVALID", "Pi 原生会话文件标识与保存引用不一致", 409);
-  return ["--session", file];
 }
 
 export function launchMaintenancePiSingle(options: LaunchOptions) {
@@ -80,7 +83,7 @@ export async function launchMaintenancePi(options: LaunchOptions, session?: Nati
       "MAINTENANCE_PACKAGE_INVALID", "维护运行目录无效", 503);
     check(options.model === undefined || /^[a-zA-Z0-9][a-zA-Z0-9_./:-]{0,199}$/.test(options.model),
       "BACKEND_UNAVAILABLE", "维护模型标识无效", 503);
-    const sessionArgs = nativeArgs(session);
+    const sessionArgs = nativeArgs(session, options.workspace);
     const env = { HOME: options.privateHome, PI_CODING_AGENT_DIR: options.agentDir, ...(options.model ? {} : { PI_OFFLINE: "1" }) };
     const helper = registry.launch(lease, { entry: helperEntry, cwd: options.privateHome, env, privatePipes: 1 });
     const pi = registry.launch(lease, {

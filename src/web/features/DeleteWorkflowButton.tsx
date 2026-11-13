@@ -1,3 +1,4 @@
+import { navigate } from "../lib/navigation";
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
 import { send } from "../lib/api";
@@ -15,7 +16,7 @@ export function DeleteWorkflowButton({ id, name, kind = "workflow", compact = fa
     try {
       await send(`/${kind === "draft" ? "drafts" : "workflows"}/${id}`, undefined, "DELETE");
       setOpen(false);
-      if (onDeleted) onDeleted(); else window.location.assign("/");
+      if (onDeleted) onDeleted(); else navigate("/", { skipGuard: true });
     } catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   };

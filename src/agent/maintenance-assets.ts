@@ -7,6 +7,7 @@ import { validateScript } from "../domain/scripts.js";
 import { validateWorkflowDictionaries, validateScriptDictionaries } from "../dictionaries/validation.js";
 import { canonicalJson, checkFiles, readDefinition, safeFile, validateFiles } from "../persistence/files.js";
 import type { Store } from "../persistence/store.js";
+import type { ProviderRegistry } from "../providers/registry.js";
 import { checkScriptSource } from "../runtime/script.js";
 import type { WebBridgeConfig } from "../web-bridge/config.js";
 import { prepareBridgeProposal } from "../web-bridge/authoring.js";
@@ -31,7 +32,7 @@ const withoutLayout = (files: Readonly<SourceFiles>) => Object.fromEntries(Objec
 /** Existing resource validators and immutable artifact storage, not a second
  * authoring implementation. No candidate source is ever executed. */
 export class MaintenanceAssets implements MaintenanceBusinessHost {
-  constructor(private readonly store: Store, private readonly bridge: WebBridgeConfig) {}
+  constructor(private readonly store: Store, private readonly bridge: WebBridgeConfig, private readonly providers: () => ProviderRegistry) {}
   refresh() { if (this.bridge.databaseRevision !== undefined) this.bridge.reloadAfterRestore(); }
   capture(target: MaintenanceTarget): MaintenanceSnapshot {
     assertTarget(target);
@@ -63,6 +64,7 @@ export class MaintenanceAssets implements MaintenanceBusinessHost {
       for (const path of Object.keys(files)) { safeFile(path); check(path !== "layout.json", "INVALID_PROPOSAL", "Agent 不能修改页面布局"); }
       const definition = readDefinition(files); check(definition.id === target.id, "IDENTITY_CONFLICT", "不能修改工作流身份", 409);
       const validation = await validateFiles(files); check(validation.valid, "INVALID_PROPOSAL", "候选工作流或源码校验失败");
+      this.providers().modelConfigs.resolveWorkflow(definition);
       this.store.assertWorkflowScriptContracts(definition); validateWorkflowDictionaries(this.store, definition);
       this.checkBrowserDependencies(files);
       // Preserve layout from the exact baseline; the service checks that baseline

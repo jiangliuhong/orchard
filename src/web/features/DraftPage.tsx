@@ -1,3 +1,6 @@
+import { UnsavedChanges } from "../components/UnsavedChanges";
+import { navigate } from "../lib/navigation";
+import { ToastNotice, WorkspaceError, WorkspaceMessage } from "../components/ToastNotice";
 import { DictionaryDeclarationEditor, DictionaryInputEditor } from "./DictionaryEditors";
 import { useEffect, useState } from "react";
 import { Check, GitBranch, Maximize2, RefreshCw, Save } from "lucide-react";
@@ -18,23 +21,23 @@ import { renderableWorkflow } from "./graph";
 import { DeleteWorkflowButton } from "./DeleteWorkflowButton";
 import { WorkflowOutputEditor } from "./WorkflowOutputEditor";
 import { AgentModelConfigPicker } from "./AgentModelConfigPicker";
-import { AgentChat } from "../agent-chat/AgentChat";
-import { MaintenanceOwnerPanel } from "../agent-chat/MaintenanceOwnerPanel";
-import { workflowChatConfig, type WorkflowChatDraft } from "../agent-chat/adapters/workflow";
+import { MaintenanceChat } from "../agent-chat/MaintenanceChat";
+import type { Draft } from "../../domain/types.js";
 
 export function DraftPage({ id }: { id: string }) {
-  const resource = useResource<WorkflowChatDraft>(`/drafts/${id}`);
+  const resource = useResource<Draft & { files: SourceFiles }>(`/drafts/${id}`);
   const modelConfigs = useResource<{ items: AgentModelConfigView[] }>("/agent-model-configs");
   const [files, setFiles] = useState<SourceFiles>({}), [dirty, setDirty] = useState(false), [selected, setSelected] = useState(""), [filePath, setFilePath] = useState("workflow.json");
   const [busy, setBusy] = useState(""), [error, setError] = useState(""), [mobileTab, setMobileTab] = useState("chat");
   const [detailTab, setDetailTab] = useState("config"), [previewKey, setPreviewKey] = useState(0);
+  const [notice, setNotice] = useState("");
   const [sourceOpen, setSourceOpen] = useState(false);
-  const draft = resource.data, activeTurn = draft?.turns.find(t => ["queued", "running", "cancel_requested"].includes(t.status));
+  const draft = resource.data;
   useEffect(() => { if (draft) { setFiles(draft.files); setDirty(false); setPreviewKey(key => key + 1); } }, [draft?.revision, draft?.status, draft?.id]);
   let graph: Workflow | undefined, layout: Layout = {};
   try { const candidate: unknown = JSON.parse(files["workflow.json"] ?? "null"); if (renderableWorkflow(candidate)) graph = candidate; layout = JSON.parse(files["layout.json"] ?? "{}"); } catch { /* The editor can temporarily contain invalid JSON. */ }
   const node = selected && selected !== "__end" ? graph?.nodes?.find(n => n.id === selected) : undefined;
-  const locked = !!activeTurn || draft?.status !== "draft";
+  const locked = draft?.status !== "draft";
   const editGraph = (change: (workflow: Workflow) => void) => {
     if (!graph) return; const next = structuredClone(graph); change(next);
     setFiles(current => ({ ...current, "workflow.json": JSON.stringify(next, null, 2) })); setDirty(true);
@@ -53,25 +56,24 @@ export function DraftPage({ id }: { id: string }) {
     if (tab === "config") setSelected("");
     if (tab === "output") setSelected("__end");
   };
-  const act = async (name: string, action: () => Promise<void>) => { setBusy(name); setError(""); try { await action(); } catch (e) { setError((e as Error).message); } finally { setBusy(""); resource.reload(); } };
-  const save = () => act("save", async () => { await api(`/drafts/${id}`, { method: "PATCH", body: JSON.stringify({ expectedRevision: draft!.revision, files }) }); resource.reload(); });
+  const act = async (name: string, action: () => Promise<void>) => { setBusy(name); setError(""); setNotice(""); try { await action(); } catch (e) { setError((e as Error).message); } finally { setBusy(""); resource.reload(); } };
+  const save = () => act("save", async () => { await api(`/drafts/${id}`, { method: "PATCH", body: JSON.stringify({ expectedRevision: draft!.revision, files }) }); setNotice("工作流修改已保存"); });
   const publish = () => act("publish", async () => {
     const version = await send<Version>(`/drafts/${id}/publish`, { expectedRevision: draft!.revision, requestId: requestId() });
-    window.location.assign(`/workflows/${version.workflowId}`);
+    navigate(`/workflows/${version.workflowId}`);
   });
   if (!draft) return <><PageHeading parents={[{ label: "工作流定义", href: "/" }]} title="工作流草稿" /><ErrorNotice message={resource.error} /><Loading /></>;
-  return <div className="draft-page"><div className="workspace-heading"><div className="workspace-heading-name"><Breadcrumbs items={[{ label: "工作流定义", href: "/" }, { label: graph?.name ?? "工作流草稿" }, { label: "草稿" }]} /><Status value={draft.status} /></div><div className="actions"><span className="revision">修订 {draft.revision}{dirty ? " · 未保存" : ""}</span><Button variant="outline" disabled={locked || !dirty || !!busy} onClick={() => void save()}><Save size={14} />保存修改</Button><RunButton draftId={id} revision={draft.revision} disabled={locked || dirty || !draft.validation.valid || !!busy} onRunningChange={running => setBusy(running ? "test" : "")} /><Button disabled={locked || dirty || !draft.validation.valid || !!busy} onClick={() => void publish()}><Check size={15} />{draft.workflowId ? "发布新版本" : "发布工作流"}</Button><DeleteWorkflowButton id={id} name={graph?.name ?? "未命名工作流"} kind="draft" compact disabled={locked || !!busy} /></div></div>
-    <ErrorNotice message={error || resource.error || modelConfigs.error} />
-    {dirty && <div className="notice">先保存修改，再运行测试或发布。</div>}
-    {!draft.validation.valid && <div className="notice warning"><span>流程尚未通过校验，可以继续对话修复。</span>{draft.validation.diagnostics.map((d, i) => <pre key={i}>{d}</pre>)}</div>}
-    {draft.validation.valid && !!draft.validation.diagnostics.length && <div className="notice"><div>{draft.validation.diagnostics.map((diagnostic, index) => <p key={index}>{diagnostic}</p>)}</div></div>}
-    {draft.workflowId && !draft.publishedVersionId && <div className="notice">正在编辑已有工作流，发布后将新增版本，历史版本保留。</div>}
-    {draft.publishedVersionId && <div className="notice success">此草稿已发布。<a href={`/workflows/${graph?.id}`}>查看工作流 →</a></div>}
+  return <div className="draft-page"><UnsavedChanges dirty={dirty} /><div className="workspace-heading"><div className="workspace-heading-name"><Breadcrumbs items={[{ label: "工作流定义", href: "/" }, { label: graph?.name ?? "工作流草稿" }, { label: "草稿" }]} /><Status value={draft.status} /></div><div className="actions"><span className="revision">修订 {draft.revision}</span>{dirty && <span className="field-hint" role="status">未保存</span>}{draft.publishedVersionId && graph?.id && <Button variant="ghost" size="sm" asChild><a href={`/workflows/${graph.id}`}>查看工作流</a></Button>}<Button variant="outline" disabled={locked || !dirty || !!busy} onClick={() => void save()}><Save size={14} />保存修改</Button><RunButton draftId={id} revision={draft.revision} disabled={locked || dirty || !draft.validation.valid || !!busy} onRunningChange={running => setBusy(running ? "test" : "")} /><Button disabled={locked || dirty || !draft.validation.valid || !!busy} onClick={() => void publish()}><Check size={15} />{draft.workflowId ? "发布新版本" : "发布工作流"}</Button><DeleteWorkflowButton id={id} name={graph?.name ?? "未命名工作流"} kind="draft" compact disabled={locked || !!busy} /></div></div>
+    <ToastNotice message={notice} onDismiss={() => setNotice("")} />
+    <WorkspaceError message={error || resource.error || modelConfigs.error} />
+    {!draft.validation.valid && <WorkspaceMessage tone="warning"
+      message={draft.validation.diagnostics.length ? `流程校验未通过 · ${draft.validation.diagnostics.length} 条` : "流程校验未通过"}
+      description="可以继续对话修复。" details={draft.validation.diagnostics} />}
+    {draft.validation.valid && !!draft.validation.diagnostics.length && <WorkspaceMessage tone="warning"
+      message={`流程校验提醒 · ${draft.validation.diagnostics.length} 条`} details={draft.validation.diagnostics} />}
     <div className="mobile-workspace-tabs" role="group" aria-label="工作区视图"><Button aria-pressed={mobileTab === "chat"} variant={mobileTab === "chat" ? "secondary" : "ghost"} onClick={() => setMobileTab("chat")}>对话</Button><Button aria-pressed={mobileTab === "flow"} variant={mobileTab === "flow" ? "secondary" : "ghost"} onClick={() => setMobileTab("flow")}>流程</Button><Button aria-pressed={mobileTab === "details"} variant={mobileTab === "details" ? "secondary" : "ghost"} onClick={() => setMobileTab("details")}>节点</Button></div>
     <div className="studio-grid" data-mobile-tab={mobileTab}>
-      <MaintenanceOwnerPanel key={id} kind="workflow_draft" ownerId={id} disabled={dirty || !!busy} onApplied={resource.reload}>
-        <AgentChat config={workflowChatConfig} resourceKey={id} context={{ draft, dirty, busy: !!busy, setBusy: value => setBusy(value ? "chat" : ""), reload: resource.reload, onOpenFile: path => { setFilePath(path); setSourceOpen(true); } }} />
-      </MaintenanceOwnerPanel>
+      <MaintenanceChat kind="workflow_draft" ownerId={id} disabled={locked || dirty || !!busy} onApplied={resource.reload} />
       <section className="canvas-panel"><div className="panel-bar"><span><GitBranch size={15} />流程预览</span><span className="panel-bar-actions"><span>{graph?.nodes?.length ?? 0} 个节点</span><Button variant="ghost" size="icon" aria-label="重新渲染流程预览" title="重新渲染流程预览" disabled={!!busy || !!dirty} onClick={() => { resource.reload(); setPreviewKey(key => key + 1); }}><RefreshCw size={15} /></Button></span></div>{graph?.nodes && Array.isArray(graph.edges) ? <FlowCanvas key={previewKey} workflow={graph} layout={layout} onSelect={selectNode} /> : <div className="empty">流程定义暂时无法展示，请修复 JSON。</div>}</section>
       <aside className="node-panel"><div className="panel-bar node-config-header"><NodePicker nodes={graph?.nodes ?? []} value={selected || "__global"} onChange={value => value === "__global" ? setSelected("") : selectNode(value)} includeGlobal includeOutput /><span>{selected === "__end" ? "全局输出" : node?.type ?? "全局配置"}</span><SourcePreviewDialog files={files} path={filePath} onPath={setFilePath} onChange={locked ? undefined : (value, path) => { setFiles(current => ({ ...current, [path]: value })); setDirty(true); }} open={sourceOpen} onOpenChange={setSourceOpen} trigger={<Button variant="ghost" size="icon" disabled={!Object.keys(files).length} aria-label="全屏预览源码" title="全屏预览源码"><Maximize2 size={15} /></Button>} /></div><Tabs value={detailTab} onValueChange={selectDetailTab}><TabsList><TabsTrigger value="config">全局配置</TabsTrigger><TabsTrigger value="node">节点配置</TabsTrigger><TabsTrigger value="output">最终输出</TabsTrigger></TabsList><TabsContent value="config"><div className="detail-stack">
         <div className="field"><label htmlFor="workflow-name">工作流名称</label><Input id="workflow-name" value={graph?.name ?? ""} disabled={locked} onChange={e => editGraph(g => { g.name = e.target.value; })} /></div>

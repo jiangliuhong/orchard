@@ -6,7 +6,7 @@ import type { TestContext } from "node:test";
 import { DirectoryLease } from "../src/migrations/lock.js";
 import { AGENT_RUNTIME_SCHEMA } from "../src/agent/schema.js";
 import { AgentStore } from "../src/agent/store.js";
-import { createKnowledgeManifest, installedKnowledgeDirectory } from "../src/agent/knowledge-bundle.js";
+import { createKnowledgeManifest, installedKnowledgeDirectory, loadKnowledgeBundle } from "../src/agent/knowledge-bundle.js";
 import { KnowledgeService } from "../src/agent/knowledge-service.js";
 import { AgentKnowledgeInstallationHost } from "../src/agent/knowledge-store.js";
 
@@ -31,6 +31,7 @@ export function knowledgeFixture(t: TestContext) {
   const dataRoot = join(root, "data"), sourceRoot = join(root, "package-knowledge");
   mkdirSync(dataRoot, { mode: 0o700 });
   cpSync(resolve(installedKnowledgeDirectory()), sourceRoot, { recursive: true });
+  writeFileSync(join(sourceRoot, "manifest.json"), loadKnowledgeBundle().manifestText);
   lease = DirectoryLease.acquire(dataRoot);
   db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON; CREATE TABLE provider_settings(id TEXT NOT NULL PRIMARY KEY); INSERT INTO provider_settings VALUES('third-provider'); CREATE TABLE command_receipts(scope TEXT NOT NULL,request_id TEXT NOT NULL,request_hash TEXT NOT NULL,result_json TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(scope,request_id));");

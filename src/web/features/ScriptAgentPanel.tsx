@@ -1,11 +1,7 @@
-import { AgentChat } from "../agent-chat/AgentChat";
-import { MaintenanceOwnerPanel } from "../agent-chat/MaintenanceOwnerPanel";
-import { scriptChatConfig, type ScriptChatContext } from "../agent-chat/adapters/script";
+import { MaintenanceChat } from "../agent-chat/MaintenanceChat";
+import type { ScriptDetail } from "./ScriptPages";
 
-export { ScriptAgentPreview } from "./ScriptAgentPreview";
-
-export function ScriptAgentPanel(context: ScriptChatContext) {
-  return <MaintenanceOwnerPanel key={context.script.id} kind="script_draft" ownerId={context.script.id} disabled={context.dirty} onApplied={context.onApplied}>
-    <AgentChat config={scriptChatConfig} context={context} resourceKey={`${context.script.id}:${context.script.currentDraftVersionId}`} className="script-agent-panel" />
-  </MaintenanceOwnerPanel>;
+export function ScriptAgentPanel({ script, dirty, onApplied }: { script: ScriptDetail; dirty: boolean; onApplied: () => void }) {
+  return <MaintenanceChat kind="script_draft" ownerId={script.id} className="script-agent-panel"
+    disabled={dirty || script.status === "archived" || !script.currentDraftVersionId} onApplied={onApplied} />;
 }

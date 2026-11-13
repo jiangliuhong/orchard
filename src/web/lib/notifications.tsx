@@ -1,3 +1,4 @@
+import { navigate } from "./navigation";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 export const notificationStorageKey = "orchard-browser-notifications";
@@ -69,7 +70,7 @@ export function BrowserNotifications() {
           if (seen.includes(item.key)) return;
           const notification = new Notification(item.title, { body: item.body, tag: item.key });
           try { localStorage.setItem(key, JSON.stringify([...seen.slice(-99), item.key])); } catch {}
-          notification.onclick = () => { window.focus(); window.location.assign(item.url); notification.close(); };
+          notification.onclick = () => { window.focus(); navigate(item.url); notification.close(); };
         };
         if (navigator.locks) void navigator.locks.request("orchard-notification", show).catch(() => {});
         else show();

@@ -5,9 +5,12 @@ import { requireWorkspaceBusinessTracking } from "./workspace-business-hooks.js"
 import type { FastifyRequest } from "fastify";
 import type { MaintenanceSessions } from "./maintenance-sessions.js";
 import type { MaintenanceTarget } from "./maintenance-protocol.js";
+import type { ProviderRegistry } from "../providers/registry.js";
 
 export interface MaintenanceTaskApi {
-  start(actor: string, kind: MaintenanceTarget["kind"], owner: string, input: { requestId: string; prompt: string }): ReturnType<MaintenanceSessions["enqueue"]>;
+  start(actor: string, kind: MaintenanceTarget["kind"], owner: string, input: { requestId: string; prompt: string; sessionId?: string; providerId?: string; modelId?: string }): ReturnType<MaintenanceSessions["enqueue"]>;
+  history(actor: string, kind: MaintenanceTarget["kind"], owner: string, sessionId?: string): ReturnType<MaintenanceSessions["ownerHistory"]>;
+  cancel(actor: string, sessionId: string, taskId: string): ReturnType<MaintenanceSessions["cancel"]>;
   list(actor: string, sessionId: string): ReturnType<MaintenanceSessions["tasks"]>;
 }
 
@@ -21,11 +24,11 @@ export interface MaintenanceRuntimeAuthority {
   tasks?: MaintenanceTaskApi;
   close?(): void | Promise<void>;
 }
-export type MaintenanceRuntimeFactory = (store: Store) => MaintenanceRuntimeAuthority;
+export type MaintenanceRuntimeFactory = (store: Store, providers: () => ProviderRegistry) => MaintenanceRuntimeAuthority;
 
-export function createMaintenanceAuthority(store: Store, factory: MaintenanceRuntimeFactory) {
+export function createMaintenanceAuthority(store: Store, factory: MaintenanceRuntimeFactory, providers: () => ProviderRegistry) {
   requireWorkspaceBusinessTracking(store);
-  const authority = factory(store);
+  const authority = factory(store, providers);
   const asynchronous = authority && typeof (authority as unknown as { then?: unknown }).then === "function";
   if (asynchronous) void Promise.resolve(authority).catch(() => {});
   let closing: Promise<void> | undefined;

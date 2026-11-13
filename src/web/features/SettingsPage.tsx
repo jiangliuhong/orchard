@@ -17,7 +17,6 @@ import { ConfigGitSettings } from "./ConfigGitSettings";
 import { SecretKeySettings } from "./SecretKeySettings";
 import { GitProjectSettings } from "./GitProjectSettings";
 import { StorageSettings } from "./StorageSettings";
-import { AgentPromptPreview } from "./AgentPromptPreview";
 import { AgentKnowledgeSettings } from "./AgentKnowledgeSettings";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
@@ -103,6 +102,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
         ? <div className="field provider-path"><label htmlFor={`${provider.id}-path`}>CLI 可执行文件</label><Input id={`${provider.id}-path`} value={executable} onChange={event => setExecutable(event.target.value)} /></div>
         : <div className="field provider-path"><label htmlFor={`${provider.id}-config`}>连接配置 JSON</label><Textarea id={`${provider.id}-config`} value={configText} onChange={event => setConfigText(event.target.value)} rows={5} /></div>}
       {provider.id === "codex-cli" && <p className="field-hint">沿用本机 Codex 用户配置，支持 Magpie 等自定义网关和模型目录。刷新模型后使用模型 ID；显示名称不会作为调用 ID。</p>}
+      {provider.id === "pi-cli" && <p className="field-hint">工作流、脚本库和浏览器工具的新维护对话预选 Pi 的默认模型，可在对话中切换。</p>}
       <p className="field-hint">点击名称旁的模型数量管理模型，在列表行选择已启用的默认模型。</p>
       <div className="provider-config-footer">
         <div className="provider-capabilities"><span>{provider.capabilities.structuredOutput === "native" ? "原生结构化输出" : "宿主校验输出"}</span><span>{provider.capabilities.textStream ? "文本事件流" : "最终消息"}</span><span>原生协议</span></div>
@@ -120,13 +120,13 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  type Section = "general" | "providers" | "agent-models" | "agent-knowledge" | "agent-prompts" | "config-git" | "dictionary-keys" | "git-projects" | "storage";
+  type Section = "general" | "providers" | "agent-models" | "agent-knowledge" | "config-git" | "dictionary-keys" | "git-projects" | "storage";
   const [section, setSection] = useState<Section>(() => {
     const requested = new URLSearchParams(window.location.search).get("section");
-    return requested && ["general", "providers", "agent-models", "agent-knowledge", "agent-prompts", "config-git", "dictionary-keys", "git-projects", "storage"].includes(requested) ? requested as Section : "general";
+    return requested && ["general", "providers", "agent-models", "agent-knowledge", "config-git", "dictionary-keys", "git-projects", "storage"].includes(requested) ? requested as Section : "general";
   });
   return <>
-    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "agent-knowledge": "Agent 内置知识", "agent-prompts": "Agent 提示词预览", "config-git": "Git 仓库配置", "dictionary-keys": "加密字典密钥", "git-projects": "项目仓库", storage: "存储空间" }[section] }]} /></div>
+    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "agent-knowledge": "Agent 内置知识", "config-git": "Git 仓库配置", "dictionary-keys": "加密字典密钥", "git-projects": "项目仓库", storage: "存储空间" }[section] }]} /></div>
     <div className="settings-layout">
       <aside className="settings-sidebar" aria-label="设置分类">
         <nav className="settings-sidebar-nav">
@@ -134,7 +134,6 @@ export function SettingsPage() {
           <button className={section === "providers" ? "active" : ""} aria-current={section === "providers" ? "page" : undefined} onClick={() => setSection("providers")}><PlugZap size={16} />Provider</button>
           <button className={section === "agent-models" ? "active" : ""} aria-current={section === "agent-models" ? "page" : undefined} onClick={() => setSection("agent-models")}><Boxes size={16} />Agent 模型配置</button>
           <button className={section === "agent-knowledge" ? "active" : ""} aria-current={section === "agent-knowledge" ? "page" : undefined} onClick={() => setSection("agent-knowledge")}><Boxes size={16} />Agent 内置知识</button>
-          <button className={section === "agent-prompts" ? "active" : ""} aria-current={section === "agent-prompts" ? "page" : undefined} onClick={() => setSection("agent-prompts")}><Boxes size={16} />Agent 提示词预览</button>
           <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}><GitBranch size={16} />Git 仓库配置</button>
           <button className={section === "dictionary-keys" ? "active" : ""} aria-current={section === "dictionary-keys" ? "page" : undefined} onClick={() => setSection("dictionary-keys")}><KeyRound size={16} />加密字典密钥</button>
           <button className={section === "git-projects" ? "active" : ""} aria-current={section === "git-projects" ? "page" : undefined} onClick={() => setSection("git-projects")}><GitBranch size={16} />项目仓库</button>
@@ -144,7 +143,6 @@ export function SettingsPage() {
       <section className="settings-content">
       {section === "git-projects" && <GitProjectSettings />}
       {section === "storage" && <StorageSettings />}
-      {section === "agent-prompts" && <AgentPromptPreview />}
       {section === "agent-knowledge" && <AgentKnowledgeSettings />}
       {section === "config-git" && <ConfigGitSettings />}
       {section === "dictionary-keys" && <SecretKeySettings />}

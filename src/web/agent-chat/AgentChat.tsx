@@ -105,7 +105,7 @@ function AgentChatContent<Context>({ config, context, className, onClose }: {
     {selectedQuote && createPortal(<Button className="agent-chat-quote-action" variant="outline" size="sm" style={{ top: selectedQuote.top, left: selectedQuote.left }} disabled={chat.locked} onMouseDown={event => event.preventDefault()} onClick={quoteSelection}><Reply size={13} />引用回复</Button>, document.body)}
     <div className="chat-compose">
       <div className="chat-compose-body">
-        <ProviderPicker providers={chat.providers} value={chat.choice} enabledOnly disabled={chat.locked} onChange={chat.choose} />
+        <ProviderPicker providers={chat.providers} value={chat.choice} enabledOnly disabled={chat.locked || (!!session.backend && !session.chooseBackend)} onChange={session.chooseBackend ?? chat.choose} />
         <label className="sr-only" htmlFor={promptId}>{config.promptLabel}</label>
         <Textarea ref={promptInput} id={promptId} rows={3} value={chat.prompt} disabled={chat.locked} onChange={event => chat.setPrompt(event.target.value)} placeholder={config.placeholder} onKeyDown={event => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); submit(); }

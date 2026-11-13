@@ -48,6 +48,8 @@ export interface ChatSubmission {
 
 export interface ChatSession {
   conversationId: string;
+  backend?: AgentChoice;
+  chooseBackend?: (value: AgentChoice) => void;
   draftKey?: string;
   title: string;
   conversations: ChatConversation[];
@@ -76,6 +78,7 @@ export interface AgentChatConfig<Context> {
   promptLabel: string;
   placeholder: string;
   welcome: { title: string; description: string; hint?: string };
+  providerId?: string;
   preferenceKey?: string;
   useSession: (context: Context, choice: AgentChoice, choose: (choice: AgentChoice) => void) => ChatSession;
   attachments?: {

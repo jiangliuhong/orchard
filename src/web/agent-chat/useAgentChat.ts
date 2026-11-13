@@ -7,14 +7,20 @@ import type { AgentChatConfig, ChatAttachment } from "./types";
 export function useAgentChat<Context>(config: AgentChatConfig<Context>, context: Context) {
   const providers = useResource<{ items: ProviderView[] }>("/providers");
   const preferenceKey = config.preferenceKey ?? "orchard-workbench-agent";
-  const [choice, setChoice] = useState<AgentChoice>(() => {
+  const [preference, setChoice] = useState<AgentChoice>(() => {
     try { return JSON.parse(localStorage.getItem(preferenceKey) ?? "{}"); } catch { return {}; }
   });
   const choose = (value: AgentChoice) => {
     setChoice(value);
     try { localStorage.setItem(preferenceKey, JSON.stringify(value)); } catch {}
   };
-  const session = config.useSession(context, choice, choose);
+  const availableProviders = (providers.data?.items ?? []).filter(item => !config.providerId || item.id === config.providerId);
+  const defaultProvider = config.providerId ? availableProviders[0] : undefined;
+  const preferredChoice = defaultProvider && preference.providerId !== defaultProvider.id
+    ? { providerId: defaultProvider.id, modelId: defaultProvider.defaultModel }
+    : preference;
+  const session = config.useSession(context, preferredChoice, choose);
+  const choice = session.backend ?? preferredChoice;
   const [prompt, setPrompt] = useState("");
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false), [pickerOpen, setPickerOpen] = useState(false);
@@ -29,7 +35,7 @@ export function useAgentChat<Context>(config: AgentChatConfig<Context>, context:
   }, [session.conversationId]);
   useEffect(() => { setPrompt(""); }, [session.draftKey ?? session.conversationId]);
   useEffect(() => { setAttachments([]); setPickerOpen(false); }, [resetKey, attachmentsEnabled]);
-  const provider = providers.data?.items.find(item => item.id === choice.providerId);
+  const provider = availableProviders.find(item => item.id === choice.providerId);
   const modelAvailable = provider?.enabled && provider.readiness.state !== "unavailable" && provider.models.some(model => model.id === choice.modelId && isModelEnabled(model));
   const locked = busy || !!session.locked || !!session.active || !!session.loading;
   const canSend = !locked && !!modelAvailable && !!prompt.trim();
@@ -50,7 +56,7 @@ export function useAgentChat<Context>(config: AgentChatConfig<Context>, context:
     });
   };
   return {
-    session, providers: providers.data?.items ?? [], choice, prompt, setPrompt, attachments,
+    session, providers: availableProviders, choice, prompt, setPrompt, attachments,
     historyOpen, setHistoryOpen, pickerOpen, setPickerOpen, busy, locked, canSend, attachmentsEnabled,
     error: error || session.error || providers.error,
     choose,

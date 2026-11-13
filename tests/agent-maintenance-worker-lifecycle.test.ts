@@ -41,7 +41,7 @@ async function fixture(t: TestContext, tracked = true) {
       store.exec("UPDATE agent_workspace_projection_state SET synced_generation=target_generation,synced_knowledge_hash=target_knowledge_hash,state='ready',error_code=NULL,content_hash=?", H);
     },
   });
-  const boundary = boundaryFor(f.store), bridge = configuredWebBridge(f.store), assets = new MaintenanceAssets(f.store, bridge), service = new MaintenanceService(f.store, assets, boundary);
+  const boundary = boundaryFor(f.store), bridge = configuredWebBridge(f.store), assets = new MaintenanceAssets(f.store, bridge, () => f.providers), service = new MaintenanceService(f.store, assets, boundary);
   const target = { kind: "workflow_draft" as const, id, scope: { draftId: draft.id } };
   const proposal = async (request = "proposal") => {
     const baseline = assets.capture(target).baseline, now = Date.now();
@@ -57,7 +57,7 @@ async function fixture(t: TestContext, tracked = true) {
   };
   const finish = () => f.store.exec("UPDATE agent_maintenance_tasks SET status='succeeded',process_state='stopped',ended_at=? WHERE id='task'", Date.now());
   const queue = async () => { const p = await proposal(); const receipt = service.enqueue("local", p.id, "apply"); finish(); return { proposal: p, receipt }; };
-  const factory: MaintenanceRuntimeFactory = store => ({ boundary: boundaryFor(store), close() { assert.equal(store.db.isOpen, true); state.closes++; } });
+  const factory = (store: Store) => ({ boundary: boundaryFor(store), close() { assert.equal(store.db.isOpen, true); state.closes++; } });
   return { ...f, draft, source, bridge, assets, service, boundary, state, boundaryFor, factory, proposal, finish, queue };
 }
 
@@ -232,6 +232,21 @@ test("production authority reconciles a journaled task, rebuilds projection and 
     const result = await services.app.inject({ url, headers: { "sec-fetch-site": "same-origin" } });
     assert.equal(result.statusCode, 200);
     assert.deepEqual(result.json().items.map((item: { id: string }) => item.id), [proposal.id]);
+    const chat = await services.app.inject({ url: `/api/maintenance/owners/workflow_draft/${f.draft.id}/chat?sessionId=session`,
+      headers: { "sec-fetch-site": "same-origin" } });
+    assert.equal(chat.statusCode, 200);
+    assert.equal(chat.json().conversations[0].id, "session");
+    assert.equal(chat.json().tasks[0].status, "interrupted");
+    const taskUrl = `/api/maintenance/owners/workflow_draft/${f.draft.id}/tasks`;
+    const submit = () => services.app.inject({ method: "POST", url: taskUrl,
+      headers: { host: "localhost", origin: "http://localhost", "sec-fetch-site": "same-origin" },
+      payload: { requestId: "settings-model", prompt: "Review this workflow" } });
+    assert.match((await submit()).json().message, /启用 Pi/);
+    const pi = f.store.provider("pi-cli");
+    f.store.saveProvider({ id: "pi-cli", enabled: true, config: { executable: process.execPath },
+      models: [], defaultModel: "", revision: (pi?.revision ?? 0) + 1, updatedAt: Date.now() });
+    await services.maintenanceWorker!.idle();
+    assert.match((await submit()).json().message, /选择 Pi 默认模型/);
   } finally {
     await services.app.close();
     const workspace = join(f.root, "agent", "workspace");
