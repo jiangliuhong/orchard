@@ -43,3 +43,5 @@
 - [Agent 只读项目工作区与平台统一应用（设计中）](../features/2026-11-12-agent-workspace-projection/design.md)
 
 Wiki 分类规则和新增文档要求见 [`docs/AGENTS.md`](../AGENTS.md)。
+
+- [快速执行：固定参数快捷启动台（设计中，含页面原型）](../features/2026-11-14-quick-launch/README.md)

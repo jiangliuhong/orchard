@@ -5,7 +5,7 @@ import { validateWorkflow } from "../domain/validation.js";
 import type { Store } from "../persistence/store.js";
 
 export interface DictionaryReference {
-  objectType: "workflow" | "script";
+  objectType: "workflow" | "script" | "quick_launch";
   objectId: string;
   name: string;
   versionId: string;
@@ -19,7 +19,7 @@ export interface DictionaryReference {
 export interface ReferenceScan {
   items: DictionaryReference[];
   complete: boolean;
-  issues: { objectType: "workflow" | "script"; objectId: string; versionId: string; code: "REFERENCE_UNREADABLE" }[];
+  issues: { objectType: "workflow" | "script" | "quick_launch"; objectId: string; versionId: string; code: "REFERENCE_UNREADABLE" }[];
 }
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -83,6 +83,22 @@ export class DictionaryReferenceScanner {
       const base = { objectType: "script" as const, objectId: row.script_id, name: row.name, versionId: row.id, state: row.status === "draft" ? "draft" as const : row.id === row.current_published_version_id ? "current" as const : "history" as const };
       try { declarations(this.store.scriptDefinition(row.script_id, row.id).dictionaryBindings, base, "declaration"); } catch { issue(base); }
     }
+    if (this.store.one("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='quick_launches'")) {
+      for (const row of this.store.all<{ id: string; name: string; revision: number; input_sources_json: string; target_json: string }>(
+        "SELECT id,name,revision,input_sources_json,target_json FROM quick_launches ORDER BY id")) {
+        const base = { objectType: "quick_launch" as const, objectId: row.id, name: row.name, versionId: String(row.revision), state: "current" as const };
+        try {
+          const sources: unknown = JSON.parse(row.input_sources_json), target: unknown = JSON.parse(row.target_json);
+          if (!object(sources) || !object(target) || (target.credentialBindings !== undefined && !object(target.credentialBindings))) {
+            issue(base);
+            continue;
+          }
+          const refs = [...Object.values(sources), ...Object.values(target.credentialBindings ?? {})];
+          for (const ref of refs) if (object(ref) && ref.source === "dictionary" && ref.dictionaryId === dictionaryId && typeof ref.key === "string")
+            items.push({ ...base, via: "binding", keys: [ref.key] });
+        } catch { issue(base); }
+      }
+    }
     const merged = new Map<string, DictionaryReference>();
     for (const item of items) {
       const identity = JSON.stringify({ ...item, keys: [] });
@@ -95,7 +111,8 @@ export class DictionaryReferenceScanner {
     const scan = this.scan(dictionaryId);
     return keys.map(key => {
       const refs = scan.items.filter(item => item.keys.includes(key));
-      return { key, workflows: new Set(refs.filter(i => i.objectType === "workflow").map(i => i.objectId)).size, scripts: new Set(refs.filter(i => i.objectType === "script").map(i => i.objectId)).size };
+      const quickLaunches = new Set(refs.filter(ref => ref.objectType === "quick_launch").map(ref => ref.objectId)).size;
+      return { key, ...(quickLaunches ? { quickLaunches } : {}), workflows: new Set(refs.filter(i => i.objectType === "workflow").map(i => i.objectId)).size, scripts: new Set(refs.filter(i => i.objectType === "script").map(i => i.objectId)).size };
     });
   }
   list(dictionaryId: string, input: { view?: "current" | "history" | "all"; limit?: number; cursor?: string } = {}) {

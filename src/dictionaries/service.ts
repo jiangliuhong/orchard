@@ -31,7 +31,7 @@ export interface DictionaryWriteResult {
 export interface DictionaryReferences {
   /** 按对象去重的键引用计数。 */
   scan?(dictionaryId: string): import("./references.js").ReferenceScan;
-  keyReferences(dictionaryId: string, keys: string[]): { key: string; workflows: number; scripts: number }[];
+  keyReferences(dictionaryId: string, keys: string[]): { key: string; workflows: number; scripts: number; quickLaunches?: number }[];
 }
 
 
@@ -289,7 +289,7 @@ export class DictionaryService {
   private requireRemovalConfirmation(id: string, input: { confirmationToken?: string; expectedRevision: number; name?: string; description?: string; enabled?: boolean; operations: unknown }, targetRevision: number, operations: DictionaryOperation[]): void {
     const removedKeys = operations.filter(operation => operation.op === "remove").map(operation => operation.key);
     if (removedKeys.length === 0) return;
-    const impacts = this.references.keyReferences(id, removedKeys).filter(impact => impact.workflows > 0 || impact.scripts > 0);
+    const impacts = this.references.keyReferences(id, removedKeys).filter(impact => impact.workflows > 0 || impact.scripts > 0 || (impact.quickLaunches ?? 0) > 0);
     const scan = this.references.scan?.(id);
     if (impacts.length === 0 && (!scan || scan.complete)) return;
     const business = { dictionaryId: id, expectedRevision: input.expectedRevision, name: input.name ?? null, description: input.description ?? null, enabled: input.enabled ?? null, operations: input.operations };

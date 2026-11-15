@@ -190,7 +190,7 @@ PRAGMA user_version = 2;
 
 test("approved schema has the expected release tables and isolates unknown databases", t => {
   const root = temporary(t), store = new Store(root);
-  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, Number(currentVersion) === 11 ? 31 : 23);
+  assert.equal(store.all("SELECT name FROM sqlite_master WHERE type='table'").length, Number(currentVersion) === 12 ? 35 : Number(currentVersion) === 11 ? 31 : 23);
   assert.throws(() => new Store(root), /INSTANCE_LOCKED/); store.close();
   const unknownRoot = temporary(t), database = new DatabaseSync(join(unknownRoot, "workbench.db"));
   database.exec("CREATE TABLE old_data(id TEXT)"); database.close();

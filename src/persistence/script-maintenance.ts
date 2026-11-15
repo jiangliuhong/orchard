@@ -81,6 +81,8 @@ export class ScriptMaintenance {
           const current = this.store.one<{ status: string }>("SELECT status FROM script_tests WHERE id=?", row.id);
           check(current && !["queued", "running"].includes(current.status), "CLEANUP_CONFLICT", "清理范围已变化，请重新预览", 409);
           for (const reference of [row.input_ref, row.output_ref, row.stdout_ref, row.stderr_ref]) this.referenceIds(reference, candidates);
+          if (this.store.one("SELECT name FROM sqlite_schema WHERE name='execution_records'"))
+            this.store.exec("UPDATE execution_records SET output_availability='cleared' WHERE underlying_kind='script_test' AND underlying_id=?", row.id);
           this.store.exec("DELETE FROM script_tests WHERE id=?", row.id); deletedTests++;
         }
         const roots = this.reachable();

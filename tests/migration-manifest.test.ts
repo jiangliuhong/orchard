@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 import {transformSync} from 'esbuild';
 const root=new URL('../',import.meta.url),manifestPath='docs/features/2026-11-06-data-migration/migration-manifest.json';
 const manifest=JSON.parse(readFileSync(new URL(manifestPath,root),'utf8'));
-const declarationCount = new Map([[10, 14], [11, 16]]).get(manifest.targetDatabaseVersion);
+const declarationCount = new Map([[10, 14], [11, 16], [12, 18]]).get(manifest.targetDatabaseVersion);
 test('release locks independent historical baselines and executable dependencies separately from schema approval',()=>{
  const approval=JSON.parse(readFileSync(new URL(manifest.schemaApproval,root),'utf8'));
  assert.equal(manifest.status,'release_locked');assert.equal(manifest.review.contentDigest,approval.contentDigest);assert.notEqual(manifest.contentDigest,approval.contentDigest);

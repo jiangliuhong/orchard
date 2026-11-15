@@ -12,7 +12,7 @@ export interface Snapshot { formatVersion: 1; files: FileRecord[]; missing: stri
 export interface InstallItem { path: string; before: string | null; target: string; installed?: boolean; restored?: boolean }
 export interface Job { formatVersion: 1; jobId: string; attemptOf?: string; requestId: string; requestScope: string; inputHmac: string; plan: Plan; phase: Phase; revision: number; startedAt: string; updatedAt: string; steps: { id: string; state: string }[]; processed: number; install: InstallItem[]; ledgerBefore: unknown; error?: PublicError; result?: { committed: boolean; ready: boolean; backup: string; bytes: number } }
 export interface Ledger { formatVersion: 1; baseline: { database: number; webBridge: number | null; applicationId: number; source: string }; completed: { jobId: string; migrations: Step[]; source: Plan['sourceVersions']; target: Plan['targetVersions'] }[] }
-export const resourceRoots = ['workbench.db', 'config', 'artifacts', 'runs', 'script-agent', 'agent-sessions', 'agent-workspaces'] as const;
+export const resourceRoots = ['workbench.db', 'config', 'artifacts', 'runs', 'script-agent', 'agent-sessions', 'agent-workspaces', 'runtime/bridge-history.json'] as const;
 export class MigrationError extends Error {
   constructor(readonly code: string, readonly nextAction = '重新检查数据后重试') { super(code); }
 }

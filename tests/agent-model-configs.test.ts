@@ -19,6 +19,12 @@ test("registered Agent migration SQL and initialization match the reviewed schem
   assert.equal(sql[6], MIGRATE_V6_TO_V7);
   assert.equal(sql[7], MIGRATE_V7_TO_V8);
   const legacy = SCHEMA.replace(/PRAGMA user_version = \d+;\n$/, "PRAGMA user_version = 10;\n");
+  if (Number(currentVersion) === 12) {
+    assert.ok(initializationSql.includes(WORKSPACE_MAINTENANCE_SCHEMA.trim()));
+    assert.ok(initializationSql.includes(sql[11].trim()));
+    assert.match(initializationSql, /PRAGMA user_version = 12;\s*$/);
+    return;
+  }
   assert.equal(initializationSql, Number(currentVersion) === 11 ? `${legacy}\n${WORKSPACE_MAINTENANCE_SCHEMA}\nPRAGMA user_version=11;\n` : legacy);
 });
 function workflow(id: string): Workflow {

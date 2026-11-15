@@ -18,6 +18,8 @@ export function verifyMapping(db:DatabaseSync,before:ReturnType<typeof captureRo
   // The v11 step validates the three seeded tables as part of its transaction.
   // Existing maintenance rows still use exact row comparison on later upgrades.
   if(version<11&&targetVersion>=11&&WORKSPACE_TABLES.some(name=>name===table))continue;
+  // The v12 step checks the execution summaries against all three legacy sources.
+  if(version<12&&targetVersion>=12&&table==='execution_records')continue;
   const original=before[table]??[];
   const expected=original.map(row=>{
    const target={...row};

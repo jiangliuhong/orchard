@@ -1239,3 +1239,11 @@ button.bridge-history-row:focus-visible, .bridge-history-detail :is(summary, pre
   [data-slot=dialog-content].maintenance-review { width: calc(100vw - 16px); height: min(680px, calc(100dvh - 16px)); }
   .maintenance-review > [data-slot=dialog-header], .maintenance-review-overview, .maintenance-review-file { padding-left: 12px; }
 }
+
+/* Keep the shared dictionary picker inside the viewport, including nested dialogs. */
+.bridge-credential-dialog[data-slot=dialog-content] {
+  width: min(640px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  background-color: var(--card);
+  color: var(--foreground);
+}

@@ -136,6 +136,25 @@ test('M02 all historical database versions and config versions reach the same ta
   }else{const instance=await boot(root,async()=>{});assert.equal(instance.bootstrap.ready,true);}
  }
 });
+test('v11 to v12 rehearsal installs unified summaries and retains browser history bytes',async t=>{
+ const root=fixture(t,11,1), history=safe(root,'runtime/bridge-history.json');
+ durable(history,JSON.stringify([{id:'old-browser',application:'sample',toolId:'report',startedAt:10,durationMs:5,status:'succeeded',args:{secret:'do-not-import'}}]));
+ const before=source(root).fingerprint, bytes=readFileSync(history);
+ const rehearsal=await preview(root);
+ assert.equal(rehearsal.sourceVersions.database,11);
+ assert.equal(source(root).fingerprint,before);
+ const job=execute(root,accept(root));
+ assert.equal(job.phase,'committed',JSON.stringify(job.error));
+ assert.deepEqual(readFileSync(history),bytes);
+ const db=new DatabaseSync(safe(root,'workbench.db'),{readOnly:true});
+ try{
+  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version,12);
+  const rows=db.prepare('SELECT underlying_id,snapshot_ref FROM execution_records ORDER BY underlying_id').all();
+  assert.deepEqual(rows.map(row=>row.underlying_id),['old-browser','run']);
+  assert.doesNotMatch(JSON.stringify(rows),/do-not-import/);
+  assert.equal(db.prepare('SELECT count(*) n FROM execution_outbox').get()?.n,0);
+ }finally{db.close();}
+});
 test('v6 release ledgers keep their original migration identities when extending the chain to v9',t=>{
  const root=fixture(t,6,1);
  const migrations=declarations.filter(value=>value.kind==='database'&&value.from>=2&&value.to<=6);
@@ -143,6 +162,7 @@ test('v6 release ledgers keep their original migration identities when extending
  writeJson(safe(root,'migrations/ledger.json'),ledger);
  const expected=['db.v6-v7','db.v7-v8','db.v8-v9','db.v9-v10'];
  if(currentVersion>=11)expected.push('db.workspace-projection.v10-v11');
+ if(currentVersion>=12)expected.push('db.quick-launch.v11-v12');
  assert.deepEqual(plan(root).steps.map(step=>step.id),expected);
  const job=execute(root,accept(root));assert.equal(job.phase,'committed',JSON.stringify(job.error));
  const updated=readJson<Ledger>(safe(root,'migrations/ledger.json'));

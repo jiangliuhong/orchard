@@ -1,4 +1,8 @@
 import Fastify from "fastify";
+import { QuickLaunchService } from "../quick-launch/service.js";
+import { registerQuickLaunchRoutes } from "../quick-launch/routes.js";
+import { QuickLaunchGroups } from "../quick-launch/groups.js";
+import { registerQuickLaunchGroupRoutes } from "../quick-launch/group-routes.js";
 import { gitProjects, type GitProjects } from "../project-git/service.js";
 import { registerProjectRoutes } from "../project-git/routes.js";
 import { StorageUsageService } from "../storage/usage.js";
@@ -76,6 +80,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   const store = proxy<Store>("store"), providers = proxy<ProviderRegistry>("providers"), bridge = proxy<WebBridgeGateway>("bridge"), apiAuth = proxy<LocalApiAuth>("apiAuth");
   const authoring = proxy<AuthoringService>("authoring"), runner = proxy<GraphRunner>("runner"), scriptTests = proxy<ScriptTestRunner>("scriptTests"), scripts = proxy<ScriptLibrary>("scripts"), scriptAgent = proxy<ScriptAgentService>("scriptAgent"), scriptMaintenance = proxy<ScriptMaintenance>("scriptMaintenance");
   const secretsService = proxy<SecretsService>("secrets"), dictionaries = proxy<DictionaryService>("dictionaries");
+  const quickLaunch = proxy<QuickLaunchService>("quickLaunch");
   const bridgeAgent = proxy<BridgeAgentService>("bridgeAgent");
   const closeServices = async () => {
     let failure: unknown;
@@ -88,6 +93,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     const add = <T,>(name: string, value: T, close?: () => unknown | Promise<unknown>): T => { services[name] = value; if(close) cleanup.push(close); return value; };
     try {
       add("store", opened, () => opened.close());
+      add("quickLaunchGroups", new QuickLaunchGroups(opened));
       const coordinator = configCoordinator(opened);
       add("coordinator", coordinator);
       const migrated = workspaceSchemaInstalled(opened);
@@ -140,7 +146,21 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       const secretsService = new SecretsService(opened, keyring, new CommandHmac(opened, opened.root, keyring));
       add("secrets", secretsService);
       gateway.httpDependencies.resolveCredential = dictionaryCredentials(opened, secretsService);
-      add("dictionaries", new DictionaryService(opened, secretsService));
+      const dictionaryService = add("dictionaries", new DictionaryService(opened, secretsService));
+      const readCredential = dictionaryCredentials(opened, secretsService);
+      const quick = new QuickLaunchService(opened, graph, tests, gateway, (id, key, sensitive) => {
+        const dictionary = dictionaryService.get(id);
+        const entry = dictionary && Object.hasOwn(dictionary.keys, key) ? dictionary.keys[key] : undefined;
+        check(dictionary?.enabled && entry && (!sensitive || dictionary.kind === "encrypted"), "DICTIONARY_KEY_MISSING", "字典或键不可用");
+        return "value" in entry ? entry.value : readCredential(id, key);
+      });
+      add("quickLaunch", quick, () => quick.close());
+      if (opened.one("SELECT name FROM sqlite_schema WHERE name='execution_records'")) {
+        quick.recover();
+        graph.onAccepted = (id, name) => quick.registerUnderlying("workflow_run", id, name, "workflow_page");
+        opened.onScriptTestAccepted = (id, name) => quick.registerUnderlying("script_test", id, name, "script_library");
+        gateway.trackCall = (application, tool, environmentId, parentId) => quick.registerBridge(application, tool, environmentId, parentId);
+      }
       if (maintenanceRuntime) {
         const maintenance = add("maintenance", new MaintenanceService(opened, new MaintenanceAssets(opened, gateway.config!, () => registry), maintenanceRuntime.boundary));
         const worker = new MaintenanceApplyWorker(opened, maintenance, { synchronize: true });
@@ -162,7 +182,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       clean = true;
     } catch (error) { await closeServices(); throw error; }
   };
-  const activate = () => { services.runner.start(); services.scriptTests.start(); services.maintenanceWorker?.start(); };
+  const activate = () => { services.runner.start(); services.scriptTests.start(); if (services.store.one("SELECT name FROM sqlite_schema WHERE name='execution_records'")) services.quickLaunch.startWorker(); services.maintenanceWorker?.start(); };
   const initialization = initialStore ? initialize(initialStore).then(activate) : Promise.resolve();
   // Keep rejection observed until Fastify's ready barrier reports startup failure.
   void initialization.catch(() => {});
@@ -208,6 +228,8 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     reply.header("X-Content-Type-Options", "nosniff");
     reply.header("Referrer-Policy", "no-referrer");
   });
+  registerQuickLaunchRoutes(app, quickLaunch);
+  registerQuickLaunchGroupRoutes(app, proxy<QuickLaunchGroups>("quickLaunchGroups"));
   if (maintenanceFactory) registerMaintenanceRoutes(app, {
     service: proxy<MaintenanceService>("maintenance"),
     tasks: () => services.maintenanceRuntime?.tasks,
@@ -346,7 +368,11 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
   app.post<{ Params: { applicationId: string; toolId: string }; Querystring: { environmentId?: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/test", async request => bridge.call(request.params.applicationId, request.params.toolId, request.body, { environmentId: request.query.environmentId, source: "test" }));
   app.get<{ Params: { applicationId: string; toolId: string } }>("/api/web-bridge/applications/:applicationId/tools/:toolId/history", async (request, reply) => {
     reply.header("Cache-Control", "no-store");
-    return { items: bridge.history.list(request.params.applicationId, request.params.toolId, bridge.tools(request.params.applicationId).find(tool => tool.toolId === request.params.toolId)) };
+    const { applicationId, toolId } = request.params;
+    const legacy = bridge.history.list(applicationId, toolId, bridge.tools(applicationId).find(tool => tool.toolId === toolId));
+    const current = store.one("SELECT name FROM sqlite_schema WHERE name='execution_records'") ? quickLaunch.bridgeHistory(applicationId, toolId) : [];
+    const ids = new Set(legacy.map(item => item.id));
+    return { items: [...legacy, ...current.filter(item => !ids.has(item.id))].sort((a, b) => b.startedAt - a.startedAt) };
   });
   app.post<{ Params: { applicationId: string } }>("/api/web-bridge/applications/:applicationId/tools", async request => {
     const input = normalizeToolIdentity(request.body, request.params.applicationId);
@@ -556,7 +582,8 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     const input = body<{ versionId?: string; input: unknown; requestId: string }>(request.body, { versionId: { type: "string" }, input: {}, requestId }, ["input", "requestId"]);
     const workflow = store.workflows().find(w => w.id === request.params.id); check(workflow, "NOT_FOUND", "工作流不存在");
     const version = store.version(input.versionId ?? workflow.currentVersionId); check(version.workflowId === workflow.id, "NOT_FOUND", "版本不属于该工作流");
-    const result = runner.create(version.id, input.input, input.requestId); reply.code(202); return result;
+    const result = runner.create(version.id, input.input, input.requestId);
+    reply.code(202); return result;
   });
   app.get<{ Querystring: { workflowId?: string; draftId?: string; type?: string; status?: string } }>("/api/runs", async request => {
     const filters = request.query;

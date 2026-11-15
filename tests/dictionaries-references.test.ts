@@ -109,3 +109,21 @@ test("encrypted static declarations reject plain bindings and Agent successors w
   assert.ok(!JSON.stringify(dictionaryDependencyMetadata(store)).includes("never-display"));
   assert.ok(!JSON.stringify(dictionaryDependencyMetadata(store)).includes("keyId"));
 });
+
+test("removing a key referenced only by quick launch requires confirmation and detects changed cards", t => {
+  const { store, dictionaries, id } = setup(t);
+  store.exec(`INSERT INTO quick_launches(id,name,note,target_json,fixed_input_json,input_sources_json,revision,created_at,updated_at)
+    VALUES('card','检查','','{}','{}',?,1,1,1)`, JSON.stringify({ "/url": { source: "dictionary", dictionaryId: id, key: "url" } }));
+  const input = { requestId: randomUUID(), expectedRevision: 1, operations: [{ op: "remove", key: "url" }] };
+  let token = "";
+  assert.throws(() => dictionaries.update(id, input), error => {
+    const e = error as { code: string; details: { confirmationToken: string; impacts: unknown[] } };
+    assert.equal(e.code, "CONFIRMATION_REQUIRED");
+    assert.deepEqual(e.details.impacts, [{ key: "url", workflows: 0, scripts: 0, quickLaunches: 1 }]);
+    token = e.details.confirmationToken;
+    return true;
+  });
+  assert.ok(dictionaries.get(id)?.keys.url);
+  store.exec("UPDATE quick_launches SET revision=2 WHERE id='card'");
+  assert.throws(() => dictionaries.update(id, { ...input, confirmationToken: token }), { code: "PREVIEW_EXPIRED" });
+});

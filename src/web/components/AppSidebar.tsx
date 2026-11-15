@@ -7,7 +7,7 @@ import { ConfigGitSettings } from "../features/ConfigGitSettings";
 import { RefreshCw } from "lucide-react";
 
 export function AppSidebar({ section }: { section: string }) {
-  const workflowActive = !["scripts", "web-bridge", "settings", "dictionaries"].includes(section);
+  const workflowActive = !["scripts", "web-bridge", "settings", "dictionaries", "quick-launch"].includes(section);
   const [collapsed, setCollapsed] = useState(() => {
     try { return localStorage.getItem("orchard.sidebar.collapsed") === "true"; } catch { return false; }
   });
@@ -37,7 +37,7 @@ export function AppSidebar({ section }: { section: string }) {
         <a href="/runs" className={section === "runs" ? "active" : ""} aria-current={section === "runs" ? "page" : undefined} onClick={() => setMobileOpen(false)}><ListChecks size={15} />运行记录</a>
       </div>}
     </div>
-    {[{ href: "/dictionaries", label: "字典", icon: BookOpen, key: "dictionaries" }, { href: "/scripts", label: "脚本库", icon: Code2, key: "scripts" }, { href: "/web-bridge", label: "网页桥接", icon: Globe, key: "web-bridge" }].map(item =>
+    {[{ href: "/quick-launch", label: "快速执行", icon: ListChecks, key: "quick-launch" }, { href: "/dictionaries", label: "字典", icon: BookOpen, key: "dictionaries" }, { href: "/scripts", label: "脚本库", icon: Code2, key: "scripts" }, { href: "/web-bridge", label: "网页桥接", icon: Globe, key: "web-bridge" }].map(item =>
       <a key={item.key} href={item.href} title={item.label} aria-label={item.label} className={`sidebar-link ${section === item.key ? "active" : ""}`} aria-current={section === item.key ? "page" : undefined} onClick={() => setMobileOpen(false)}><item.icon size={18} /><span className="sidebar-label">{item.label}</span></a>)}
   </nav>;
   const footer = <div className="sidebar-footer">

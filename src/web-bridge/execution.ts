@@ -127,7 +127,7 @@ async function readJson(response: Response, limit: number, signal: AbortSignal) 
   } finally { await reader?.cancel().catch(() => {}); }
 }
 
-export async function executeHttpTool(tool: HttpTool, origin: string, args: Record<string, unknown>, signal: AbortSignal, dependencies: HttpDependencies = {}) {
+export async function executeHttpTool(tool: HttpTool, origin: string, args: Record<string, unknown>, signal: AbortSignal, dependencies: HttpDependencies = {}, onDispatch?: () => void) {
   check(args !== null && typeof args === "object" && !Array.isArray(args), "INVALID_ARGUMENT", "HTTP 执行参数必须是对象");
   const request = dependencies.fetch ?? fetch;
   const now = dependencies.now ?? Date.now;
@@ -181,6 +181,8 @@ export async function executeHttpTool(tool: HttpTool, origin: string, args: Reco
       headers[signing.headers.signature] = signature;
       secrets.push(signature);
     }
+    signal.throwIfAborted();
+    onDispatch?.();
     const response = await request(url, { method: tool.method, headers, body, redirect: "error", credentials: "omit", signal });
     const result = tool.method === "HEAD"
       ? (check(response.ok && !response.redirected, "HTTP_REQUEST_FAILED", "上游返回非成功状态或重定向"), null)

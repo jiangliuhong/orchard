@@ -37,7 +37,7 @@ export function verifyDatabase(db: DatabaseSync, root?: string, originalRoot = r
   for(const row of db.prepare('SELECT config_json,models_json FROM provider_settings').all()) {
     try { const config=JSON.parse(String(row.config_json)), models=JSON.parse(String(row.models_json)); if(!config||typeof config!=='object'||Array.isArray(config)||!Array.isArray(models)) throw new Error(); } catch { throw new MigrationError('DATABASE_CORRUPT'); }
   }
-  const refs:Record<string,string[]>={runs:['input_ref','output_ref'],node_runs:['input_ref','output_ref'],node_attempts:['input_ref','output_ref'],stream_events:['payload_ref'],...(version>=3?{authoring_turns:['input_ref','result_ref']}:{})};
+  const refs:Record<string,string[]>={runs:['input_ref','output_ref'],node_runs:['input_ref','output_ref'],node_attempts:['input_ref','output_ref'],stream_events:['payload_ref'],...(version>=12?{execution_records:['snapshot_ref']}:{ }),...(version>=3?{authoring_turns:['input_ref','result_ref']}:{})};
   for(const [table,columns] of Object.entries(refs))for(const row of db.prepare(`SELECT ${columns.join(',')} FROM ${table}`).all())for(const value of Object.values(row))if(value!==null){
     let reference:unknown;try{reference=JSON.parse(String(value));}catch{throw new MigrationError('DATABASE_CORRUPT');}
     if(reference&&typeof reference==='object'&&'artifactId' in reference&&(typeof reference.artifactId!=='string'||!db.prepare('SELECT id FROM artifacts WHERE id=?').get(reference.artifactId)))throw new MigrationError('DATABASE_CORRUPT');

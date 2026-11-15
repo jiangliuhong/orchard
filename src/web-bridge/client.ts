@@ -8,13 +8,16 @@ export class WebBridgeClient {
   private socket?: Socket;
   private buffer = "";
   constructor(readonly socketPath: string, public catalogHash: string) {}
-  async call(tool: string, args: unknown, options: { timeoutMs: number; signal?: AbortSignal; requestId?: string }) {
+  async call(tool: string, args: unknown, options: { timeoutMs: number; signal?: AbortSignal; requestId?: string; onDispatch?: () => void }) {
     const socket = await this.connect(options.timeoutMs);
+    options.signal?.throwIfAborted();
     const id = options.requestId ?? randomUUID();
+    const line = encodeLine({ id, tool, args, catalogHash: this.catalogHash });
     const result = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new AppError("BROWSER_TIMEOUT", "浏览器调用超时")); this.close(); }, options.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      socket.write(encodeLine({ id, tool, args, catalogHash: this.catalogHash }));
+      options.onDispatch?.();
+      socket.write(line);
     });
     const abort = () => { const item = this.pending.get(id); if (item) { clearTimeout(item.timer); this.pending.delete(id); item.reject(new AppError("CANCELLED", "调用已取消")); this.close(); } };
     options.signal?.addEventListener("abort", abort, { once: true });

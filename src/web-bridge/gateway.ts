@@ -15,6 +15,9 @@ import { postprocessResponse } from "./postprocess.js";
 export interface WebBridgeStatus { enabled: boolean; connected: boolean; catalogHash: string; extensionVersion: string | null; pending: number; sites: unknown[] }
 export interface WebBridgeProfile { id: string; name: string; extensionId: string; extensionVersion?: string; connected: boolean; lastSeen: number }
 export class WebBridgeGateway {
+  trackCall?: (application: string, tool: string, environmentId?: string, parentId?: string) => {
+    id: string; finish: (status: "succeeded" | "failed", error?: unknown) => void;
+  };
   readonly browserChannel = new BrowserChannel();
   history = new BridgeExecutionHistory();
   private closed = false;
@@ -77,7 +80,7 @@ export class WebBridgeGateway {
     this.profiles.set(profile.id, next); return next;
   }
   profilesList() { return [...this.profiles.values()].map(profile => ({ ...profile, connected: Date.now() - profile.lastSeen < 150000 })).sort((a, b) => b.lastSeen - a.lastSeen); }
-  async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver; source?: "call" | "test"; omitHistoryArgs?: boolean } = {}) {
+  async call(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver; source?: "call" | "test"; omitHistoryArgs?: boolean; skipLegacyHistory?: boolean; parentExecutionId?: string; onDispatch?: () => void } = {}) {
     const startedAt = Date.now();
     // Caller privacy policy can only tighten the tool’s own history policy.
     const omitHistoryArgs = options.omitHistoryArgs === true;
@@ -86,17 +89,19 @@ export class WebBridgeGateway {
     const capturedBindings = structuredClone(options.credentialBindings);
     const environments = this.config?.environments(application).filter(item => item.enabled) ?? [];
     const environmentId = options.environmentId ?? (environments.length === 1 ? environments[0].id : undefined);
+    const tracking = options.skipLegacyHistory ? undefined : this.trackCall?.(application, toolId, environmentId, options.parentExecutionId);
     let status: "succeeded" | "failed" = "failed", errorCode: string | undefined;
     try {
-      const result = await this.execute(application, toolId, args, options);
+      const result = await this.execute(application, toolId, args, tracking ? { ...options, requestId: tracking.id } : options);
       status = "succeeded";
       return result;
     } catch (error) {
       errorCode = error instanceof AppError ? error.code : "EXECUTION_FAILED";
       throw error;
     } finally {
-      try {
-        this.history.add({ application, toolId, args: capturedArgs, source: options.source ?? "call", startedAt, durationMs: Date.now() - startedAt, status, environmentId, errorCode }, { tool: capturedTool, bindings: capturedBindings, omitArgs: omitHistoryArgs });
+      if (tracking) try { tracking.finish(status, errorCode ? new AppError(errorCode, "") : undefined); } catch { /* Recovered as uncertain after restart. */ }
+      if (!options.skipLegacyHistory) try {
+        this.history.add({ application, toolId, args: capturedArgs, source: options.source ?? "call", startedAt, durationMs: Date.now() - startedAt, status, environmentId, errorCode }, { tool: capturedTool, bindings: capturedBindings, omitArgs: omitHistoryArgs, id: tracking?.id });
         const currentTool = this.tools(application).find(item => item.toolId === toolId);
         if (currentTool) this.history.restrict(currentTool);
       } catch {
@@ -105,7 +110,7 @@ export class WebBridgeGateway {
       }
     }
   }
-  private async execute(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver }) {
+  private async execute(application: string, toolId: string, args: unknown, options: { signal?: AbortSignal; timeoutMs?: number; requestId?: string; environmentId?: string; approved?: boolean; credentialBindings?: CredentialBindings; resolveCredential?: CredentialResolver; onDispatch?: () => void }) {
     return this.coordinator.withActivity("WebBridgeGateway.call", async () => {
       const tool = this.tools(application).find(item => item.toolId === toolId);
       check(tool, "UNKNOWN_TOOL", `未知浏览器工具: ${application}/${toolId}`);
@@ -135,7 +140,7 @@ export class WebBridgeGateway {
               return resolve(dictionaryId, key);
             };
             const { request, secrets } = await preprocessBrowser(tool.execution, args, tool, signal, resolveCredential, options.credentialBindings);
-            const result = await this.browserChannel.call(environment.profileId, { origin: environment.origin, request, maxBytes: tool.execution.response.maxBytes, timeoutMs: Math.max(1, deadline - Date.now()), deadline }, signal);
+            const result = await this.browserChannel.call(environment.profileId, { origin: environment.origin, request, maxBytes: tool.execution.response.maxBytes, timeoutMs: Math.max(1, deadline - Date.now()), deadline }, signal, options.onDispatch);
             const serialized = JSON.stringify(result);
             check(serialized !== undefined && Buffer.byteLength(serialized) <= tool.execution.response.maxBytes, "RESPONSE_TOO_LARGE", "响应超过限制");
             check(!secrets.filter(Boolean).some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1, -1))), "SENSITIVE_RESPONSE", "响应包含鉴权信息，已阻止返回");
@@ -144,7 +149,7 @@ export class WebBridgeGateway {
             const selected = Object.fromEntries(tool.fields.filter(field => Object.hasOwn(result, field)).map(field => [field, (result as Record<string, unknown>)[field]]));
             return await postprocessResponse(tool.execution.postprocess, selected, args, signal, tool.execution.response.maxBytes, secrets);
           }
-          return await executeHttpTool({ ...tool, execution: tool.execution }, environments[0].origin, args as Record<string, unknown>, signal, this.httpDependencies);
+          return await executeHttpTool({ ...tool, execution: tool.execution }, environments[0].origin, args as Record<string, unknown>, signal, this.httpDependencies, options.onDispatch);
         } finally { this.httpCalls.delete(controller); }
       }
       this.client.catalogHash = catalogHashFor(this.tools());

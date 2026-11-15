@@ -60,7 +60,7 @@ test("model state persists in the existing JSON column across restart", context 
   assert.equal(registry.modelList(provider.id).find(model => model.id === "disabled")!.enabled, false);
   assert.equal(registry.modelList(provider.id).some(model => model.id === "deleted"), false);
   assert.equal(registry.setting(provider.id).models.find(model => model.id === "deleted")!.deleted, true);
-  assert.equal(reopened.all("SELECT name FROM sqlite_master WHERE type='table'").length, Number(currentVersion) === 11 ? 31 : 23);
+  assert.equal(reopened.all("SELECT name FROM sqlite_master WHERE type='table'").length, Number(currentVersion) === 12 ? 35 : Number(currentVersion) === 11 ? 31 : 23);
 });
 
 test("model changes fence a pending catalog refresh and do not interrupt an active call", async context => {

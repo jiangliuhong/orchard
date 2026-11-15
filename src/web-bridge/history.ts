@@ -75,11 +75,15 @@ export class BridgeExecutionHistory {
     });
     if (JSON.stringify(items) !== JSON.stringify(this.items)) this.commit(items);
   }
+  outcome(id: string) {
+    const record = this.items.find(item => item.id === id);
+    return record ? { status: record.status, endedAt: record.startedAt + record.durationMs } : undefined;
+  }
   list(application: string, toolId: string, tool?: WebBridgeTool) {
     if (tool) this.restrict(tool);
     return structuredClone(this.items.filter(item => item.application === application && item.toolId === toolId).slice(0, 100).map(record => ({ ...record, definitionChanged: !!tool && !!record.toolHash && record.toolHash !== bridgeToolHash(tool), legacy: record.formatVersion !== 2 || record.legacy })));
   }
-  add(input: Input, context: { tool?: WebBridgeTool; bindings?: CredentialBindings; omitArgs?: boolean } = {}) {
+  add(input: Input, context: { tool?: WebBridgeTool; bindings?: CredentialBindings; omitArgs?: boolean; id?: string } = {}) {
     const tool = context.tool;
     const schemas = { parameters: tool?.parameters ?? { "x-history": { record: false } }, credentials: tool?.execution?.transport === "browser" ? credentialSchema(tool.execution) : undefined };
     // Keep the root omission authoritative when current tool policy is reapplied.
@@ -88,7 +92,7 @@ export class BridgeExecutionHistory {
     const credentials = tool?.execution?.transport === "browser" ? credentialHistoryInput(tool.execution, context.bindings ?? {}) : { values: {}, sources: {} };
     const captured = captureCredentials(credentials.values, schemas.credentials ?? true, credentials.sources);
     const record: BridgeExecutionRecord = {
-      ...input, args: args.value ?? null, id: randomUUID(), formatVersion: 2, schemas: structuredClone(schemas),
+      ...input, args: args.value ?? null, id: context.id ?? randomUUID(), formatVersion: 2, schemas: structuredClone(schemas),
       argSources: args.sources, credentialSources: captured.sources, credentialValues: captured.value as Record<string, string> ?? {},
       toolHash: tool ? bridgeToolHash(tool) : undefined,
       redacted: [...Object.values(args.sources), ...Object.values(captured.sources)].some(source => source.source === "omitted"),

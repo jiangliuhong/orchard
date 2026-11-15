@@ -87,7 +87,7 @@ const tabErrors = new Map([
 
 export class BrowserChannel {
   private sessions = new Map<string, { token: string; extensionId: string }>();
-  private pending = new Map<string, { profileId: string; payload: unknown; delivered: boolean; resolve: (value: unknown) => void; reject: (error: unknown) => void }>();
+  private pending = new Map<string, { profileId: string; payload: unknown; delivered: boolean; onDispatch?: () => void; resolve: (value: unknown) => void; reject: (error: unknown) => void }>();
   status() { return { pending: this.pending.size }; }
   register(profileId: string, extensionId: string) {
     const previous = this.sessions.get(profileId);
@@ -99,7 +99,7 @@ export class BrowserChannel {
     check(session && token === session.token && (!origin || origin === `chrome-extension://${session.extensionId}`), "UNAUTHORIZED", "浏览器通道认证失败", 401);
   }
   poll(profileId: string) {
-    return [...this.pending].filter(([, item]) => item.profileId === profileId && !item.delivered).map(([id, item]) => { item.delivered = true; return { id, payload: item.payload }; });
+    return [...this.pending].filter(([, item]) => item.profileId === profileId && !item.delivered).map(([id, item]) => { item.onDispatch?.(); item.delivered = true; return { id, payload: item.payload }; });
   }
   complete(profileId: string, id: string, result: unknown, error?: string) {
     const item = this.pending.get(id);
@@ -109,7 +109,7 @@ export class BrowserChannel {
       item.reject(new AppError(code, tabErrors.get(error) ?? "浏览器请求失败，请检查目标页签登录态、网关授权和接口权限"));
     } else item.resolve(result);
   }
-  async call(profileId: string, payload: unknown, signal: AbortSignal) {
+  async call(profileId: string, payload: unknown, signal: AbortSignal, onDispatch?: () => void) {
     check(this.sessions.has(profileId), "BROWSER_NOT_CONNECTED", "浏览器资料尚未连接");
     const id = randomUUID();
     let abort = () => {};
@@ -117,7 +117,7 @@ export class BrowserChannel {
       return await new Promise<unknown>((resolve, reject) => {
         abort = () => reject(new AppError("CANCELLED", "浏览器调用取消或超时"));
         signal.throwIfAborted();
-        this.pending.set(id, { profileId, payload, delivered: false, resolve, reject });
+        this.pending.set(id, { profileId, payload, delivered: false, onDispatch, resolve, reject });
         signal.addEventListener("abort", abort, { once: true });
       });
     } finally { signal.removeEventListener("abort", abort); this.pending.delete(id); }

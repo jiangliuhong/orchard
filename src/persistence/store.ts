@@ -374,10 +374,11 @@ export class Store {
     }
     return [...result.values()].sort((a, b) => a.dictionaryId.localeCompare(b.dictionaryId));
   }
+  onScriptTestAccepted?: (id: string, name: string) => void;
   trackScriptTestActivity(id: string) {
     if (!this.scriptTestActivities.has(id)) this.scriptTestActivities.set(id, configCoordinator(this).beginActivity(`script-test:${id}`));
   }
-  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown, requestId?: string, commandInput?: unknown, inputSources?: unknown) {
+  createScriptTest(scriptId: string, versionId: string | null, draftRevision: number | null, input: unknown, requestId?: string, commandInput?: unknown, inputSources?: unknown, forcePrivate = false, unified = false) {
     return configCoordinator(this).withActivity("script-test:accept", () => {
       const scope = `script-test-v2:${scriptId}`, request = commandInput ?? { versionId, draftRevision, input, ...(inputSources === undefined ? {} : { inputSources }) };
       const hmac = new CommandHmac(this, this.root, new KeyringStore(resolveKeyringPath(this.root)));
@@ -401,7 +402,7 @@ export class Store {
       check(version.scriptId === scriptId && (versionId ? version.status === "published" : version.status === "draft" && version.revision === draftRevision), "REVISION_CONFLICT", "脚本版本或草稿修订已变化", 409);
       const snapshot = this.scriptDefinition(scriptId, selected);
       const sources = normalizeScriptInputSources(inputSources, snapshot.inputSchema);
-      const captured = captureScriptInput(input, snapshot.inputSchema, sources);
+      const captured = forcePrivate ? { input: null, sources: {}, transient: true } : captureScriptInput(input, snapshot.inputSchema, sources);
       const preparedInput = this.prepareReference(captured.input), preparedSnapshot = this.prepareReference(snapshot);
       const dependencies = new DictionaryExecution(this);
       return configCoordinator(this).withAdmission(() => {
@@ -415,6 +416,7 @@ export class Store {
           const id = randomUUID(), now = Date.now();
           this.exec("INSERT INTO script_tests(id,script_id,script_version_id,draft_revision,status,input_ref,created_at) VALUES(?,?,?,?,'queued',?,?)", id, scriptId, versionId, draftRevision, inputRef, now);
           dependencies.save("test", id, admission.bindings);
+          if (!unified) this.onScriptTestAccepted?.(id, currentScript.name);
           dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
           return { id };
         };

@@ -1,4 +1,5 @@
-export const SCHEMA_VERSION = 11;
+import { sql as migrationSql } from "../migrations/frozen.js";
+export const SCHEMA_VERSION = 12;
 export const AGENT_MODEL_SCHEMA = `
 CREATE TABLE agent_model_configs (
  id TEXT PRIMARY KEY,
@@ -491,6 +492,7 @@ WHEN OLD.status='published'
 BEGIN SELECT RAISE(ABORT,'published script version is immutable'); END;
 ${DICTIONARY_SCHEMA}
 ${MIGRATE_V9_TO_V10}
+${migrationSql[11]}
 PRAGMA application_id = 1331110449;
 PRAGMA user_version = ${SCHEMA_VERSION};
 `;

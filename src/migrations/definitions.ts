@@ -6,6 +6,7 @@ import {verifyDatabase} from './validators.js';
 import {safe,writeJson} from './journal.js';
 import {migrateBridgeConfigV0,validateBridgeConfigV1} from './config.js';
 import {MigrationError,type MigrationDeclaration,type Step} from './types.js';
+import {applyQuickLaunchV12, verifyQuickLaunchV12} from './quick-launch-v12.js';
 import {applyWorkspaceV11} from './workspace-v11.js';
 export interface MigrationContext {database:DatabaseSync;root:string;sourceRoot:string;answers:Readonly<Record<string,unknown>>}
 export interface MigrationDefinition extends MigrationDeclaration {run(context:MigrationContext):void;validate(context:MigrationContext):void}
@@ -17,6 +18,7 @@ export function definitions():MigrationDefinition[]{return declarations.map(decl
     if(verifyDatabase(context.database,context.root,context.sourceRoot)!==declaration.from||!sql[declaration.from])throw new MigrationError('CHAIN_UNSUPPORTED');
     before=captureRows(context.database);
     if(declaration.id==='db.workspace-projection.v10-v11')applyWorkspaceV11(context.database,context.root);
+    else if(declaration.id==='db.quick-launch.v11-v12')applyQuickLaunchV12(context.database,context.root,sql[declaration.from]);
     else context.database.exec(sql[declaration.from]);
    }else if(declaration.id==='config.web-bridge.v0-v1'){
     const path=safe(context.root,'config/web-bridge.json');writeJson(path,migrateBridgeConfigV0(readFileSync(path,'utf8')));
@@ -26,6 +28,7 @@ export function definitions():MigrationDefinition[]{return declarations.map(decl
    if(declaration.kind==='database'){
     if(!before||verifyDatabase(context.database,context.root,context.sourceRoot)!==declaration.to)throw new MigrationError('DATABASE_CORRUPT');
     verifyMapping(context.database,before,declaration.from,declaration.to);
+    if(declaration.id==='db.quick-launch.v11-v12')verifyQuickLaunchV12(context.database,context.root);
    }else validateBridgeConfigV1(readFileSync(safe(context.root,'config/web-bridge.json'),'utf8'));
   },
  };

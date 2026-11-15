@@ -5,7 +5,7 @@ import { resolve, relative, isAbsolute } from 'node:path';
 const root=fileURLToPath(new URL('../',import.meta.url));
 export const manifestPath='docs/features/2026-11-06-data-migration/migration-manifest.json';
 export const historicalReleasePath='docs/features/2026-11-06-data-migration/release-v6.json';
-export const historicalReleasePaths=[historicalReleasePath,'docs/features/2026-11-06-data-migration/release-v9.json','docs/features/2026-11-06-data-migration/release-v10.json'];
+export const historicalReleasePaths=[historicalReleasePath,'docs/features/2026-11-06-data-migration/release-v9.json','docs/features/2026-11-06-data-migration/release-v10.json','docs/features/2026-11-06-data-migration/release-v11.json','docs/features/2026-11-06-data-migration/release-v12.json'];
 export function historicalReleases(){
  return historicalReleasePaths.filter(path=>existsSync(resolve(root,path))).map(path=>JSON.parse(resourceBytes(path)));
 }
@@ -70,7 +70,7 @@ export function checkManifest({requireReview=false}={}){
  }
  if(ids.size!==approved.entries.length)throw new Error('Release drops an approved migration ID');
  for(const entry of manifest.entries)for(const required of entry.requires)if(!ids.has(required))throw new Error(`Missing migration dependency: ${required}`);
- if(canonical(releaseFiles(approved.entries,manifest.schemaApproval))!==canonical(Object.keys(manifest.fileChecksums).sort())||[...allFiles].some(path=>!manifest.fileChecksums[path]))throw new Error('Incomplete local dependency lock');
+ if(canonical(releaseFiles(manifest.entries,manifest.schemaApproval))!==canonical(Object.keys(manifest.fileChecksums).sort())||[...allFiles].some(path=>!manifest.fileChecksums[path]))throw new Error('Incomplete local dependency lock');
  for(const path of Object.keys(manifest.fileChecksums))if(sha256(resourceBytes(path))!==manifest.fileChecksums[path])throw new Error(`Local dependency changed: ${path}`);
  if(contentDigest(manifest)!==manifest.contentDigest)throw new Error('Manifest content digest mismatch');
  if(sha256(resourceBytes('src/migrations/frozen.ts'))!==manifest.bundleChecksum)throw new Error('Generated migration bundle changed');

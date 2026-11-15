@@ -1,0 +1,47 @@
+.quick-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block: 12px; }
+.quick-toolbar label { display: flex; align-items: center; gap: 6px; }
+.quick-cards { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(240px,100%),1fr)); gap: 10px; }
+.quick-card { display: grid; grid-template-rows: 20px 18px 30px; align-content: center; gap: 4px; min-height: 105px; min-width: 0; padding: 8px 12px; }
+.quick-card-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; border: 0; background: transparent; font-weight: 600; color: inherit; cursor: pointer; min-width: 0; }
+.quick-card small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.quick-card > div, .quick-input-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.quick-form { display: grid; gap: 10px; }
+.quick-form label { display: grid; gap: 4px; }
+.quick-form input, .quick-form textarea, .quick-form select { min-width: 0; width: 100%; }
+.quick-editor { max-height: 90dvh; overflow: auto; }
+.quick-tree-list { padding-inline-start: 16px; margin: 0; list-style: none; }
+.quick-tree-list[role=tree] { max-height: 34vh; overflow: auto; }
+.quick-table { overflow: auto; }
+.quick-table table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.quick-table th, .quick-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.quick-json { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.quick-workspace { min-width: 0; }
+.quick-commandbar { gap: 6px; padding: 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; }
+.quick-commandbar > button:first-child { max-width: min(230px, 100%); overflow: hidden; }
+.quick-commandbar select, .quick-form input, .quick-form textarea, .quick-form select {
+  background: var(--card); color: var(--foreground); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px;
+}
+.quick-commandbar select { min-height: 30px; }
+.quick-search { flex: 1 1 195px; display: flex; align-items: center; gap: 7px; min-width: 0; padding: 0 8px; min-height: 30px; background: var(--card); color: var(--muted-foreground); border: 1px solid var(--border); border-radius: 6px; }
+.quick-search input { color: var(--foreground); width: 100%; min-width: 0; outline: none; }
+.quick-search:focus-within { border-color: var(--primary); }
+.quick-section-bar { display: flex; justify-content: space-between; align-items: center; padding: 4px 1px 9px; font-size: 12px; color: var(--muted-foreground); }
+.quick-section-bar span:first-child { display: flex; align-items: center; gap: 6px; color: var(--foreground); font-weight: 600; }
+.quick-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; grid-template-rows: 23px 16px 29px; gap: 3px; padding: 8px 10px; }
+.quick-card:hover, .quick-card:focus-within { border-color: var(--primary); }
+.quick-card .quick-card-title { justify-content: flex-start; }
+.quick-kind-icon { color: var(--primary); background: var(--primary-soft); padding: 4px; border-radius: 5px; display: inline-flex; flex: none; }
+.quick-card-name { padding: 0; }
+.quick-card small, .quick-state { color: var(--muted-foreground); font-size: 12px; }
+.quick-state[data-state=succeeded] { color: var(--success); }
+.quick-state[data-state=failed], .quick-state[data-state=start_failed] { color: var(--danger); }
+.quick-empty { display: grid; justify-items: center; align-content: center; gap: 10px; min-height: 150px; background: var(--surface-2); color: var(--muted-foreground); border: 1px dashed var(--border); border-radius: 8px; font-size: 13px; }
+.quick-form :is(input,select,textarea):focus-visible, .quick-card-name:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+@media (max-width: 560px) { .quick-search { flex-basis: 100%; order: -1; } .quick-commandbar { gap: 5px; } }
+.quick-editor[data-slot=dialog-content] { background-color: var(--card) !important; color: var(--foreground); }
+.quick-editor .quick-form { margin: 0; }
+.quick-editor .quick-form textarea { resize: vertical; }
+.quick-editor[data-slot=dialog-content] { width: min(520px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+.quick-detail [data-slot=dialog-title], .quick-detail [data-slot=dialog-description] { overflow-wrap: anywhere; }
+.quick-input-row > :is(button, code):first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

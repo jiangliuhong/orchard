@@ -1,3 +1,4 @@
+import "./features/quick-launch.css";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { MessageLayer } from "./components/ToastNotice";

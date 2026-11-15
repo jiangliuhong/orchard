@@ -19,6 +19,7 @@ import { executeScript, ScriptExecutionError } from "./script.js";
 import type { WebBridgeGateway } from "../web-bridge/gateway.js";
 
 export class GraphRunner {
+  onAccepted?: (id: string, name: string) => void;
   private current?: { id: string; controller: AbortController; job: Promise<void> };
   private closing = false;
   private enabled = false;
@@ -58,7 +59,7 @@ export class GraphRunner {
     for (const row of this.store.all<{ id: string }>("SELECT id FROM runs WHERE status IN ('queued','running','cancel_requested')")) this.track(row.id);
     this.enabled = true; this.wake();
   }
-  create(versionId: string, input: unknown, requestId: string) {
+  create(versionId: string, input: unknown, requestId: string, forcePrivate = false, unified = false) {
     return configCoordinator(this.store).withActivity("run:accept", () => {
       const scope = `run:${versionId}`;
       if (this.store.one("SELECT 1 FROM command_receipts WHERE scope IN (?,?) AND request_id=?", scope, `private-${scope}`, requestId)) {
@@ -72,7 +73,7 @@ export class GraphRunner {
       const version = this.store.version(versionId), definition = version.definition;
       assertSchema(input, definition.inputSchema, "工作流输入");
       this.store.assertWorkflowScripts(definition, true);
-      const privateInput = this.privateHistory(definition);
+      const privateInput = forcePrivate || this.privateHistory(definition);
       const inputRef = this.store.prepareReference(privateInput ? REDACTED : input), dependencies = new DictionaryExecution(this.store);
       const requirements = this.dictionaryRequirements(definition);
       return configCoordinator(this.store).withAdmission(() => {
@@ -88,6 +89,7 @@ export class GraphRunner {
           gitProjects(this.store).pin(id, definition);
           dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
           this.store.append("run", id, "run.queued", { versionId });
+          if (!unified) this.onAccepted?.(id, definition.name);
           return { id };
         }, privateInput);
         const run = this.store.run(result.id);
@@ -142,6 +144,7 @@ export class GraphRunner {
         gitProjects(this.store).pin(id, definition);
         dependencies.assertFingerprint(admission.fingerprint, requirements.some(r => r.kind === "encrypted"));
         this.store.append("run", id, "run.queued", { draftId, draftRevision: revision });
+        this.onAccepted?.(id, definition.name);
         return { id };
       }, privateInput);
       const run = this.store.run(result.id);
@@ -256,7 +259,7 @@ export class GraphRunner {
           output = route; next = edge.to;
         } else {
           const result = node.type === "web-bridge"
-            ? await this.webBridgeCall(node, value, signal, sensitive, (dictionaryId, key) => {
+            ? await this.webBridgeCall(id, node, value, signal, sensitive, (dictionaryId, key) => {
                 const credential = dictionaries.value(dictionaryId, key);
                 check(typeof credential === "string", "CREDENTIAL_UNAVAILABLE", "凭据字典键必须为字符串");
                 return credential;
@@ -357,9 +360,11 @@ export class GraphRunner {
       throw new AppError(error instanceof AppError ? error.code : "PROJECT_ANALYSIS_FAILED", "项目分析失败，请检查 Provider 状态或输出 Schema");
     } finally { clearTimeout(timer); await prepared?.cleanup(); }
   }
-  private async webBridgeCall(node: WorkflowNode, input: unknown, signal: AbortSignal, sensitive: boolean, resolveCredential: CredentialResolver) {
+  private async webBridgeCall(runId: string, node: WorkflowNode, input: unknown, signal: AbortSignal, sensitive: boolean, resolveCredential: CredentialResolver) {
     check(this.webBridge, "BROWSER_NOT_CONNECTED", "Web Bridge 未配置");
-    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs, environmentId: node.config.environmentId, credentialBindings: node.config.credentialBindings, resolveCredential, omitHistoryArgs: sensitive });
+    const parent = this.store.one<{ id: string }>("SELECT name FROM sqlite_schema WHERE name='execution_records'") ?
+      this.store.one<{ id: string }>("SELECT id FROM execution_records WHERE underlying_kind='workflow_run' AND underlying_id=?", runId) : undefined;
+    const output = await this.webBridge.call(node.config.application!, node.config.tool!, input, { signal, timeoutMs: node.config.timeoutMs, environmentId: node.config.environmentId, credentialBindings: node.config.credentialBindings, resolveCredential, omitHistoryArgs: sensitive, parentExecutionId: parent?.id });
     assertSchema(output, node.outputSchema, `${node.id} Web Bridge 输出`);
     return { output, execution: { application: node.config.application, tool: node.config.tool, resultMode: node.config.resultMode ?? "result" } };
   }
