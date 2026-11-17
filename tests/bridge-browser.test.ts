@@ -216,3 +216,32 @@ test("HTTP browser channel executes reviewed actions only after confirmation, is
     else assert.deepEqual(result.json(), { items: [1, null, { ok: true }], product: "p" });
   }
 });
+
+test("browser tool resolves dictionary defaults before validating and dispatching arguments", async t => {
+  const { store, providers } = setup(t), { app, bridge } = createApp(store, providers);
+  await app.ready(); t.after(() => app.close());
+  const dictionary = await app.inject({ method: "POST", url: "/api/dictionaries", payload: {
+    requestId: "browser-default", kind: "plain", enabled: true, name: "Browser defaults", description: "",
+    operations: [{ op: "set", key: "country", type: "string", value: "MX" }],
+  } });
+  assert.equal(dictionary.statusCode, 201);
+  bridge.saveApplication({ id: "defaults", name: "Defaults" });
+  bridge.saveEnvironment("defaults", { origin: "https://defaults.test", profileId: "work" });
+  bridge.saveTool({
+    ...defaults, method: "POST", toolId: "sample", application: "defaults", site: "defaults",
+    description: "Example", fields: [], risk: "read", approval: "none", timeoutMs: 5000, catalogVersion: "1",
+    parameters: { type: "object", required: ["country"], properties: { country: {
+      type: "string", "x-dictionary-default": { dictionaryId: dictionary.json().dictionaryId, key: "country" },
+    } } },
+    execution: { ...execution, preprocess: { runtime: "nodejs", code: "return {...request, headers: {}, body: JSON.stringify(args)};" } },
+  });
+  const response = t.mock.method(bridge.browserChannel, "call", async (_profile: string, payload: unknown) => payload);
+  for (const [args, country] of [[{}, "MX"], [{ country: "BR" }, "BR"]] as const) {
+    const result = await app.inject({ method: "POST", url: "/api/web-bridge/calls", payload: { application: "defaults", tool: "sample", args } });
+    assert.equal(result.statusCode, 200, result.body);
+    assert.deepEqual(JSON.parse(result.json().request.body), { country });
+  }
+  const invalid = await app.inject({ method: "POST", url: "/api/web-bridge/calls", payload: { application: "defaults", tool: "sample", args: { country: null } } });
+  assert.equal(invalid.json().code, "SCHEMA_MISMATCH");
+  assert.equal(response.mock.callCount(), 2);
+});

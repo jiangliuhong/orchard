@@ -39,3 +39,5 @@ orchard web-bridge uninstall --data-dir /path/to/data
 卸载仅删除与当前数据目录匹配的 Native Host manifest 和 launcher，保留扩展、浏览器权限及业务数据。不识别的安装或其他数据目录绑定会明确报冲突。
 
 工具参数、调用时凭据、响应处理及风险确认见[执行说明](../../features/2026-11-06-web-browser-bridge/browser-scripts.md)和[调用凭据](../../features/2026-11-06-web-browser-bridge/call-credentials.md)。编码交付与验证限制见[实施状态](../../features/2026-11-06-web-browser-bridge/implementation-status.md)。
+
+浏览器执行支持独立查询参数，以及在同一个已登录页签内运行多步请求。工具可以在链内提取 CSRF 等保护值并传给后续请求头，GET 轮询受尝试次数和调用期限限制。升级 Orchard 后请同步更新并重新加载浏览器扩展。

@@ -898,9 +898,14 @@ summary { cursor: pointer; }
 .bridge-json-section > summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .bridge-json-section textarea { field-sizing: fixed; min-height: 80px; max-height: 280px; overflow: auto; resize: vertical; margin-top: 8px; font-size: 12px; line-height: 1.6; }
 .bridge-test, .bridge-review, .bridge-environments, .bridge-settings { display: flex; flex-direction: column; gap: 12px; }
-.bridge-environments > button, .bridge-settings > button, .bridge-review > button { align-self: flex-start; }
-.bridge-environments select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; background: var(--card); font: inherit; color: var(--foreground); }
+.bridge-settings > button, .bridge-review > button { align-self: flex-start; }
+.bridge-environment-dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; }
+.bridge-environment-form { display: grid; gap: 12px; min-width: 0; }
+.bridge-environment-form .field { margin: 0; }
+.bridge-environment-form [data-slot=dialog-footer] { flex-direction: row; justify-content: flex-end; }
+.bridge-environment-form select { width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; background: var(--card); font: inherit; color: var(--foreground); }
 .bridge-environment { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px; border: 1px solid var(--border-soft); border-radius: 7px; }
+.bridge-environment > .actions { flex-shrink: 0; }
 .bridge-environment p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 11px; }
 .bridge-environment strong { overflow-wrap: anywhere; }
 .bridge-test { min-width: 0; }
@@ -1247,3 +1252,25 @@ button.bridge-history-row:focus-visible, .bridge-history-detail :is(summary, pre
   background-color: var(--card);
   color: var(--foreground);
 }
+
+.input-dictionary-defaults { min-width: 0; padding-block: 6px; }
+.input-dictionary-defaults > summary { cursor: pointer; }
+.input-dictionary-defaults .bridge-parameter-row { align-items: center; margin-block: 6px; }
+.input-dictionary-defaults .script-parameter-inline { min-width: 0; }
+
+.agent-access-settings { display: grid; gap: 12px; }
+.agent-access-settings > .panel { min-width: 0; display: grid; gap: 10px; padding: 14px; }
+.agent-access-settings h2, .agent-access-settings p { margin: 0; }
+.agent-access-settings h2 { font-size: 14px; }
+.agent-access-settings > .panel > button { justify-self: start; }
+.agent-access-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.agent-access-actions label { display: inline-flex; align-items: center; gap: 6px; }
+.agent-access-search { width: min(100%, 300px); font: inherit; background: var(--background); color: inherit; border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; }
+.agent-access-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.agent-access-table th, .agent-access-table td { border-bottom: 1px solid var(--border); padding: 6px; text-align: left; }
+.agent-access-table th { font-weight: 500; }
+.agent-access-table th:not(:first-child), .agent-access-table td { text-align: center; width: 68px; }
+.agent-access-card-name { display: block; overflow-wrap: anywhere; }
+.agent-access-stale { display: block; }
+.agent-access-config { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 5px; }
+.agent-access-config pre { margin: 0; padding: 3px; min-width: 0; overflow-x: auto; font-size: 12px; }

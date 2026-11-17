@@ -31,7 +31,7 @@ export interface DictionaryWriteResult {
 export interface DictionaryReferences {
   /** 按对象去重的键引用计数。 */
   scan?(dictionaryId: string): import("./references.js").ReferenceScan;
-  keyReferences(dictionaryId: string, keys: string[]): { key: string; workflows: number; scripts: number; quickLaunches?: number }[];
+  keyReferences(dictionaryId: string, keys: string[]): { key: string; workflows: number; scripts: number; quickLaunches?: number; browserTools?: number }[];
 }
 
 
@@ -176,9 +176,9 @@ export class DictionaryService {
       check(permanent ? row.deleted_at !== null : row.deleted_at === null, "DICTIONARY_DELETE_STATE", permanent ? "请先将字典移入已删除列表" : "字典已删除", 409);
       if (permanent) check(input.confirmationName === row.name, "CONFIRMATION_REQUIRED", "请输入完整字典名称以确认彻底删除", 409);
       const scan = new DictionaryReferenceScanner(this.store).scan(id);
-      check(scan.complete, "REFERENCE_SCAN_INCOMPLETE", "引用扫描不完整，请修复不可读取的工作流或脚本后重试", 409);
+      check(scan.complete, "REFERENCE_SCAN_INCOMPLETE", "引用扫描不完整，请修复不可读取的相关配置后重试", 409);
       check(!scan.items.some(item => permanent || item.state !== "history"), "DICTIONARY_REFERENCED",
-        permanent ? "仍有当前或历史工作流、脚本引用，无法彻底删除" : "仍有当前工作流、草稿或脚本引用，请先移除引用", 409);
+        permanent ? "仍有当前或历史引用，无法彻底删除" : "仍有当前引用，请先移除引用", 409);
       if (permanent) {
         check(!this.store.one("SELECT 1 FROM run_dictionary_bindings WHERE dictionary_id=? LIMIT 1", id)
           && !this.store.one("SELECT 1 FROM script_test_dictionary_bindings WHERE dictionary_id=? LIMIT 1", id),
@@ -289,7 +289,7 @@ export class DictionaryService {
   private requireRemovalConfirmation(id: string, input: { confirmationToken?: string; expectedRevision: number; name?: string; description?: string; enabled?: boolean; operations: unknown }, targetRevision: number, operations: DictionaryOperation[]): void {
     const removedKeys = operations.filter(operation => operation.op === "remove").map(operation => operation.key);
     if (removedKeys.length === 0) return;
-    const impacts = this.references.keyReferences(id, removedKeys).filter(impact => impact.workflows > 0 || impact.scripts > 0 || (impact.quickLaunches ?? 0) > 0);
+    const impacts = this.references.keyReferences(id, removedKeys).filter(impact => impact.workflows > 0 || impact.scripts > 0 || (impact.quickLaunches ?? 0) > 0 || (impact.browserTools ?? 0) > 0);
     const scan = this.references.scan?.(id);
     if (impacts.length === 0 && (!scan || scan.complete)) return;
     const business = { dictionaryId: id, expectedRevision: input.expectedRevision, name: input.name ?? null, description: input.description ?? null, enabled: input.enabled ?? null, operations: input.operations };

@@ -174,14 +174,25 @@ export class PlatformQueryGateway {
   }
 }
 
-/** Conservative deny policy, matching the existing configuration-diff policy.
- * False positives are explicit failures, never silently 'complete' redacted source.
- * Known values must be supplied by the local host, not by the model.
- */
+// Match credential values in recognizable literals. Names, schema declarations and
+// ordinary prose can describe credential handling without containing a credential.
+const credentialLiteral = /\b(?:encryptedValue|api[_-]?key|password|passwd|secret|authorization|private[_-]?key|access[_-]?token|refresh[_-]?token|token)(?:\\*["'])?\s*[:=]\s*\\*(?:"[^"\r\n]+"|'[^'\r\n]+')|\bbearer[ \t]+(?=[a-z0-9._~+/-]*[0-9._~+/-])[a-z0-9._~+/-]{12,}={0,2}(?![a-z0-9._~+/-])|-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)|https?:\/\/[^\s/"'<>]+:[^\s/"'<>]+@/gi;
+
+function protectedValues(values: readonly string[]) {
+  return [...new Set(values.flatMap(value => value ? [value, JSON.stringify(value).slice(1, -1)] : []))]
+    .sort((left, right) => right.length - left.length);
+}
+
+export function redactQueryText(text: string, knownSecrets: readonly string[]): string {
+  const marker = "[已隐藏]";
+  const redacted = text.replace(credentialLiteral, marker);
+  return protectedValues(knownSecrets).reduce((result, value) => result.replaceAll(value, marker), redacted);
+}
+
 export function assertQuerySafe(value: unknown, knownSecrets: readonly string[] = []): void {
-  const text = canonicalJson(value);
-  check(!/(?:encryptedValue|api[_-]?key|password|passwd|secret|authorization|bearer\s|private[_-]?key|access[_-]?token|refresh[_-]?token|["']?token["']?\s*[:=]|https?:\/\/[^\s/]+:[^\s/]+@)/i.test(text) &&
-    !knownSecrets.some(secret => secret.length > 0 && (text.includes(secret) || text.includes(JSON.stringify(secret).slice(1, -1)))), "QUERY_SENSITIVE_CONTENT", "查询结果可能包含敏感内容，已阻止返回", 403);
+  const text = typeof value === "string" ? value : canonicalJson(value);
+  check(!text.match(credentialLiteral) && !protectedValues(knownSecrets).some(secret => text.includes(secret)),
+    "QUERY_SENSITIVE_CONTENT", "查询结果可能包含敏感内容，已阻止返回", 403);
 }
 
 // Keep the public tool contract aligned with the packaged declaration.

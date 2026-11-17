@@ -1,3 +1,4 @@
+import { BROWSER_REQUEST_AUTHORING_GUIDANCE } from "../web-bridge/browser-execution.js";
 import { fileURLToPath } from "node:url";
 import { isModelEnabled } from "../domain/models.js";
 import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
@@ -28,6 +29,9 @@ import type { MaintenanceTarget } from "./maintenance-protocol.js";
 import { workflowProjectionIdentity } from "./workspace-identity.js";
 import { MaintenanceToolGateway } from "./maintenance-tools.js";
 import { MaintenanceService } from "./maintenance-service.js";
+import { assertNoMaintenanceTask } from "./workspace-business-hooks.js";
+import { markWorkspaceDirty, projectionState } from "./workspace-state.js";
+import { configCoordinator } from "../config-git/coordinator.js";
 
 const localActor = "local";
 
@@ -156,6 +160,14 @@ export function createProductionMaintenance(store: Store, providers: () => Provi
       host.recover(sessions);
       // A queued task has never acquired a process or tool capability.
       store.exec("UPDATE agent_maintenance_tasks SET status='interrupted',ended_at=? WHERE status='queued' AND process_state='absent'", Date.now());
+      configCoordinator(store).withRecovery(() => store.transaction(() => {
+        store.directoryLease.assert();
+        assertNoMaintenanceTask(store);
+        if (projectionState(store).target_knowledge_hash === bundle.hash) return;
+        // Keep the last synced identity so the installer can replace its owned projection.
+        markWorkspaceDirty(store);
+        store.exec("UPDATE agent_workspace_projection_state SET target_knowledge_hash=? WHERE id='maintenance'", bundle.hash);
+      }));
     },
     tasks: {
       start(actor, kind, owner, input) {
@@ -200,6 +212,7 @@ export function createProductionMaintenance(store: Store, providers: () => Provi
                 "Use mcp__orchard__submit_proposal to propose changes. Do not apply them. The user will review the proposal. Report a proposal as submitted only after the tool returns a proposalId.",
                 "Use the exact target and baseline below. Do not include credentials or host paths.",
                 ...(claim.target.kind === "workflow_draft" ? workflowRepairModelContext(providers(), [...knownSecrets(), store.root, homedir()]) : []),
+                ...(claim.target.kind === "browser_application" ? [BROWSER_REQUEST_AUTHORING_GUIDANCE] : []),
                 canonicalJson({ target: claim.target, baseline: claim.baseline }), "User request:", claim.input.prompt,
               ].join("\n");
               sessions.recordDisplay(claim.handle, await runMaintenancePiTurn(pi, config.model, prompt, signal, {

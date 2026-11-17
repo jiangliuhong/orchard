@@ -1,6 +1,6 @@
 ---
 name: workflow-authoring
-description: Maintain the fixed Orchard workflow draft using authorized read-only asset queries and revision-bound proposals.
+description: Read the Orchard maintenance workspace and submit proposals for the fixed target.
 ---
 
-遵守工作区 AGENTS.md 与 docs/workflow.md。先查询 current.get，不从原生历史推断最新草稿。跨资源查询只读，不改变提案目标。返回宿主 Schema 要求的完整文件提案和查询基线；不得执行、发布、写工作区或重建历史。
+遵守工作区 AGENTS.md 与 docs/workflow.md。先用只读工具按 project.json 定位当前对象。遵守提交工具的参数 Schema，使用宿主提供的 target 和 baseline。

@@ -1,3 +1,4 @@
+import { dictionaryDefaultKeyword } from "./input-defaults.js";
 import Ajv from "ajv";
 import { WORKFLOW_CREDENTIAL_BINDINGS_SCHEMA } from "../web-bridge/credential-inputs.js";
 import { dictionaryBindingsSchema, dictionaryIdSchema, dictionaryKeySchema, normalizeDictionaryBindings } from "./dictionaries.js";
@@ -24,6 +25,13 @@ ajv.addKeyword({
 ajv.addKeyword({
   keyword: "x-history", schemaType: "object", valid: true,
   metaSchema: { type: "object", required: ["record"], additionalProperties: false, properties: { record: { type: "boolean" } } },
+});
+ajv.addKeyword({
+  keyword: dictionaryDefaultKeyword, schemaType: "object", valid: true,
+  metaSchema: {
+    type: "object", required: ["dictionaryId", "key"], additionalProperties: false,
+    properties: { dictionaryId: dictionaryIdSchema, key: dictionaryKeySchema },
+  },
 });
 const schemaValue = { anyOf: [{ type: "boolean" }, { type: "object" }] };
 const bindingSchema = {
@@ -68,7 +76,12 @@ function validateConfig(node: WorkflowNode) {
   assertSchema(node.config, { type: "object", required, properties, additionalProperties: false }, `${node.id} 配置`);
   normalizeDictionaryBindings(node.config.dictionaryBindings);
 }
-export function assertSchema(value: unknown, schema: JsonSchema, context = "值") {
+// Only opt in for platform-owned schemas. Paths identify schema rules, never
+// instance keys, submitted values, or raw validator messages.
+export class SafeSchemaMismatch extends AppError {
+  constructor(readonly paths: string[]) { super("SCHEMA_MISMATCH", "参数不符合维护工具 Schema"); }
+}
+export function assertSchema(value: unknown, schema: JsonSchema, context = "值", options?: { safeSchemaPath: boolean }) {
   let validate;
   try {
     check(typeof schema === "boolean" || schema !== null && typeof schema === "object" && !Array.isArray(schema), "INVALID_SCHEMA", `${context} Schema 必须为对象或布尔值`);
@@ -76,7 +89,16 @@ export function assertSchema(value: unknown, schema: JsonSchema, context = "值"
     check(!encoded.includes('"$async"') && !encoded.includes('"$data"'), "INVALID_SCHEMA", "不支持异步或动态 Schema");
     validate = ajv.compile(schema);
   } catch (error) { throw new AppError("INVALID_SCHEMA", `${context}: ${error instanceof Error ? error.message : String(error)}`); }
-  if (!validate(value)) throw new AppError("SCHEMA_MISMATCH", `${context}: ${ajv.errorsText(validate.errors)}`);
+  if (!validate(value)) {
+    if (options?.safeSchemaPath) {
+      const errors = validate.errors ?? [];
+      const paths = errors.map(error => error.keyword === "required"
+        ? error.schemaPath.replace(/required$/, `properties/${error.params.missingProperty}/required`)
+        : error.schemaPath);
+      throw new SafeSchemaMismatch([...new Set(paths)].slice(0, 5));
+    }
+    throw new AppError("SCHEMA_MISMATCH", `${context}: ${ajv.errorsText(validate.errors)}`);
+  }
 }
 export function pointer(value: unknown, path = ""): unknown {
   check(path === "" || path.startsWith("/") && !/~(?![01])/.test(path), "INVALID_BINDING", `JSON Pointer 无效: ${path}`);

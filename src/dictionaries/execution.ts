@@ -1,7 +1,8 @@
+import { applyInputDefaults } from "../domain/input-defaults.js";
 import { AppError, check, failure } from "../domain/errors.js";
 import { normalizeDictionaryBindings, type DictionaryBindings, type DictionaryDeclaration, type DictionaryRequirement } from "../domain/dictionaries.js";
 import { assertSchema, resolveBinding, pointer, walkBindings } from "../domain/validation.js";
-import type { Binding, Workflow } from "../domain/types.js";
+import type { Binding, JsonSchema, Workflow } from "../domain/types.js";
 import type { Store } from "../persistence/store.js";
 import { KeyringStore, resolveKeyringPath } from "../secrets/keyring.js";
 import { decryptValue } from "../secrets/aead.js";
@@ -77,6 +78,13 @@ export class DictionaryExecution {
     }
     return result;
   }
+  readCurrentPlain = (dictionaryId: string, key: string): unknown => {
+    const row = this.store.one<VersionRow>("SELECT v.* FROM dictionaries d JOIN dictionary_versions v ON v.dictionary_id=d.id AND v.id=d.current_version_id WHERE d.id=? AND d.deleted_at IS NULL", dictionaryId);
+    check(row, "DICTIONARY_NOT_FOUND", "默认值字典不存在", 422);
+    check(row.kind === "plain", "SECRET_BINDING_FORBIDDEN", "默认值只能引用普通字典", 422);
+    check(row.enabled === 1, "DICTIONARY_DISABLED", "默认值字典已禁用", 422);
+    return this.values(row, [key], new Map()).get(key);
+  };
   /** Caller uses the coordinator admission/write window. All checks are synchronous. */
   validate(requirements: readonly DictionaryDeclaration[]): { bindings: FixedDictionary[]; fingerprint: string | null } {
     const keys = this.keys(requirements.some(r => r.kind === "encrypted")), bindings: FixedDictionary[] = [];
@@ -135,7 +143,8 @@ export class DictionaryExecution {
     };
   }
   /** Validate pointers without evaluating a node or upstream data. */
-  validatePointers(workflow: Workflow, bindings: readonly FixedDictionary[], input?: unknown) {
+  validatePointers(workflow: Workflow, bindings: readonly FixedDictionary[], input?: unknown, bridgeSchema?: (application: string, tool: string) => JsonSchema | undefined) {
+
     if (!bindings.length) return;
     const values = new Map<string, DictionaryEntries>();
     for (const binding of bindings.filter(b => b.kind === "plain")) {
@@ -155,9 +164,11 @@ export class DictionaryExecution {
       let upstream = false;
       walkBindings(node.input, b => { if (b.source === "node") upstream = true; });
       if (!upstream) {
-        const value = resolveBinding(node.input, input, new Map(), get);
+        const schema = node.type === "script" ? this.store.scriptVersion(node.config.scriptVersionId!).inputSchema
+          : node.type === "web-bridge" ? bridgeSchema?.(node.config.application!, node.config.tool!) : undefined;
+        const value = applyInputDefaults(resolveBinding(node.input, input, new Map(), get), schema ?? true, this.readCurrentPlain);
         assertSchema(value, node.inputSchema ?? true, "节点输入");
-        if (node.type === "script") assertSchema(value, this.store.scriptVersion(node.config.scriptVersionId!).inputSchema, "脚本输入");
+        if (node.type === "script") assertSchema(value, schema!, "脚本输入");
       }
     }
     inspect(workflow.result);

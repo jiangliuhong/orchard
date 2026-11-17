@@ -1,3 +1,4 @@
+import { unresolvedInputSchema } from "./input-defaults.js";
 import { dictionaryBindingsSchema } from "./dictionaries.js";
 import { check } from "./errors.js";
 import { assertSchema } from "./validation.js";
@@ -43,6 +44,6 @@ export function prepareScriptProposal(definition: ScriptDefinition, value: unkno
     }
   }
   const next = validateScript({ ...definition, ...proposal.metadata, files });
-  if (Object.hasOwn(proposal, "testInput")) assertSchema(proposal.testInput, next.inputSchema, "Agent 测试输入");
+  if (Object.hasOwn(proposal, "testInput")) assertSchema(proposal.testInput, unresolvedInputSchema(next.inputSchema, proposal.testInput), "Agent 测试输入");
   return { proposal, definition: next };
 }

@@ -1,3 +1,4 @@
+import { inputDictionaryDefaults } from "../domain/input-defaults.js";
 import { check } from "../domain/errors.js";
 import { normalizeDictionaryBindings, workflowDictionaryRequirements, workflowDictionarySensitivity, type DictionaryDeclaration } from "../domain/dictionaries.js";
 import { pointer, walkBindings } from "../domain/validation.js";
@@ -18,7 +19,10 @@ export function validateDictionaryRequirements(store: Store, requirements: reado
   }
 }
 export function validateScriptDictionaries(store: Store, definition: ScriptDefinition): void {
-  validateDictionaryRequirements(store, Object.values(normalizeDictionaryBindings(definition.dictionaryBindings) ?? {}));
+  validateDictionaryRequirements(store, [
+    ...Object.values(normalizeDictionaryBindings(definition.dictionaryBindings) ?? {}),
+    ...inputDictionaryDefaults(definition.inputSchema).map(([, ref]) => ({ dictionaryId: ref.dictionaryId, kind: "plain" as const, keys: [ref.key] })),
+  ]);
 }
 export function validateWorkflowDictionaries(store: Store, workflow: Workflow) {
   const resolve = (id: string, versionId: string) => {

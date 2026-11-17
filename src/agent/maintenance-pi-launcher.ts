@@ -90,7 +90,7 @@ export async function launchMaintenancePi(options: LaunchOptions, session?: Nati
       entry: piEntry, cwd: options.workspace, env, privatePipes: 3,
       args: ["--mode", "rpc", "--no-approve", ...sessionArgs, "--no-extensions", "--no-mcp", "--no-skills",
         "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "-e", extension,
-        ...(options.model ? ["--model", options.model, "--thinking", "off"] : ["--offline"])],
+        ...(options.model ? ["--model", options.model] : ["--offline"])],
     });
     const [readerBootstrap, mcpRequests, mcpReplies] = pi.privatePipes;
     mcpReplies!.on("error", () => { void bridge.close(); });

@@ -1,3 +1,4 @@
+import { unresolvedInputSchema } from "../domain/input-defaults.js";
 import { check } from "../domain/errors.js";
 import type { JsonSchema } from "../domain/types.js";
 import { assertSchema } from "../domain/validation.js";
@@ -114,7 +115,7 @@ export function checkInput(input: unknown, sources: unknown, schema: JsonSchema)
   const privacySchema = protect(schema) as JsonSchema;
   const captured = captureHistory(input, privacySchema);
   check(!Object.values(captured.sources).some(source => source.source === "omitted"), "SENSITIVE_INPUT", "敏感字段必须使用引用");
-  if (!Object.keys(inputSources).length) assertSchema(input, schema, "运行参数");
+  if (!Object.keys(inputSources).length) assertSchema(input, unresolvedInputSchema(schema, input), "运行参数");
   return inputSources;
 }
 

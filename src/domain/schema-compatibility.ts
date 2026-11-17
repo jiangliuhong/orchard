@@ -1,3 +1,4 @@
+import { dictionaryDefaultKeyword } from "./input-defaults.js";
 import { assertSchema, pointer } from "./validation.js";
 import type { Binding, JsonSchema, Workflow } from "./types.js";
 
@@ -9,7 +10,7 @@ export function schemaSubset(source: JsonSchema, target: JsonSchema, depth = 0):
   if (depth > 30) return "unknown";
   if (source === false || target === true || JSON.stringify(source) === JSON.stringify(target)) return "compatible";
   if (target === false) return "incompatible";
-  if (source === true) return Object.keys(target).some(key => !["title", "description", "default", "examples", "$schema", "$id"].includes(key)) ? "unknown" : "compatible";
+  if (source === true) return Object.keys(target).some(key => ![dictionaryDefaultKeyword, "title", "description", "default", "examples", "$schema", "$id"].includes(key)) ? "unknown" : "compatible";
   const choices = Object.hasOwn(source, "const") ? [source.const] : Array.isArray(source.enum) ? source.enum : undefined;
   if (choices) {
     const possible = choices.filter(value => { try { assertSchema(value, source); return true; } catch { return false; } });
@@ -52,7 +53,7 @@ export function schemaSubset(source: JsonSchema, target: JsonSchema, depth = 0):
     if (Array.isArray(source.items) || Array.isArray(target.items)) results.push("unknown");
     else results.push(schemaSubset((source.items ?? true) as JsonSchema, target.items as JsonSchema, depth + 1));
   }
-  const handled = new Set(["type", "title", "description", "default", "examples", "$schema", "$id", "properties", "required", "additionalProperties", "items", "minimum", "exclusiveMinimum", "minLength", "minItems", "minProperties", "maximum", "exclusiveMaximum", "maxLength", "maxItems", "maxProperties", "pattern", "format", "multipleOf", "uniqueItems"]);
+  const handled = new Set([dictionaryDefaultKeyword, "type", "title", "description", "default", "examples", "$schema", "$id", "properties", "required", "additionalProperties", "items", "minimum", "exclusiveMinimum", "minLength", "minItems", "minProperties", "maximum", "exclusiveMaximum", "maxLength", "maxItems", "maxProperties", "pattern", "format", "multipleOf", "uniqueItems"]);
   if (Object.keys(target).some(key => !handled.has(key))) results.push("unknown");
   return merge(results);
 }

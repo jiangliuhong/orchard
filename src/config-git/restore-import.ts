@@ -1,3 +1,4 @@
+import { unresolvedInputSchema } from "../domain/input-defaults.js";
 import { exportDictionaries, prepareDictionaries, importDictionaries, dictionaryChanged, dictionaryFingerprint, validateDictionaries, validateDictionaryPointers, requirements, authenticateDictionary } from "./dictionaries.js";
 import { workflowDictionarySensitivity } from "../domain/dictionaries.js";
 import { randomUUID } from "node:crypto";
@@ -243,7 +244,7 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     for (const node of workflow.nodes) {
       if (node.type === "script") {
         const definition = scriptDefinition(node.config.scriptId!, node.config.scriptVersionId!);
-        check(schemaSubset(bindingSchema(node.input, workflow), definition.inputSchema) !== "incompatible" && schemaSubset(node.outputSchema, definition.outputSchema) !== "incompatible" && (node.inputSchema === undefined || schemaSubset(node.inputSchema, definition.inputSchema) !== "incompatible"), "SCRIPT_CONTRACT_MISMATCH", `脚本契约不匹配: ${node.id}`);
+        check(schemaSubset(bindingSchema(node.input, workflow), unresolvedInputSchema(definition.inputSchema, {})) !== "incompatible" && schemaSubset(node.outputSchema, definition.outputSchema) !== "incompatible" && (node.inputSchema === undefined || schemaSubset(node.inputSchema, unresolvedInputSchema(definition.inputSchema, {})) !== "incompatible"), "SCRIPT_CONTRACT_MISMATCH", `脚本契约不匹配: ${node.id}`);
       }
       if (node.type === "agent") {
         const configId = node.config.agentConfigId ?? workflow.defaults?.agent?.agentConfigId;

@@ -1,3 +1,4 @@
+import { applyInputDefaults } from "../domain/input-defaults.js";
 import { privateWorkflowHistory } from "./workflow-history.js";
 import type { DictionaryRequirement } from "../domain/dictionaries.js";
 import type { CredentialResolver } from "../web-bridge/execution.js";
@@ -28,6 +29,8 @@ export class GraphRunner {
     return privateWorkflowHistory(workflow, (id, version) => this.store.scriptDefinition(id, version),
       (application, tool) => this.webBridge?.tools(application).find(item => item.toolId === tool)?.parameters);
   }
+  private bridgeInputSchema = (application: string, toolId: string) =>
+    this.webBridge?.tools(application).find(tool => tool.toolId === toolId)?.parameters;
   private dictionaryRequirements(workflow: Workflow, runId?: string): DictionaryRequirement[] {
     const requirements = new Map(workflowDictionaryRequirements(workflow, (id, version) => this.store.scriptDefinition(id, version)).map(r => [r.dictionaryId, r]));
     const fixed = runId ? new DictionaryExecution(this.store).metadata("run", runId) : undefined;
@@ -79,7 +82,7 @@ export class GraphRunner {
       return configCoordinator(this.store).withAdmission(() => {
         const result = this.store.workflowRunCommand(scope, requestId, input, () => {
           const admission = dependencies.validate(requirements);
-          dependencies.validatePointers(definition, admission.bindings, input);
+          dependencies.validatePointers(definition, admission.bindings, input, this.bridgeInputSchema);
           const bindings = this.providers.modelConfigs.resolveWorkflow(definition);
           for (const node of definition.nodes) if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
           const id = randomUUID(), now = Date.now();
@@ -132,7 +135,7 @@ export class GraphRunner {
         this.editableDraft(draftId, revision);
         this.store.assertWorkflowScripts(definition);
         const admission = dependencies.validate(requirements);
-        dependencies.validatePointers(definition, admission.bindings, input);
+        dependencies.validatePointers(definition, admission.bindings, input, this.bridgeInputSchema);
         const bindings = this.providers.modelConfigs.resolveWorkflow(definition);
         for (const node of definition.nodes) {
           if (node.type === "web-bridge") check(this.webBridge?.tools(node.config.application).some(tool => tool.toolId === node.config.tool), "UNKNOWN_TOOL", `未知浏览器工具: ${node.config.application}/${node.config.tool}`);
@@ -218,7 +221,8 @@ export class GraphRunner {
       if (privateInput) { workflow.nodes.forEach(node => policy.nodes.add(node.id)); policy.output = true; }
       const requirements = this.dictionaryRequirements(workflow, id);
       const declarations = nodeDictionaryBindings(workflow, resolveScript);
-      const dictionaries = new DictionaryExecution(this.store).load("run", id, requirements);
+      const dependencies = new DictionaryExecution(this.store);
+      const dictionaries = dependencies.load("run", id, requirements);
       sensitiveFailure = privateInput;
       const bindings = new Map(this.providers.modelConfigs.bindings(id).map(binding => [binding.nodeId, binding]));
       for (const node of workflow.nodes) if (node.type === "agent") check(bindings.has(node.id), "AGENT_BINDING_MISSING", `${node.name} 缺少运行模型绑定`);
@@ -236,7 +240,11 @@ export class GraphRunner {
         const sensitive = policy.nodes.has(node.id);
         sensitiveFailure = sensitive;
         active = this.store.nodes(id).find(n => n.nodeId === node.id)!; attemptId = randomUUID();
-        const value = resolveBinding(node.input, input, outputs, dictionaries.plain);
+        const boundInput = resolveBinding(node.input, input, outputs, dictionaries.plain);
+        const defaultSchema = node.type === "script" ? this.store.scriptVersion(node.config.scriptVersionId!).inputSchema
+          : node.type === "web-bridge" ? this.bridgeInputSchema(node.config.application!, node.config.tool!)
+            : undefined;
+        const value = applyInputDefaults(boundInput, defaultSchema ?? true, dependencies.readCurrentPlain);
         assertSchema(value, node.inputSchema ?? true, `${node.id} 输入`);
         this.store.transaction(() => {
           check(this.store.run(id).status === "running", "CANCELLED", "运行已停止");

@@ -1,3 +1,4 @@
+import type { MaintenanceTarget } from "../src/agent/maintenance-protocol.js";
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
 import { PassThrough, Readable } from "node:stream";
@@ -35,20 +36,29 @@ const K = "a".repeat(64);
 // Real helper probes deliberately do not inherit credentials, NODE_OPTIONS,
 // user extension settings or model-provider configuration from the test runner.
 const spawn = (executable: string, args: string[], options: SpawnOptions) => spawnProcess(executable, args, { ...options, env: { PATH: process.env.PATH ?? "" } });
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, browser = false) {
   const f = setup(t); t.after(async () => { await f.authoring.close(); f.store.close(); });
   const draft = await f.authoring.create(undefined, "initial"), source = f.store.files.readTree(draft.artifactPath).files;
   const resourceId = JSON.parse(source["workflow.json"]!).id;
   // Explicit test snapshot and DB task, not CLI or installation certification.
-  const files = { "project.json": '{"name":"测试 project"}', "docs/readme.md": "alpha\nbeta\nalpha", "AGENTS.md": "Read-only rules" }, hash = digest(canonicalJson(files));
+  const files = { "project.json": '{"name":"测试 project"}', "docs/readme.md": "alpha\nbeta\nalpha", "AGENTS.md": "Read-only rules" };
   prepareMaintenanceFixture(f.store);
   const declaration = bridgeDeclaration(readFileSync(f.store.files.path("config/web-bridge.json"), "utf8"));
   f.store.exec("INSERT INTO bridge_configuration VALUES('current',1,?,?,?)", declaration, digest(declaration), Date.now());
   f.store.exec("INSERT INTO agent_workspace_workflow_bindings VALUES(?,?,?)", draft.id, resourceId, Date.now());
+  const config = configuredWebBridge(f.store);
+  const target: MaintenanceTarget = browser
+    ? { kind: "browser_application" as const, id: "empty", scope: {} }
+    : { kind: "workflow_draft" as const, id: resourceId, scope: { draftId: draft.id } };
+  const hash = digest(canonicalJson(files));
   f.store.exec("INSERT INTO agent_workspace_projection_state VALUES('maintenance',1,1,?,?,?,'ready',NULL,?)", K, K, hash, Date.now());
-  const target = { kind: "workflow_draft" as const, id: resourceId, scope: { draftId: draft.id } }, assets = new MaintenanceAssets(f.store, configuredWebBridge(f.store), () => f.providers), snapshot = assets.capture(target);
-  f.store.exec("INSERT INTO agent_maintenance_sessions(id,actor_key,scenario,owner_kind,owner_id,owner_scope_json,mode,provider_id,model_id,contract_version,tool_policy_version,knowledge_hash,generation,revision,lifecycle,native_delete_state,created_at,updated_at) VALUES('session','local','workflow','workflow_draft',?,?,'multi','test-provider','test-model','orchard.maintenance.v1','readonly',?,1,1,'active','absent',?,?)", resourceId, canonicalJson(target.scope), K, Date.now(), Date.now());
-  f.store.exec("INSERT INTO agent_maintenance_tasks(id,session_id,mode,request_id,request_hash,sequence,generation,projection_generation,projection_hash,baseline_json,status,process_state,created_at) VALUES('task','session','multi','turn',?,1,1,1,?,?,'running','running',?)", K, hash, canonicalJson(snapshot.baseline), Date.now());
+  if (browser) {
+    config.saveApplication({ id: target.id, name: "Empty browser app" });
+    f.store.exec("UPDATE agent_workspace_projection_state SET synced_generation=target_generation,state='ready'");
+  }
+  const assets = new MaintenanceAssets(f.store, config, () => f.providers), snapshot = assets.capture(target);
+  f.store.exec("INSERT INTO agent_maintenance_sessions(id,actor_key,scenario,owner_kind,owner_id,owner_scope_json,mode,provider_id,model_id,contract_version,tool_policy_version,knowledge_hash,generation,revision,lifecycle,native_delete_state,created_at,updated_at) VALUES('session','local',?,?,?,?,'multi','test-provider','test-model','orchard.maintenance.v1','readonly',?,1,1,'active','absent',?,?)", browser ? "web-bridge" : "workflow", target.kind, target.id, canonicalJson(target.scope), K, Date.now(), Date.now());
+  f.store.exec("INSERT INTO agent_maintenance_tasks(id,session_id,mode,request_id,request_hash,sequence,generation,projection_generation,projection_hash,baseline_json,status,process_state,created_at) VALUES('task','session','multi','turn',?,1,1,?,?,?,'running','running',?)", K, f.store.one<{ target_generation: number }>("SELECT target_generation FROM agent_workspace_projection_state")!.target_generation, hash, canonicalJson(snapshot.baseline), Date.now());
   t.after(installWorkspaceBusinessTracking(f.store));
   let allowed = true;
   const boundary: MaintenanceBoundary = { authorize() { if (!allowed) throw new AppError("FORBIDDEN", "PRIVATE_CREDENTIAL_MARKER", 403); }, knownSecrets: () => ["PRIVATE_CREDENTIAL_MARKER"], assertQuiescent() {}, async synchronize() {} };
@@ -58,7 +68,7 @@ async function fixture(t: TestContext) {
   t.after(() => bridge.close());
   const input = { contractVersion: "orchard.maintenance.v1", requestId: "submit", summary: "Candidate", target, baseline: snapshot.baseline,
     change: { operation: "replace", files: Object.fromEntries(Object.entries(source).filter(([path]) => path !== "layout.json")) } };
-  return { ...f, draft, reader, bridge, controller, gateway, assets, boundary, input, deny() { allowed = false; } };
+  return { ...f, draft, reader, bridge, controller, gateway, assets, boundary, input, config, deny() { allowed = false; } };
 }
 async function bootstrap(bridge: PrivateMaintenanceBridge, role: BridgeRole): Promise<BridgeBootstrap> {
   const pipe = new PassThrough(), parts: Buffer[] = []; pipe.on("data", part => parts.push(part));
@@ -218,8 +228,8 @@ test("trusted child reads bootstrap from inherited fd 3 and reaches only the tas
   assert.equal(f.provider.calls.length, 0); await f.bridge.close(); f.bridge.assertClosed();
 });
 
-async function piBinding(t: TestContext) {
-  const f = await fixture(t);
+async function piBinding(t: TestContext, browser = false) {
+  const f = await fixture(t, browser);
   const child = spawn(process.execPath, ["--import", "tsx", "src/agent/maintenance-mcp-stdio.ts"], { stdio: ["pipe", "pipe", "ignore", "pipe"] });
   const exited = once(child, "exit");
   const mcp = new MaintenanceMcpClient(child.stdout!, child.stdin!);
@@ -245,7 +255,7 @@ test("Pi binding exposes exactly seven tools through real reader IPC and indepen
   for (const path of ["/etc/passwd", "../workbench.db", ".env", "secrets/keyring.json"]) await assert.rejects(invoke("read", { path }), { code: "MAINTENANCE_TOOL_FAILED" });
   await assert.rejects(invoke("grep", { query: "alpha", shell: true }), { code: "MAINTENANCE_TOOL_FAILED" });
   const candidate = await invoke("mcp__orchard__submit_proposal", f.input), proposalId = JSON.parse(candidate.content[0]!.text).proposalId;
-  await assert.rejects(invoke("mcp__orchard__apply_proposal", { proposalId, requestId: "unconfirmed" }), { code: "MAINTENANCE_TOOL_FAILED" });
+  await assert.rejects(invoke("mcp__orchard__apply_proposal", { proposalId, requestId: "unconfirmed" }), { code: "CONFIRMATION_REQUIRED" });
   assert.equal(f.store.one("SELECT id FROM agent_maintenance_apply_requests"), undefined);
   assert.equal(f.store.draft(f.draft.id).revision, 0); assert.equal(f.provider.calls.length, 0);
   assert.equal(f.handlers.get("user_bash")!({ command: "touch /tmp/not-allowed" }).result.exitCode, 1);
@@ -258,6 +268,44 @@ test("Pi binding exposes exactly seven tools through real reader IPC and indepen
   assert.throws(() => f.binding.assertReady(), { code: "MAINTENANCE_TOOL_FAILED" });
   await assert.rejects(invoke("read", { path: "project.json" }), { code: "MAINTENANCE_TOOL_FAILED" });
   await f.binding.close(); await f.exited; await f.bridge.close(); f.bridge.assertClosed();
+});
+
+test("Pi submits the first browser tool in an empty application after a safe schema error", async t => {
+  const f = await piBinding(t, true);
+  const submit = f.tools.get("mcp__orchard__submit_proposal")!;
+  const empty = f.config.authoringSnapshot("empty");
+  assert.deepEqual(empty.tools, []);
+  assert.deepEqual(empty.environments, []);
+
+  const tool = {
+    application: "empty", site: "empty", toolId: "database_list", description: "列出数据库连接",
+    path: "/api/v1/database/", method: "GET", parameters: { type: "object" }, fields: [],
+    risk: "read", approval: "none", timeoutMs: 18000, catalogVersion: "1", enabled: true,
+    execution: {
+      version: 1, transport: "browser",
+      preprocess: { runtime: "nodejs", code: "return { ...request, headers: {} };" },
+      response: { mode: "fullJson", maxBytes: 65536 },
+    },
+  };
+  const input = (definition: unknown) => ({ ...f.input, change: { operation: "tools", changes: [
+    { operation: "create", toolId: tool.toolId, definition },
+  ] } });
+  const { response, ...incomplete } = tool.execution;
+  await assert.rejects(submit.execute("invalid", input({ ...tool, execution: incomplete, PRIVATE_CREDENTIAL_MARKER: true })), (error: unknown) => {
+    assert.ok(error instanceof AppError);
+    assert.equal(error.code, "SCHEMA_MISMATCH");
+    assert.match(error.message, /properties\/response\/required/);
+    assert.doesNotMatch(error.message, /PRIVATE_CREDENTIAL_MARKER/);
+    return true;
+  });
+  await assert.rejects(submit.execute("invalid-path", input({ ...tool, path: "/api/v1/database/?q=unsupported" })), {
+    code: "INVALID_PROPOSAL",
+  });
+  const result = await submit.execute("valid", input(tool));
+  const { proposalId, state } = JSON.parse(result.content[0]!.text);
+  assert.equal(typeof proposalId, "string");
+  assert.equal(state, "pending");
+  assert.deepEqual(f.config.authoringSnapshot("empty").tools, []);
 });
 
 test("Pi tool cancellation closes both private channels and suppresses late proposal commits", async t => {

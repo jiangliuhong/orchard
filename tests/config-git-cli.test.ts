@@ -1,6 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -9,7 +9,7 @@ import { serializeSnapshot } from "../src/config-git/snapshot.js";
 import type { PortableSnapshot } from "../src/config-git/snapshot-types.js";
 
 function fixture(t: TestContext) {
-  const directory = mkdtempSync(join(tmpdir(), "orchard-config-cli-"));
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), "orchard-config-cli-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
 }

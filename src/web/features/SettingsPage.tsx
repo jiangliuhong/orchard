@@ -17,6 +17,7 @@ import { ConfigGitSettings } from "./ConfigGitSettings";
 import { SecretKeySettings } from "./SecretKeySettings";
 import { GitProjectSettings } from "./GitProjectSettings";
 import { StorageSettings } from "./StorageSettings";
+import { AgentAccessSettings } from "./AgentAccessSettings";
 import { AgentKnowledgeSettings } from "./AgentKnowledgeSettings";
 
 function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () => void }) {
@@ -120,13 +121,13 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
 
 export function SettingsPage() {
   const { data, error, reload } = useResource<{ items: ProviderView[] }>("/providers");
-  type Section = "general" | "providers" | "agent-models" | "agent-knowledge" | "config-git" | "dictionary-keys" | "git-projects" | "storage";
+  type Section = "general" | "providers" | "agent-models" | "agent-knowledge" | "config-git" | "dictionary-keys" | "git-projects" | "storage" | "agent-access";
   const [section, setSection] = useState<Section>(() => {
     const requested = new URLSearchParams(window.location.search).get("section");
-    return requested && ["general", "providers", "agent-models", "agent-knowledge", "config-git", "dictionary-keys", "git-projects", "storage"].includes(requested) ? requested as Section : "general";
+    return requested && ["general", "providers", "agent-models", "agent-knowledge", "config-git", "dictionary-keys", "git-projects", "storage", "agent-access"].includes(requested) ? requested as Section : "general";
   });
   return <>
-    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "agent-knowledge": "Agent 内置知识", "config-git": "Git 仓库配置", "dictionary-keys": "加密字典密钥", "git-projects": "项目仓库", storage: "存储空间" }[section] }]} /></div>
+    <div className="page-heading"><Breadcrumbs items={[{ label: "设置" }, { label: { general: "常规", providers: "Provider", "agent-models": "Agent 模型配置", "agent-knowledge": "Agent 内置知识", "config-git": "Git 仓库配置", "dictionary-keys": "加密字典密钥", "git-projects": "项目仓库", storage: "存储空间", "agent-access": "Agent 接入" }[section] }]} /></div>
     <div className="settings-layout">
       <aside className="settings-sidebar" aria-label="设置分类">
         <nav className="settings-sidebar-nav">
@@ -134,6 +135,7 @@ export function SettingsPage() {
           <button className={section === "providers" ? "active" : ""} aria-current={section === "providers" ? "page" : undefined} onClick={() => setSection("providers")}><PlugZap size={16} />Provider</button>
           <button className={section === "agent-models" ? "active" : ""} aria-current={section === "agent-models" ? "page" : undefined} onClick={() => setSection("agent-models")}><Boxes size={16} />Agent 模型配置</button>
           <button className={section === "agent-knowledge" ? "active" : ""} aria-current={section === "agent-knowledge" ? "page" : undefined} onClick={() => setSection("agent-knowledge")}><Boxes size={16} />Agent 内置知识</button>
+          <button className={section === "agent-access" ? "active" : ""} aria-current={section === "agent-access" ? "page" : undefined} onClick={() => setSection("agent-access")}><Terminal size={16} />Agent 接入</button>
           <button className={section === "config-git" ? "active" : ""} aria-current={section === "config-git" ? "page" : undefined} onClick={() => setSection("config-git")}><GitBranch size={16} />Git 仓库配置</button>
           <button className={section === "dictionary-keys" ? "active" : ""} aria-current={section === "dictionary-keys" ? "page" : undefined} onClick={() => setSection("dictionary-keys")}><KeyRound size={16} />加密字典密钥</button>
           <button className={section === "git-projects" ? "active" : ""} aria-current={section === "git-projects" ? "page" : undefined} onClick={() => setSection("git-projects")}><GitBranch size={16} />项目仓库</button>
@@ -141,6 +143,7 @@ export function SettingsPage() {
         </nav>
       </aside>
       <section className="settings-content">
+      {section === "agent-access" && <AgentAccessSettings />}
       {section === "git-projects" && <GitProjectSettings />}
       {section === "storage" && <StorageSettings />}
       {section === "agent-knowledge" && <AgentKnowledgeSettings />}

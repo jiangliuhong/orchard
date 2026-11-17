@@ -26,7 +26,7 @@ test("all profiles share one materialized read-only workspace; repeated initiali
   assert.equal(f.db.prepare("SELECT count(*) AS n FROM agent_operations WHERE kind='knowledge_install'").get()!.n, 1);
   assert.deepEqual(readdirSync(f.staging), []);
   assert.deepEqual(readdirSync(join(f.dataRoot, "agent")).sort(), ["staging", "workspace"]);
-  assert.ok(f.service.readFile("AGENTS.md").includes("current.get"));
+  assert.ok(f.service.readFile("AGENTS.md").includes("mcp__orchard__submit_proposal"));
   assert.throws(() => f.service.readFile("../../workbench.lock"), { code: "NOT_FOUND" });
 });
 

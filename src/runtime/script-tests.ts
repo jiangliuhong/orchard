@@ -1,3 +1,4 @@
+import { applyInputDefaults } from "../domain/input-defaults.js";
 import { dictionarySources, resolveScriptInput } from "../domain/script-test-input.js";
 import { DictionaryExecution, safeExecutionFailure } from "../dictionaries/execution.js";
 import { prepareScriptRuntime } from "./dictionary-context.js";
@@ -80,7 +81,7 @@ export class ScriptTestRunner {
       const sources = dictionarySources(this.store.scriptTestInputPolicy(id)?.sources ?? {});
       const dependencies = new DictionaryExecution(this.store);
       const dictionaries = dependencies.load("test", id, this.store.scriptTestRequirements(definition, sources, dependencies.metadata("test", id)));
-      const input = resolveScriptInput(this.store.scriptTestInput(id), sources, dictionaries.value);
+      const input = applyInputDefaults(resolveScriptInput(this.store.scriptTestInput(id), sources, dictionaries.value), definition.inputSchema, dependencies.readCurrentPlain);
       assertSchema(input, definition.inputSchema, "脚本输入");
       const result = await executeScript({ ...definition, dictionaryContext: dictionaries.context(definition.dictionaryBindings), sensitive, input, cwd: this.store.files.path("runs"), signal });
       try { assertSchema(result.output, definition.outputSchema, "脚本输出"); }

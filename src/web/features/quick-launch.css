@@ -45,3 +45,23 @@
 .quick-editor[data-slot=dialog-content] { width: min(520px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
 .quick-detail [data-slot=dialog-title], .quick-detail [data-slot=dialog-description] { overflow-wrap: anywhere; }
 .quick-input-row > :is(button, code):first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.quick-card { position: relative; }
+.quick-card-title .quick-card-name::after { content: ""; position: absolute; inset: 0; border-radius: 8px; }
+.quick-card-footer button { position: relative; z-index: 1; }
+.quick-detail[data-slot=dialog-content] { width: min(720px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: 90dvh; overflow-y: auto; }
+.quick-detail [data-slot=dialog-title] { padding-inline-end: 24px; line-height: 1.35; }
+.quick-history-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.quick-history { min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-wrap: anywhere; }
+.quick-history-heading, .quick-history-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.quick-history ul { list-style: none; margin: 4px 0; padding: 0; }
+.quick-history-row { width: 100%; text-align: left; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
+.quick-history-row:is(:hover, [aria-pressed=true]) { background: var(--primary-soft); }
+.quick-history-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.quick-run-times { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin-block: 8px; }
+.quick-run-times dd { margin: 0; }
+@media (max-width: 560px) {
+  .quick-history-grid { grid-template-columns: minmax(0, 1fr); }
+  .quick-history-grid > section[aria-label="运行详情"] { grid-row: 1; }
+}
+.quick-history ul { max-height: 240px; overflow-y: auto; }
+.quick-detail [data-slot=dialog-footer] { flex-flow: row wrap; justify-content: flex-end; }

@@ -16,7 +16,7 @@ export function DeleteWorkflowButton({ id, name, kind = "workflow", compact = fa
     try {
       await send(`/${kind === "draft" ? "drafts" : "workflows"}/${id}`, undefined, "DELETE");
       setOpen(false);
-      if (onDeleted) onDeleted(); else navigate("/", { skipGuard: true });
+      if (onDeleted) onDeleted(); else navigate("/workflows", { skipGuard: true });
     } catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   };

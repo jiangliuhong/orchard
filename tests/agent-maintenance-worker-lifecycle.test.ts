@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { backup } from "node:sqlite";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { setup, until, prepareMaintenanceFixture } from "./helpers.js";
+import { setup, temporary, until, prepareMaintenanceFixture } from "./helpers.js";
 import { Store } from "../src/persistence/store.js";
 import { DirectoryLease } from "../src/migrations/lock.js";
 import { AppError } from "../src/domain/errors.js";
@@ -19,6 +20,8 @@ import { createApp } from "../src/server/app.js";
 import { createProductionMaintenance } from "../src/agent/maintenance-production.js";
 import { MaintenanceStopJournal } from "../src/agent/maintenance-stop-journal.js";
 import { loadKnowledgeBundle } from "../src/agent/knowledge-bundle.js";
+import { MaintenanceSessions } from "../src/agent/maintenance-sessions.js";
+import { projectionState } from "../src/agent/workspace-state.js";
 
 const H = "a".repeat(64), K = "b".repeat(64);
 async function fixture(t: TestContext, tracked = true) {
@@ -250,6 +253,71 @@ test("production authority reconciles a journaled task, rebuilds projection and 
   } finally {
     await services.app.close();
     const workspace = join(f.root, "agent", "workspace");
+    if (existsSync(workspace)) {
+      chmodSync(workspace, 0o700);
+      for (const entry of readdirSync(workspace, { recursive: true, withFileTypes: true })) {
+        if (entry.isDirectory()) chmodSync(join(entry.parentPath, entry.name), 0o700);
+      }
+    }
+  }
+});
+
+test("startup upgrades a copied workspace once and preserves maintenance history", async t => {
+  const f = await fixture(t, false);
+  const proposal = await f.proposal();
+  f.finish();
+  const root = temporary(t);
+  for (const entry of ["artifacts", "config"]) {
+    cpSync(join(f.root, entry), join(root, entry), { recursive: true });
+  }
+  await backup(f.store.db, join(root, "workbench.db"));
+  const knowledgeHash = loadKnowledgeBundle().hash;
+  const history = (store: Store) => ({
+    draft: store.draft(f.draft.id),
+    session: store.one("SELECT * FROM agent_maintenance_sessions WHERE id='session'"),
+    task: store.one("SELECT * FROM agent_maintenance_tasks WHERE id='task'"),
+    proposal: store.one("SELECT * FROM agent_maintenance_proposals WHERE id=?", proposal.id),
+    decision: store.one("SELECT * FROM agent_maintenance_decisions WHERE proposal_id=?", proposal.id),
+  });
+  const original = history(f.store);
+  let newSessionId: string | undefined;
+  let upgradedGeneration: number | undefined;
+  try {
+    for (const startup of [1, 2]) {
+      const lease = DirectoryLease.acquire(root);
+      const store = new Store(root, lease);
+      const services = createApp(store, undefined, undefined, undefined, {}, createProductionMaintenance);
+      try {
+        await services.app.ready();
+        await until(() => projectionState(store).state === "ready");
+        const state = projectionState(store);
+        assert.equal(state.target_knowledge_hash, knowledgeHash);
+        assert.equal(state.synced_knowledge_hash, knowledgeHash);
+        assert.ok(state.target_generation > 1);
+        assert.equal(state.synced_generation, state.target_generation);
+        upgradedGeneration ??= state.target_generation;
+        assert.equal(state.target_generation, upgradedGeneration);
+        assert.deepEqual(history(store), original);
+        const assets = new MaintenanceAssets(store, configuredWebBridge(store), () => services.providers);
+        const sessions = new MaintenanceSessions(store, assets, {
+          authorize() {}, knownSecrets: () => [], assertStopped() {}, revokeTask() {},
+          backend: providerId => ({
+            fingerprint: H, knowledgeHash, toolPolicyVersion: "maintenance-pi-multi-v1",
+            references: { providerId, supportedVersions: [1], validatePayload() {} },
+          }),
+        });
+        if (startup === 1) {
+          newSessionId = sessions.create("local", "new-after-upgrade", {
+            target: { kind: "workflow_draft", id: JSON.parse(f.source["workflow.json"]!).id, scope: { draftId: f.draft.id } },
+            mode: "multi", providerId: "test-provider", modelId: "test-model",
+          });
+        }
+        assert.equal(store.one("SELECT knowledge_hash FROM agent_maintenance_sessions WHERE id=?", newSessionId!)?.knowledge_hash, knowledgeHash);
+      } finally { await services.app.close(); lease.release(); }
+    }
+    assert.equal(projectionState(f.store).target_knowledge_hash, K);
+  } finally {
+    const workspace = join(root, "agent", "workspace");
     if (existsSync(workspace)) {
       chmodSync(workspace, 0o700);
       for (const entry of readdirSync(workspace, { recursive: true, withFileTypes: true })) {

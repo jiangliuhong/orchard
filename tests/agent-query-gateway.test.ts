@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test, type TestContext } from "node:test";
 import { PlatformQueryGateway, PLATFORM_QUERY_SCHEMAS, assertQuerySafe, type PlatformQueryHost, type AssetSnapshot } from "../src/agent/query-gateway.js";
 import { PLATFORM_READ_TOOL_NAMES } from "../src/agent/knowledge-bundle.js";
@@ -52,6 +53,13 @@ test("source reads stay resource-relative, explicitly bounded and version-bound"
   await assert.rejects(f.gateway.call(f.grant.token, "assets.read_file", { ...input, startLine: 99 }));
   f.snapshot.files = { "scripts/main.ts": "x".repeat(32769) };
   await assert.rejects(f.gateway.call(f.grant.token, "assets.read_file", { ...input, startLine: 1 }), { code: "QUERY_SOURCE_LINE_TOO_LARGE" });
+});
+
+test("credential handling syntax and the Superset tool definition are valid maintenance content", () => {
+  assert.doesNotThrow(() => assertQuerySafe("Use secret:true to capture the CSRF token. Describe Bearer authentication and password fields."));
+  const definition = readFileSync(new URL("./fixtures/browser-tools/superset-sql-query.json", import.meta.url), "utf8");
+  assert.doesNotThrow(() => assertQuerySafe(JSON.parse(definition)));
+  assert.throws(() => assertQuerySafe({ headers: { Authorization: "Bearer example-secret-123" } }), { code: "QUERY_SENSITIVE_CONTENT" });
 });
 
 test("sensitive source cannot leak through a safe slice or install proposal proof", async t => {

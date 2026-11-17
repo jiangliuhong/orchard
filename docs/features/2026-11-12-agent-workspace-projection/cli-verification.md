@@ -138,7 +138,7 @@ TMPDIR="$(node -e 'process.stdout.write(require("node:fs").realpathSync(require(
 
 新增 `maintenance-mcp-client.ts`：只接受 launcher 提供的私有输入/输出流，不接受命令、环境、连接地址或文件凭据。严格检查 ID/UTF-8/响应结构、大小/并发/请求数/超时；断管永久撤销，无自动重连、资源发现或原始错误正文。
 
-Pi 扩展层另外拦截 `user_bash`，因为 RPC `bash` 不受活动工具列表控制；取消切换/分叉/树导航/压缩，禁用空闲 cache warming。适配器不是完整 launcher，须在 `session_start` 内注册，不能在未绑定的扩展 factory 阶段使用运行时工具 API。
+Pi 扩展层另外拦截 `user_bash`，因为 RPC `bash` 不受活动工具列表控制；取消切换、分叉和树导航，禁用空闲 cache warming。Pi 可在当前会话中原生压缩上下文，推理级别使用模型和 Pi 的默认设置。适配器不是完整 launcher，须在 `session_start` 内注册，不能在未绑定的扩展 factory 阶段使用运行时工具 API。
 
 ```sh
 ORCHARD_MAINTENANCE_PI_CLI=/absolute/path/to/pi-coding-agent/dist/cli.js \

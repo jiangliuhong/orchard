@@ -28,16 +28,17 @@ export function AppSidebar({ section }: { section: string }) {
     return () => { document.removeEventListener("pointerdown", closeOutside); document.removeEventListener("keydown", closeOnEscape); };
   }, [collapsed, expanded, mobileOpen]);
   const navigation = (compact: boolean) => <nav className="sidebar-nav" aria-label="主导航">
+    <a href="/quick-launch" title="快速执行" aria-label="快速执行" className={`sidebar-link ${section === "quick-launch" ? "active" : ""}`} aria-current={section === "quick-launch" ? "page" : undefined} onClick={() => setMobileOpen(false)}><ListChecks size={18} /><span className="sidebar-label">快速执行</span></a>
     <div ref={compact ? flyout : undefined} className={`sidebar-workflows ${workflowActive ? "is-current" : ""}`}>
       <button type="button" className="sidebar-link sidebar-group" aria-label="工作流" title="工作流" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
         <GitBranch size={18} /><span className="sidebar-label">工作流</span><ChevronDown size={14} className={`sidebar-chevron ${expanded ? "" : "is-closed"}`} />
       </button>
       {expanded && <div className={`sidebar-submenu ${compact ? "sidebar-flyout" : ""}`}>
-        <a href="/" className={workflowActive && section !== "runs" ? "active" : ""} aria-current={workflowActive && section !== "runs" ? "page" : undefined} onClick={() => setMobileOpen(false)}><GitBranch size={15} />工作流定义</a>
+        <a href="/workflows" className={workflowActive && section !== "runs" ? "active" : ""} aria-current={workflowActive && section !== "runs" ? "page" : undefined} onClick={() => setMobileOpen(false)}><GitBranch size={15} />工作流定义</a>
         <a href="/runs" className={section === "runs" ? "active" : ""} aria-current={section === "runs" ? "page" : undefined} onClick={() => setMobileOpen(false)}><ListChecks size={15} />运行记录</a>
       </div>}
     </div>
-    {[{ href: "/quick-launch", label: "快速执行", icon: ListChecks, key: "quick-launch" }, { href: "/dictionaries", label: "字典", icon: BookOpen, key: "dictionaries" }, { href: "/scripts", label: "脚本库", icon: Code2, key: "scripts" }, { href: "/web-bridge", label: "网页桥接", icon: Globe, key: "web-bridge" }].map(item =>
+    {[{ href: "/dictionaries", label: "字典", icon: BookOpen, key: "dictionaries" }, { href: "/scripts", label: "脚本库", icon: Code2, key: "scripts" }, { href: "/web-bridge", label: "网页桥接", icon: Globe, key: "web-bridge" }].map(item =>
       <a key={item.key} href={item.href} title={item.label} aria-label={item.label} className={`sidebar-link ${section === item.key ? "active" : ""}`} aria-current={section === item.key ? "page" : undefined} onClick={() => setMobileOpen(false)}><item.icon size={18} /><span className="sidebar-label">{item.label}</span></a>)}
   </nav>;
   const footer = <div className="sidebar-footer">
@@ -48,7 +49,7 @@ export function AppSidebar({ section }: { section: string }) {
   return <>
     <Dialog open={syncOpen} onOpenChange={setSyncOpen}><DialogContent className="config-sync-dialog"><DialogHeader><DialogTitle>配置同步</DialogTitle><DialogDescription className="sr-only">查看配置差异，填写或生成变更描述，确认后备份到 Git 仓库。</DialogDescription></DialogHeader><ConfigGitSettings sync /></DialogContent></Dialog>
     <aside className={`app-sidebar ${collapsed ? "is-collapsed" : ""}`} aria-label="侧栏">
-      <div className="sidebar-brand"><a href="/" className="brand" aria-label="orchard"><Leaf size={21} /><span>orchard</span></a><Button variant="ghost" size="icon" aria-label={collapsed ? "展开侧栏" : "折叠侧栏"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</Button></div>
+      <div className="sidebar-brand"><a href="/quick-launch" className="brand" aria-label="orchard"><Leaf size={21} /><span>orchard</span></a><Button variant="ghost" size="icon" aria-label={collapsed ? "展开侧栏" : "折叠侧栏"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}</Button></div>
       {navigation(collapsed)}{footer}
     </aside>
     <Dialog open={mobileOpen} onOpenChange={setMobileOpen}>

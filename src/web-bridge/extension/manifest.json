@@ -3,7 +3,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "120",
   "name": "Orchard Web Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Orchard browser bridge extension",
   "permissions": ["nativeMessaging", "storage", "tabs", "alarms", "scripting"],
   "host_permissions": ["http://127.0.0.1/*"],

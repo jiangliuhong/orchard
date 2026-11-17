@@ -1,5 +1,5 @@
 import { BRIDGE_HTTP_METHODS } from "./http-methods.js";
-import { BRIDGE_HTTP_SCHEMA, validateHttpDefinition } from "./execution.js";
+import { BRIDGE_HTTP_SCHEMA, validateStoredHttpTool } from "./execution.js";
 import { check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import type { JsonSchema } from "../domain/types.js";
@@ -9,7 +9,7 @@ export interface BridgeProposal {
   summary: string;
   changes: { operation: "create" | "update" | "delete"; toolId: string; definition: WebBridgeTool | null }[];
 }
-export const BRIDGE_PROPOSAL_SCHEMA: JsonSchema = {
+export const BRIDGE_PROPOSAL_SCHEMA = {
   type: "object", additionalProperties: false, required: ["summary", "changes"],
   properties: {
     summary: { type: "string", minLength: 1, maxLength: 20000 },
@@ -37,7 +37,7 @@ export const BRIDGE_PROPOSAL_SCHEMA: JsonSchema = {
       },
     } },
   },
-};
+} satisfies JsonSchema;
 
 /** Trusted platform guidance, kept separate from user requests and snapshot data. */
 export const BRIDGE_AUTHORING_GUIDANCE = [
@@ -56,7 +56,7 @@ export const BRIDGE_AUTHORING_GUIDANCE = [
   "parameters only validates arguments. Declaring ak/sk, body or headers in parameters does not implement signing, secure secret handling, request headers or raw body serialization. Never request actual credentials or embed them in definitions.",
   "For requirements the contract cannot express, explain the specific unsupported capability in summary. Do not invent extension fields or silently drop requirements. If no complete definition can meet the request, return changes:[]; do not blame missing environments or ask for platform-format examples.",
   "fields is a response field allowlist. Do not claim fields:[] or fields:[\"*\"] returns complete JSON. Do not infer header/body/response semantics from GET or POST alone.",
-  "execution.transport=localHttp is native HTTP without cookies. execution.transport=browser runs reviewed Node.js preprocessing then sends its returned {path,method,headers,body} through a selected browser profile and same-origin tab with cookies. Body is an exact UTF-8 string. crypto (node:crypto), args, credentials and request defaults are available; use return. No imports are allowed inside the function body. Browser scripts may use crypto.createHash, crypto.randomBytes and Date.now() for signing, including arbitrary argument fields in the specified order.",
+  "execution.transport=localHttp is native HTTP without cookies. execution.transport=browser runs reviewed Node.js preprocessing then sends its returned {path,method,headers,body} through a selected browser profile and same-origin tab with cookies. Always return headers as an object, even when empty. For a fixed GET use return { ...request, headers: {} }; request defaults contain only path and method. Body is optional and is an exact UTF-8 string when present. crypto (node:crypto), args, credentials and request defaults are available; use return. No imports are allowed inside the function body. Browser scripts may use crypto.createHash, crypto.randomBytes and Date.now() for signing, including arbitrary argument fields in the specified order.",
   "Browser dynamic paths are supported explicitly: preprocess may return path computed from args (for example, '/' + encodeURIComponent(args.productNo) + '/request' when that endpoint pattern is evidenced). The definition path is only the default in request.path, not a restriction to one product. Browser does not expand {argument} templates: compute the concrete path in code, validate product identifiers as safe single segments, and preserve request.method. Returned paths must be same-origin absolute pathnames without query, fragment, traversal, encoded separators or domain. Do not fall back to a fixed-product tool merely because dynamicPathTemplates is localHttp-only.",
   "For MD5 signing derive parts, separator, digestCase, nonceBytes, timestampUnit, headers and optional same-origin clock configuration from supplied evidence. Do not guess or label all MD5 protocols supported. Ask focused questions for missing signing rules, never actual AK/SK. Browser credentials can be declared without dictionary references using execution.credentialInputs:['ak','sk']; callers choose plain or encrypted dictionary string references or manual values at execution time. Signature sources are ak/sk/nonce/timestamp/body/path; nonce is random hex. Unsupported algorithms or canonicalization must be reported, not approximated.",
   "Both transports require one selected enabled environment. Browser additionally requires profileId, extension site permission and a same-origin logged-in tab. Gateway cookies are provided by the tab; business Authorization headers do not replace gateway login. Do not manage cookies or follow login redirects in scripts. Never solicit real AK/SK in chat: execution.credentialInputs declares credential names, and callers choose dictionary or manual input in the protected test UI or call-local credentialBindings API, separate from args. execution.preprocess.credentials optionally maps names to default {dictionaryId,key} references. Both sources resolve into the same credentials object; do not require dictionary binding when the caller wants runtime inputs. Never claim a proposed definition has been tested or that signing matches the target API merely because a definition is valid.",
@@ -64,7 +64,7 @@ export const BRIDGE_AUTHORING_GUIDANCE = [
 
 export function bridgeAuthoringContract(application: string) {
   return {
-    version: 7,
+    version: 8,
     scope: "Tool definition proposals only; application and environment management are outside this Agent's scope.",
     environmentRequiredForAuthoring: false,
     defaultSite: application,
@@ -94,6 +94,7 @@ export function bridgeAuthoringContract(application: string) {
       embeddedExecutionCode: true,
       responsePostprocess: "browser and localHttp: optional execution.postprocess {runtime:'nodejs',code,timeoutMs?}; response and args are available; return JSON; runs after fields/fullJson selection, default 1000ms, max 10000ms, output bounded by response.maxBytes and checked for credential echoes.",
       dynamicPathTemplates: "localHttp execution only: {argument} path segments. Browser uses preprocess code instead of template expansion.",
+      browserFlow: "Optional browser execution.flow runs bounded declarative requests in one isolated same-origin tab. See docs/web-bridge.md for capture, secret, step and poll semantics. Preprocess may return query and flow variables.",
       browserDynamicPath: "browser preprocess may compute and return path from args, including productNo; definition.path is a fixed default, not a fixed-product restriction. Same-origin absolute pathname only; no query, fragment, traversal or encoded separators. Method cannot change.",
       internalSigning: "localHttp declarative MD5; browser Node.js preprocess with node:crypto, args, credentials, request",
       dynamicHeaders: "localHttp signing headers; browser script returns headers including Authorization, Content-Type and X-OS-Api; Cookie/Host and reserved headers prohibited",
@@ -123,7 +124,7 @@ export function prepareBridgeProposal(application: string, tools: WebBridgeTool[
       check(definition?.application === application && definition.toolId === change.toolId, "INVALID_PROPOSAL", "不能修改其他应用或工具的身份");
       check(!/[\\\u0000-\u0020\u007f?#]/.test(definition.path), "INVALID_PROPOSAL", "工具路径不能包含查询参数、片段、空白或反斜线");
       assertSchema({}, { type: "object", properties: { args: definition.parameters } }, "参数 Schema");
-      if (definition.execution) validateHttpDefinition(definition.path, definition.method, definition.execution, definition.parameters);
+      if (definition.execution) validateStoredHttpTool(definition);
       else check(!/[{}]/.test(definition.path), "INVALID_PROPOSAL", "动态路径需要显式配置 localHttp 执行模式");
       candidate.set(change.toolId, structuredClone(definition));
     }

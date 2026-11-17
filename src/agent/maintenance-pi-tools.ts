@@ -1,3 +1,4 @@
+import { maintenanceToolError, publicMaintenanceError } from "./maintenance-tool-errors.js";
 import { AppError, check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import { maintenanceReadSchemas, type MaintenanceReadMethod } from "./maintenance-file-protocol.js";
@@ -38,18 +39,20 @@ export async function registerMaintenancePiTools(pi: MaintenancePiApi, channels:
   pi.on("session_before_switch", () => ({ cancel: true }));
   pi.on("session_before_fork", () => ({ cancel: true }));
   pi.on("session_before_tree", () => ({ cancel: true }));
-  pi.on("session_before_compact", () => ({ cancel: true }));
   pi.on("cache_warming_decision", () => ({ action: "stop" }));
   pi.on("session_shutdown", close);
   const failed = () => new AppError("MAINTENANCE_TOOL_FAILED", "维护工具请求未完成，请查看平台状态", 409);
-  const execute = async (signal: AbortSignal | undefined, operation: () => Promise<unknown>) => {
+  const execute = async (signal: AbortSignal | undefined, operation: () => Promise<unknown>, exposeErrors = false) => {
     if (!valid() || signal?.aborted) { await close(); throw failed(); }
     const abort = () => { void close(); }; signal?.addEventListener("abort", abort, { once: true });
     try {
       const result = await operation();
       if (!valid() || signal?.aborted) throw failed();
       return result;
-    } catch { throw failed(); }
+    } catch (error) {
+      const detail = exposeErrors && valid() && !signal?.aborted ? publicMaintenanceError(error) : undefined;
+      throw detail ? new AppError(detail.code, detail.message) : failed();
+    }
     finally { signal?.removeEventListener("abort", abort); }
   };
   try {
@@ -75,18 +78,25 @@ export async function registerMaintenancePiTools(pi: MaintenancePiApi, channels:
       name: `mcp__orchard__${tool.name}`, label: tool.name, description: tool.description, parameters: tool.inputSchema,
       execute: async (_id, params, signal) => {
         const result = await execute(signal, async () => {
-          assertSchema(params, tool.inputSchema, "维护提案工具");
+          assertSchema(params, tool.inputSchema, "维护提案工具", { safeSchemaPath: true });
           const value = await channels.mcp.request("tools/call", { name: tool.name, arguments: params });
           assertSchema(value, { type: "object", required: ["content", "isError"], properties: {
             content: { type: "array", minItems: 1, maxItems: 1, items: { type: "object", required: ["type", "text"], properties: { type: { const: "text" }, text: { type: "string", maxLength: 65536 } }, additionalProperties: false } },
             structuredContent: {}, isError: { type: "boolean" },
           }, additionalProperties: false }, "维护工具响应");
           return value;
-        });
+        }, true);
         const value = result as { content: { type: "text"; text: string }[]; isError: boolean };
         // Pi marks an execution as failed on a thrown error, not an arbitrary
         // `isError` property in the returned ToolResult (MCP uses that property).
-        if (value.isError) throw failed();
+        if (value.isError) {
+          let detail;
+          try {
+            const payload = JSON.parse(value.content[0]!.text);
+            detail = maintenanceToolError(payload?.code, payload?.schemaPaths);
+          } catch { /* Unrecognized response stays generic. */ }
+          throw detail ? new AppError(detail.code, detail.message) : failed();
+        }
         return { content: value.content, details: {} };
       },
     });

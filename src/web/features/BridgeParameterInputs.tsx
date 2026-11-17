@@ -1,3 +1,4 @@
+import { inputDictionaryDefaults, unresolvedInputSchema } from "../../domain/input-defaults";
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import type { JsonSchema } from "../../domain/types";
 import { assertSchema } from "../../domain/validation";
@@ -16,6 +17,7 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
   renderBoundField?: (name: string, id: string) => ReactNode; renderFieldActions?: (name: string) => ReactNode;
 }) {
   const inputPrefix = useId();
+  const defaults = useMemo(() => new Map(inputDictionaryDefaults(schema)), [schema]);
   const [edits, setEdits] = useState<Record<string, string>>({});
   const result = useMemo(() => {
     const fields: [string, FieldSchema][] = [];
@@ -40,7 +42,7 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
           continue;
         }
         const text = edits[name];
-        const required = Array.isArray(schema.required) && schema.required.includes(name);
+        const required = Array.isArray(schema.required) && schema.required.includes(name) && !defaults.has(name);
         if (text === "" && (!required || field.type !== "string" || field.enum)) continue;
         try {
           if (field.enum) values[name] = field.enum[Number(text)];
@@ -58,10 +60,10 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
           catch { errors[name] = "输入不符合参数 Schema"; }
         }
       }
-      try { assertSchema(values, validationSchema ?? schema, "参数"); } catch { error = "请填写必填参数，并确保输入符合参数 Schema。"; }
+      try { assertSchema(values, unresolvedInputSchema(validationSchema ?? schema, values), "参数"); } catch { error = "请填写必填参数，并确保输入符合参数 Schema。"; }
     } catch (failure) { error = (failure as Error).message; }
     return { fields, values, errors, error, invalid: !!error || Object.keys(errors).length > 0 };
-  }, [schema, value, edits, allowGeneric, preserveUnknown, boundFields, validationSchema]);
+  }, [schema, value, edits, allowGeneric, preserveUnknown, boundFields, validationSchema, defaults]);
   useEffect(() => { onInvalidChange(result.invalid); }, [result.invalid, onInvalidChange]);
   const update = (name: string, text: string) => { onFieldChange?.(name); setEdits(current => ({ ...current, [name]: text })); };
   useEffect(() => {
@@ -75,7 +77,8 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
       const current = result.values[name];
       const text = Object.hasOwn(edits, name) ? edits[name] : current === undefined ? "" : field.enum ? String(field.enum.findIndex(item => JSON.stringify(item) === JSON.stringify(current))) : field.type === "string" ? String(current) : JSON.stringify(current);
       const inputId = `${inputPrefix}-parameter-${name}`;
-      const required = typeof schema === "object" && Array.isArray(schema.required) && schema.required.includes(name);
+      const defaultRef = defaults.get(name);
+      const required = !defaultRef && typeof schema === "object" && Array.isArray(schema.required) && schema.required.includes(name);
       const props = { id: inputId, value: text, "aria-invalid": !!result.errors[name], "aria-describedby": `${inputId}-hint`, onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => update(name, event.target.value) };
       return <div className="bridge-parameter-row" key={name}>
         <label htmlFor={inputId}>{field.title || name}{required ? " *" : ""}:</label>
@@ -87,7 +90,7 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
                 : field["x-ui"]?.widget === "textarea" ? <Textarea {...props} rows={field["x-ui"].rows ?? 5} placeholder={field["x-ui"].placeholder} />
                   : <Input {...props} type={field.type === "number" || field.type === "integer" ? "number" : "text"} step={field.type === "integer" ? 1 : "any"} placeholder={field["x-ui"]?.placeholder} />}
           {renderFieldActions?.(name)}</div>
-          <div id={`${inputId}-hint`}>{field.description && <p className="field-hint">{field.description}</p>}{result.errors[name] && <p className="field-hint" role="alert">{result.errors[name]}</p>}</div>
+          <div id={`${inputId}-hint`}>{defaultRef && !boundFields?.includes(name) && <p className="field-hint">留空时使用字典键 {defaultRef.key}</p>}{field.description && <p className="field-hint">{field.description}</p>}{result.errors[name] && <p className="field-hint" role="alert">{result.errors[name]}</p>}</div>
         </div>
       </div>;
     })}

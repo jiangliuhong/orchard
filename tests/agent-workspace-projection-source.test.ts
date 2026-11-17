@@ -5,6 +5,7 @@ import type { QueryContext } from "../src/agent/query-gateway.js";
 import { configCoordinator } from "../src/config-git/coordinator.js";
 import { ScriptLibrary } from "../src/authoring/script-library.js";
 import { WebBridgeConfig } from "../src/web-bridge/config.js";
+import { configuredWebBridge } from "../src/web-bridge/configured.js";
 import { setup, prepareMaintenanceFixture } from "./helpers.js";
 import { installWorkspaceBusinessTracking, workspaceSchemaInstalled } from "../src/agent/workspace-business-hooks.js";
 
@@ -65,6 +66,24 @@ test("source collects real current drafts/published versions and sanitized brows
   // Every resource is authorized before reading, then again before returning.
   assert.equal(checks.length, 10); assert.equal(new Set(checks).size, 5);
   assert.deepEqual(await source.collect(ctx, signal()), result);
+});
+
+test("workspace synchronization sees applications added through another database adapter", async t => {
+  const { store, ctx } = await fixture(t);
+  const projectionBridge = configuredWebBridge(store);
+  const pageBridge = configuredWebBridge(store);
+  const source = new WorkspaceProjectionSource(store, projectionBridge, boundary());
+  const collect = () => configCoordinator(store).withWorkspaceSynchronization(() => source.collect(ctx, signal()));
+  const path = "browser-tools/superset/resource.json";
+
+  assert.equal((await collect()).files[path], undefined);
+  pageBridge.saveApplication({ id: "superset", name: "Superset" });
+  const result = await collect();
+
+  assert.equal(JSON.parse(result.files[path]!).definition.id, "superset");
+  const index = JSON.parse(result.files["project.json"]!);
+  assert.ok(index.resources.some((resource: { path: string }) => resource.path === "browser-tools/superset"));
+  assert.ok(!Object.keys(result.files).some(file => file.startsWith("browser-tools/superset/") && file.endsWith("/tool.json")));
 });
 
 test("source requires whole-project authorization, cannot silently filter a denied resource, and rechecks revocation", async t => {

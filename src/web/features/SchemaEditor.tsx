@@ -1,3 +1,4 @@
+import { InputDictionaryDefaults } from "./InputDictionaryDefaults";
 import { useEffect, useId, useRef, useState } from "react";
 import type { JsonSchema } from "../../domain/types.js";
 import { parseStrictJson } from "../../dictionaries/canonical.js";
@@ -54,7 +55,7 @@ function SchemaNode({ value, onChange, label, report, onDirty, confirm }: { valu
       </div></details></>}
   </div>;
 }
-export function SchemaEditor({ label, value, onChange, disabled, onInvalidChange, onDirty }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; onInvalidChange: (v: boolean) => void; onDirty: () => void }) {
+export function SchemaEditor({ label, value, onChange, disabled, onInvalidChange, onDirty, dictionaryDefaults }: { dictionaryDefaults?: boolean; label: string; value: string; onChange: (v: string) => void; disabled?: boolean; onInvalidChange: (v: boolean) => void; onDirty: () => void }) {
   let schema: JsonSchema = true, error = "";
   try { schema = parseEditorSchema(value); } catch (failure) { error = (failure as Error).message; try { schema = parseStrictJson(value) as JsonSchema; } catch { /* JSON view keeps the invalid buffer. */ } }
   const reason = !error ? schemaEditorReason(schema) : undefined;
@@ -69,6 +70,7 @@ export function SchemaEditor({ label, value, onChange, disabled, onInvalidChange
     {reason && <p className="field-hint">{reason}；完整定义已保留。</p>}
     {mode === "json" || reason ? <label htmlFor={id}>Schema JSON<Textarea id={id} rows={10} className="font-mono" disabled={disabled} value={value} onChange={e => onChange(e.target.value)} /></label> : <fieldset disabled={disabled}><SchemaNode label="根" value={schema} onChange={v => onChange(JSON.stringify(v, null, 2))} report={report} onDirty={onDirty} confirm={(message, action) => setPending({ message, action })} /></fieldset>}
     {(error || Object.keys(localErrors).length > 0) && <div role="alert" className="field-hint">{[error, ...Object.values(localErrors)].filter(Boolean).join("；")}</div>}
+    {dictionaryDefaults && !invalid && <InputDictionaryDefaults schema={schema} disabled={disabled} onChange={next => onChange(JSON.stringify(next, null, 2))} />}
     <Dialog open={!!pending} onOpenChange={open => { if (!open) setPending(undefined); }}><DialogContent><DialogHeader><DialogTitle>确认 Schema 结构变更</DialogTitle><DialogDescription className="whitespace-pre-wrap">{pending?.message}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setPending(undefined)}>取消</Button><Button disabled={disabled} onClick={() => { pending?.action(); setPending(undefined); }}>确认变更</Button></DialogFooter></DialogContent></Dialog>
   </section>;
 }

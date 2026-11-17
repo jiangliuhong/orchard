@@ -1,3 +1,4 @@
+import { assertSchema } from "../domain/validation.js";
 import { closeSync, constants, fsyncSync, lstatSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 import { AppError, check } from "../domain/errors.js";
@@ -11,7 +12,7 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { checkScriptSource } from "../runtime/script.js";
 import type { WebBridgeConfig } from "../web-bridge/config.js";
 import { prepareBridgeProposal } from "../web-bridge/authoring.js";
-import { assertTarget, onlyKeys, type MaintenanceTarget } from "./maintenance-protocol.js";
+import { assertTarget, maintenanceChangeSchemas, type MaintenanceTarget } from "./maintenance-protocol.js";
 import { workflowProjectionIdentity } from "./workspace-identity.js";
 import { assertProjectedToolSafe, workflowProjectionDependencies } from "./workspace-projection.js";
 import { assertBrowserToolsUnused } from "./workspace-dependencies.js";
@@ -58,8 +59,8 @@ export class MaintenanceAssets implements MaintenanceBusinessHost {
 
   async prepare(target: MaintenanceTarget, change: Record<string, unknown>, snapshot: MaintenanceSnapshot): Promise<PreparedMaintenanceChange> {
     assertTarget(target);
+    assertSchema(change, maintenanceChangeSchemas[target.kind], "维护提案变更", { safeSchemaPath: true });
     if (target.kind === "workflow_draft") {
-      onlyKeys(change, ["operation", "files"]); check(change.operation === "replace", "INVALID_PROPOSAL", "工作流只支持完整业务文件替换");
       const files = structuredClone(change.files) as SourceFiles; checkFiles(files);
       for (const path of Object.keys(files)) { safeFile(path); check(path !== "layout.json", "INVALID_PROPOSAL", "Agent 不能修改页面布局"); }
       const definition = readDefinition(files); check(definition.id === target.id, "IDENTITY_CONFLICT", "不能修改工作流身份", 409);
@@ -80,9 +81,6 @@ export class MaintenanceAssets implements MaintenanceBusinessHost {
       } };
     }
     if (target.kind === "script_draft") {
-      onlyKeys(change, ["operation", "definition"]); check(change.operation === "replace", "INVALID_PROPOSAL", "脚本只支持完整定义替换");
-      onlyKeys(change.definition, ["id", "name", "description", "runtime", "entryFile", "inputSchema", "outputSchema", "timeoutMs", "resultMode", "dictionaryBindings", "files"],
-        ["id", "name", "description", "runtime", "entryFile", "inputSchema", "outputSchema", "files"]);
       const definition = validateScript(change.definition), original = snapshot.before.definition as { runtime: string };
       check(definition.id === target.id && definition.runtime === original.runtime, "IDENTITY_CONFLICT", "不能修改脚本身份或运行时", 409);
       await checkScriptSource(definition); validateScriptDictionaries(this.store, definition);
@@ -93,7 +91,7 @@ export class MaintenanceAssets implements MaintenanceBusinessHost {
         return { kind: target.kind, id: target.id, draftVersionId: result.version.id, revision: result.version.revision };
       } };
     }
-    onlyKeys(change, ["operation", "changes"]); check(change.operation === "tools" && Array.isArray(change.changes) && change.changes.length > 0 && change.changes.length <= 20, "INVALID_PROPOSAL", "浏览器提案须包含 1–20 个工具变更");
+
     const prepared = prepareBridgeProposal(target.id, snapshot.before.tools as Parameters<typeof prepareBridgeProposal>[1], { summary: "受审工具变更", changes: change.changes });
     assertBrowserToolsUnused(this.store, new Set(prepared.proposal.changes.filter(item => item.operation === "delete").map(item => `${target.id}/${item.toolId}`)));
     for (const item of prepared.proposal.changes) if (item.operation !== "delete") assertProjectedToolSafe(item.definition);

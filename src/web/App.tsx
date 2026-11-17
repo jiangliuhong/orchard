@@ -1,5 +1,5 @@
-import { useNavigation } from "./lib/navigation";
-import { Component, useCallback, useState, type ReactNode } from "react";
+import { replaceRoute, useNavigation } from "./lib/navigation";
+import { Component, useCallback, useLayoutEffect, useState, type ReactNode } from "react";
 import { ScriptPage, ScriptsPage } from "./features/ScriptPages";
 import { WorkflowsPage, WorkflowPage } from "./features/WorkflowPages";
 import { DraftPage } from "./features/DraftPage";
@@ -16,7 +16,7 @@ import { BrowserNotifications } from "./lib/notifications";
 class ErrorBoundary extends Component<{ children: ReactNode }, { error?: string }> {
   state: { error?: string } = {};
   static getDerivedStateFromError(error: Error) { return { error: error.message }; }
-  render() { return this.state.error ? <div className="panel"><h1>页面暂时无法展示</h1><ErrorNotice message={this.state.error} /><a href="/">返回工作流列表 →</a></div> : this.props.children; }
+  render() { return this.state.error ? <div className="panel"><h1>页面暂时无法展示</h1><ErrorNotice message={this.state.error} /><a href="/quick-launch">返回快速执行 →</a></div> : this.props.children; }
 }
 export default function App() { return <BootstrapGate><BusinessApp /></BootstrapGate>; }
 export function BusinessApp() {
@@ -26,7 +26,11 @@ export function BusinessApp() {
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
   }, []));
-  const path = route.split("?")[0]!, parts = path.split("/").filter(Boolean), studio = parts[0] === "drafts";
+  useLayoutEffect(() => {
+    if (window.location.pathname === "/") replaceRoute("/quick-launch" + window.location.search);
+  }, [route]);
+  const pathname = route.split("?")[0]!;
+  const path = pathname === "/" ? "/quick-launch" : pathname, parts = path.split("/").filter(Boolean), studio = parts[0] === "drafts";
   const page = parts[0] === "quick-launch" ? <QuickLaunchPage /> : parts[0] === "dictionaries" ? parts[1] ? <DictionaryPage key={parts[1]} id={parts[1]} /> : <DictionariesPage /> : parts[0] === "web-bridge" ? <WebBridgeSettings /> : parts[0] === "scripts" ? parts[1] ? <ScriptPage key={parts[1]} id={parts[1]} /> : <ScriptsPage /> : parts[0] === "settings" ? <SettingsPage /> : parts[0] === "drafts" && parts[1] ? <DraftPage key={parts[1]} id={parts[1]} /> : parts[0] === "workflows" && parts[1] ? <WorkflowPage key={parts[1]} id={parts[1]} /> : parts[0] === "runs" && parts[1] ? <RunPage key={parts[1]} id={parts[1]} /> : parts[0] === "runs" ? /[?&](workflowId|draftId)=/.test(route) ? <RunsPage /> : <ExecutionHistoryPage /> : <WorkflowsPage />;
   return <div className={`app-shell ${studio ? "studio-shell" : ""} ${parts[0] === "settings" ? "settings-shell" : ""} ${parts[0] === "scripts" && parts[1] ? "script-shell" : ""} ${parts[0] === "web-bridge" ? "bridge-shell" : ""} ${parts[0] === "dictionaries" && parts[1] ? "dictionary-shell" : ""}`}>
     <AppSidebar section={parts[0] ?? ""} />

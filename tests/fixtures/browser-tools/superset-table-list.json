@@ -1,0 +1,78 @@
+{
+  "application": "superset",
+  "site": "superset",
+  "path": "/api/v1/database/",
+  "method": "GET",
+  "fields": [],
+  "catalogVersion": "1",
+  "enabled": true,
+  "toolId": "superset_table_list",
+  "description": "按 schema 列出 Superset 的表。默认连接名为 test_starrocks。",
+  "risk": "read",
+  "approval": "none",
+  "timeoutMs": 18000,
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "schema"
+    ],
+    "properties": {
+      "schema": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "databaseName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "default": "test_starrocks"
+      }
+    }
+  },
+  "execution": {
+    "version": 1,
+    "transport": "browser",
+    "response": {
+      "mode": "fullJson",
+      "maxBytes": 262144
+    },
+    "preprocess": {
+      "runtime": "nodejs",
+      "code": "return { ...request, headers: {}, variables: { databaseName: args.databaseName ?? \"test_starrocks\", schema: args.schema } };"
+    },
+    "flow": {
+      "capture": {
+        "databaseId": {
+          "at": [
+            "result"
+          ],
+          "match": {
+            "field": [
+              "database_name"
+            ],
+            "equalsFrom": "databaseName",
+            "value": [
+              "id"
+            ]
+          },
+          "positiveInteger": true
+        }
+      },
+      "steps": [
+        {
+          "method": "GET",
+          "path": "/api/v1/database/{databaseId}/tables/",
+          "query": {
+            "q": "(schema_name:{schema:rison})"
+          }
+        }
+      ]
+    },
+    "postprocess": {
+      "runtime": "nodejs",
+      "code": "const records = response?.result ?? response;\nif (!Array.isArray(records)) throw new Error(\"Unexpected table response\");\nreturn records.map(table => ({\n  name: typeof table === \"string\" ? table : table.name ?? table.table_name ?? table.value,\n  schema: args.schema,\n  ...(table?.type ? { type: table.type } : {}),\n})).filter(table => typeof table.name === \"string\" && table.name !== \"\");"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+import { inputDictionaryDefaults } from "../domain/input-defaults.js";
 import { pointer } from "../domain/validation.js";
 import { check } from "../domain/errors.js";
 import { normalizeDictionaryBindings, type DictionaryRequirement } from "../domain/dictionaries.js";
@@ -33,6 +34,10 @@ export function requirements(snapshot: PortableSnapshot, obj: PortableScript | P
   const found = new Map<string, DictionaryRequirement>();
   const add = (d: DictionaryRequirement) => { const previous = found.get(d.dictionaryId); check(!previous || previous.kind === d.kind, "DICTIONARY_KIND_MISMATCH", "字典依赖类型冲突", 422); found.set(d.dictionaryId, { ...d, keys: [...new Set([...(previous?.keys ?? []), ...d.keys])].sort() }); };
   const declarations = (raw: unknown) => Object.values(normalizeDictionaryBindings(raw) ?? {}).forEach(add);
+  const script = (definition: PortableScript["versions"][number]["definition"]) => {
+    declarations(definition.dictionaryBindings);
+    for (const [, ref] of inputDictionaryDefaults(definition.inputSchema)) add({ dictionaryId: ref.dictionaryId, kind: "plain", keys: [ref.key] });
+  };
   const walk = (raw: any) => {
     if (!raw || typeof raw !== "object") return;
     if (raw.source === "dictionary") add({ dictionaryId: raw.dictionaryId, kind: "plain", keys: [raw.key] });
@@ -41,7 +46,7 @@ export function requirements(snapshot: PortableSnapshot, obj: PortableScript | P
   };
   // Historical definitions remain immutable, but do not require removed keys to exist today.
   // A current workflow still resolves every exact script version it calls below.
-  if ("runtime" in obj) for (const d of [...obj.versions.filter(v => v.id === obj.currentPublishedVersionId).map(v => v.definition), ...(obj.draft ? [obj.draft] : [])]) declarations(d.dictionaryBindings);
+  if ("runtime" in obj) for (const d of [...obj.versions.filter(v => v.id === obj.currentPublishedVersionId).map(v => v.definition), ...(obj.draft ? [obj.draft] : [])]) script(d);
   else for (const source of [...obj.versions.filter(v => v.id === obj.currentPublishedVersionId), ...(obj.draft ? [obj.draft] : [])]) {
     const w = parseSnapshotJson(source.files["workflow.json"]!) as any;
     const nodes = Array.isArray(w.nodes) ? w.nodes : [];
@@ -57,7 +62,7 @@ export function requirements(snapshot: PortableSnapshot, obj: PortableScript | P
       }
       if (n.type === "script") {
         const d = snapshot.scripts.find(s => s.id === n.config?.scriptId)?.versions.find(v => v.id === n.config?.scriptVersionId)?.definition;
-        check(d, "DEPENDENCY_MISSING", "缺少固定脚本版本", 422); declarations(d.dictionaryBindings);
+        check(d, "DEPENDENCY_MISSING", "缺少固定脚本版本", 422); script(d);
       }
     }
   }

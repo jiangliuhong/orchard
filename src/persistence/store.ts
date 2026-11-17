@@ -1,3 +1,4 @@
+import { unresolvedInputSchema } from "../domain/input-defaults.js";
 import { CommandHmac, sensitiveRequestDigest } from "../secrets/command-hmac.js";
 import { KeyringStore, resolveKeyringPath } from "../secrets/keyring.js";
 import { captureScriptInput, normalizeScriptInputSources, stripReferencedInput, type ScriptInputSources } from "../domain/script-test-input.js";
@@ -303,8 +304,8 @@ export class Store {
     const diagnostics: { nodeId: string; contract: string; status: "compatible" | "incompatible" | "unknown" }[] = [];
     for (const node of definition.nodes) if (node.type === "script") {
       const version = this.scriptVersion(node.config.scriptVersionId!);
-      diagnostics.push({ nodeId: node.id, contract: "输入绑定", status: schemaSubset(bindingSchema(node.input, definition), version.inputSchema) });
-      if (node.inputSchema !== undefined) diagnostics.push({ nodeId: node.id, contract: "节点输入 Schema", status: schemaSubset(node.inputSchema, version.inputSchema) });
+      diagnostics.push({ nodeId: node.id, contract: "输入绑定", status: schemaSubset(bindingSchema(node.input, definition), unresolvedInputSchema(version.inputSchema, {})) });
+      if (node.inputSchema !== undefined) diagnostics.push({ nodeId: node.id, contract: "节点输入 Schema", status: schemaSubset(node.inputSchema, unresolvedInputSchema(version.inputSchema, {})) });
       diagnostics.push({ nodeId: node.id, contract: "节点输出 Schema", status: schemaSubset(node.outputSchema, version.outputSchema) });
     }
     return diagnostics;

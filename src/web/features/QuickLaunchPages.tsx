@@ -208,6 +208,96 @@ function CardEditor({ card, groups, close, reload }: { card?: Card; groups: Grou
   </Dialog>;
 }
 
+type HistoryPage = { items: Run[]; total: number; nextCursor: string | null };
+const pollingStatus = (status?: string) => busyStatus(status) && status !== "unknown";
+const runTime = (time: number) => new Date(time).toLocaleString("zh-CN");
+
+function CardHistoryList({ launchId, cursor, selected, select, rememberLatest, previous, next }: {
+  launchId: string; cursor: string; selected?: string; select: (run: Run) => void;
+  rememberLatest: (run: Run | undefined) => void; previous?: () => void; next: (cursor: string) => void;
+}) {
+  const history = useResource<HistoryPage>(`/executions?${new URLSearchParams({ launchId, limit: "10", cursor })}`);
+  useEffect(() => {
+    if (!history.data?.items.some(run => pollingStatus(run.status)) || history.error) return;
+    const timer = setTimeout(history.reload, 1200);
+    return () => clearTimeout(timer);
+  }, [history.data, history.error]);
+  useEffect(() => {
+    if (!cursor && history.data) rememberLatest(history.data.items[0]);
+  }, [cursor, history.data, rememberLatest]);
+  const nextCursor = history.data?.nextCursor;
+  return <section className="quick-history" aria-label="执行历史">
+    <div className="quick-history-heading"><strong>执行历史{history.data ? `（${history.data.total}）` : ""}</strong>
+      <Button size="sm" variant="ghost" onClick={history.reload}>刷新历史</Button></div>
+    <ErrorNotice message={history.error} />
+    {!history.data && !history.error && <p role="status">正在加载执行历史…</p>}
+    {history.data?.items.length === 0 && <p>暂无执行记录</p>}
+    <ul>{history.data?.items.map(run => <li key={run.id}>
+      <button type="button" className="quick-history-row" aria-pressed={run.id === selected} onClick={() => select(run)}>
+        <span>{runTime(run.acceptedAt)}</span><span className="quick-state" data-state={run.status}>{statuses[run.status] ?? run.status}</span>
+      </button>
+    </li>)}</ul>
+    {(previous || nextCursor) && <div className="quick-history-heading">
+      <Button size="sm" variant="outline" disabled={!previous} onClick={previous}>上一页</Button>
+      <Button size="sm" variant="outline" disabled={!nextCursor} onClick={() => next(nextCursor!)}>下一页</Button>
+    </div>}
+  </section>;
+}
+
+function CardRunDetail({ initial, id }: { initial?: Run; id: string }) {
+  const detail = useResource<Run>(`/executions/${encodeURIComponent(id)}`);
+  const run = detail.data ?? initial;
+  useEffect(() => {
+    if (!pollingStatus(detail.data?.status) || detail.error) return;
+    const timer = setTimeout(detail.reload, 1200);
+    return () => clearTimeout(timer);
+  }, [detail.data, detail.error]);
+  return <section className="quick-history" aria-label="运行详情">
+    <div className="quick-history-heading"><strong>运行详情</strong><Button size="sm" variant="ghost" onClick={detail.reload}>刷新详情</Button></div>
+    <ErrorNotice message={detail.error || run?.error?.message} />
+    {run ? <>
+      <p role="status">状态：{statuses[run.status] ?? run.status}</p>
+      {pollingStatus(run.status) && <p className="quick-state">关闭窗口后，执行会继续。</p>}
+      <dl className="quick-run-times">
+        <dt>提交时间</dt><dd>{runTime(run.acceptedAt)}</dd>
+        <dt>开始时间</dt><dd>{run.startedAt === null ? "—" : runTime(run.startedAt)}</dd>
+        <dt>结束时间</dt><dd>{run.endedAt === null ? "—" : runTime(run.endedAt)}</dd>
+      </dl>
+      {run.underlyingKind === "workflow_run" && run.underlyingId &&
+        <a href={`/runs/${encodeURIComponent(run.underlyingId)}`}>查看工作流步骤和输出</a>}
+      <details><summary>执行快照</summary><pre className="quick-json">{asText(run.snapshot)}</pre></details>
+    </> : !detail.error && <p role="status">正在加载运行详情…</p>}
+  </section>;
+}
+
+function CardHistoryDialog({ card, groups, initial, close, edit, copy, remove }: {
+  card: Card; groups: Group[]; initial?: Run; close: () => void; edit: () => void; copy: () => void; remove: () => void;
+}) {
+  const [selected, select] = useState(initial);
+  const [latest, rememberLatest] = useState<Run>();
+  const [cursors, setCursors] = useState<string[]>([""]);
+  const cursor = cursors.at(-1)!;
+  const run = selected ?? latest;
+  const runId = run?.id ?? card.recent?.id;
+  return <Dialog open onOpenChange={open => !open && close()}><DialogContent className="quick-detail">
+    <DialogTitle>{card.name}</DialogTitle>
+    <DialogDescription>{card.note || groupPath(groups, card.groupId)}</DialogDescription>
+    {card.needsReferenceUpdate && <p role="status">请编辑卡片，将旧参数引用替换为字典引用。</p>}
+    <div className="quick-history-grid">
+      <CardHistoryList key={cursor} launchId={card.id} cursor={cursor} selected={runId} select={select} rememberLatest={rememberLatest}
+        previous={cursors.length > 1 ? () => setCursors(old => old.slice(0, -1)) : undefined}
+        next={next => setCursors(old => [...old, next])} />
+      {runId && <CardRunDetail key={runId} initial={run} id={runId} />}
+    </div>
+    <details><summary>卡片配置</summary><pre className="quick-json">{asText({ target: card.target, input: card.fixedInput, sources: card.inputSources })}</pre></details>
+    <DialogFooter><Button variant="outline" onClick={edit}>编辑</Button>
+      <Button variant="outline" onClick={copy}>复制</Button>
+      <Button variant="destructive" onClick={remove}>删除</Button>
+      <Button variant="outline" onClick={close}>关闭</Button>
+    </DialogFooter>
+  </DialogContent></Dialog>;
+}
+
 export function QuickLaunchPage() {
   const cards = useResource<{ items: Card[] }>("/quick-launches"), groups = useResource<{ items: Group[] }>("/quick-launch-groups");
   const allGroups = groups.data?.items ?? [];
@@ -217,9 +307,10 @@ export function QuickLaunchPage() {
     replaceRoute(`/quick-launch${query.size ? `?${query}` : ""}`);
   };
   const group = query.get("group") ?? "*", text = query.get("q") ?? "", type = query.get("type") ?? "";
-  const [editing, setEditing] = useState<Card | "new">(), [managing, setManaging] = useState(false), [detail, setDetail] = useState<Card>();
+  const [editing, setEditing] = useState<Card | "new">(), [managing, setManaging] = useState(false), [detail, setDetail] = useState<{ card: Card; initial?: Run }>();
   const [confirm, setConfirm] = useState<{ card: Card; action: "run" | "delete" }>(), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [showTree, setShowTree] = useState(false);
+  const detailCard = cards.data?.items.find(card => card.id === detail?.card.id) ?? detail?.card;
   const allowed = descendants(allGroups, group);
   const filtered = (cards.data?.items ?? []).filter(card => {
     if (group !== "*" && (group === "ungrouped" ? card.groupId !== null : !card.groupId ||
@@ -243,7 +334,8 @@ export function QuickLaunchPage() {
       const path = `/quick-launches/${card.id}`;
       const start = { requestId: requestId(), revision: card.revision };
       const token = confirmed ? (await send<{ token: string }>(path + "/confirmation", start)).token : undefined;
-      await send(path + "/executions", { ...start, confirmationToken: token }); cards.reload(); setConfirm(undefined);
+      const run = await send<Run>(path + "/executions", { ...start, confirmationToken: token });
+      cards.reload(); setConfirm(undefined); setDetail({ card, initial: run });
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   return <section className="quick-workspace">
@@ -269,7 +361,7 @@ export function QuickLaunchPage() {
       const status = card.needsReferenceUpdate ? "需更新引用" : card.available ? statuses[card.recent?.status ?? ""] ?? "就绪" : "目标不可用";
       return <article className="quick-card" key={card.id}>
         <div className="quick-card-title"><span className="quick-kind-icon" title={types[card.target.kind]}><Icon size={15} aria-label={types[card.target.kind]} /></span>
-          <button className="quick-card-name" title={card.name} onClick={() => setDetail(card)}>{card.name}</button></div>
+          <button className="quick-card-name" title={card.name} onClick={() => setDetail({ card })}>{card.name}</button></div>
         <small title={card.note || groupPath(allGroups, card.groupId)}>{card.note || groupPath(allGroups, card.groupId)}</small>
         <div className="quick-card-footer"><span className="quick-state" data-state={card.available ? card.recent?.status ?? "ready" : "unavailable"}>{status}</span>
           <Button variant="outline" size="sm" disabled={!card.available || busyStatus(card.recent?.status) || busy}
@@ -283,14 +375,11 @@ export function QuickLaunchPage() {
       <GroupTree groups={allGroups} value={group} onChange={id => { set("group", id); setShowTree(false); }} />
       <Button variant="outline" onClick={() => { setShowTree(false); setManaging(true); }}>管理分组</Button></DialogContent></Dialog>}
     {managing && <GroupManager groups={allGroups} close={() => setManaging(false)} reload={reload} />}
-    {detail && <Dialog open onOpenChange={open => !open && setDetail(undefined)}><DialogContent className="quick-detail"><DialogTitle>{detail.name}</DialogTitle>
-      <DialogDescription>{detail.note || groupPath(allGroups, detail.groupId)}</DialogDescription>
-      {detail.needsReferenceUpdate && <p role="status">请编辑卡片，将旧参数引用替换为字典引用。</p>}
-      <pre className="quick-json">{asText({ target: detail.target, input: detail.fixedInput, sources: detail.inputSources })}</pre>
-      <DialogFooter><Button variant="outline" onClick={() => { setEditing(detail); setDetail(undefined); }}>编辑</Button>
-        <Button variant="outline" onClick={() => void send(`/quick-launches/${detail.id}/copy`, { requestId: requestId() }).then(() => { setDetail(undefined); reload(); }).catch(e => setError(e.message))}>复制</Button>
-        <Button variant="destructive" onClick={() => { setConfirm({ card: detail, action: "delete" }); setDetail(undefined); }}>删除</Button>
-      </DialogFooter></DialogContent></Dialog>}
+    {detail && detailCard && <CardHistoryDialog key={detail.card.id} card={detailCard} groups={allGroups} initial={detail.initial}
+      close={() => setDetail(undefined)}
+      edit={() => { setEditing(detailCard); setDetail(undefined); }}
+      copy={() => void send(`/quick-launches/${detail.card.id}/copy`, { requestId: requestId() }).then(() => { setDetail(undefined); reload(); }).catch(e => setError(e.message))}
+      remove={() => { setConfirm({ card: detailCard, action: "delete" }); setDetail(undefined); }} />}
     {confirm && <Dialog open onOpenChange={open => !open && setConfirm(undefined)}><DialogContent><DialogTitle>{confirm.action === "delete" ? "删除快捷启动" : "确认执行"}</DialogTitle>
       <DialogDescription>{confirm.action === "delete" ? `删除「${confirm.card.name}」后，其运行记录仍可查看。` : `执行「${confirm.card.name}」可能对目标环境产生变更。`}</DialogDescription>
       {confirm.action === "run" && <pre className="quick-json">{asText({ target: confirm.card.target, input: confirm.card.fixedInput, references: confirm.card.inputSources })}</pre>}

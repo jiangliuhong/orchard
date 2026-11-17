@@ -7,7 +7,7 @@ import type { Store } from "../persistence/store.js";
 import type { MaintenanceBusinessHost } from "./maintenance-assets.js";
 import { assertTarget, MAINTENANCE_CONTRACT, onlyKeys, type MaintenanceTarget } from "./maintenance-protocol.js";
 import { validateSessionReference, type ReferenceValidator, type ProviderSessionReference } from "./provider-contract.js";
-import { assertQuerySafe } from "./query-gateway.js";
+import { redactQueryText } from "./query-gateway.js";
 import { projectionState, requireWorkspaceSchema } from "./workspace-state.js";
 import { assertMaintenanceOwnerAvailable, maintenanceOwnerRetired, requireWorkspaceBusinessTracking } from "./workspace-business-hooks.js";
 
@@ -132,8 +132,7 @@ export class MaintenanceSessions {
       try { text = (this.store.dereference(ref) as Record<string, unknown> | null)?.[key]; }
       catch { return "历史内容不可用"; }
       if (typeof text !== "string") return "";
-      try { assertQuerySafe(text, secrets); return text; }
-      catch { return "内容因包含敏感信息而隐藏"; }
+      return redactQueryText(text, secrets);
     };
     const secrets = [...this.boundary.knownSecrets(), this.store.root, homedir()];
     const conversations = rows.map(session => {
@@ -278,8 +277,8 @@ export class MaintenanceSessions {
   recordDisplay(handle: MaintenanceTaskHandle, text: string) {
     const { task } = this.claimed(handle);
     check(task.status === "running" && typeof text === "string" && Buffer.byteLength(text) <= 256 * 1024, "INVALID_TASK_OUTPUT", "展示输出已失效或超过预算", 409);
-    assertQuerySafe(text, [...this.boundary.knownSecrets(), this.store.root, homedir()]);
-    this.store.exec("UPDATE agent_maintenance_tasks SET display_output_ref=? WHERE id=?", this.store.reference({ text }), task.id);
+    const display = redactQueryText(text, [...this.boundary.knownSecrets(), this.store.root, homedir()]);
+    this.store.exec("UPDATE agent_maintenance_tasks SET display_output_ref=? WHERE id=?", this.store.reference({ text: display }), task.id);
   }
   private unknown(task: Task) {
     this.store.transaction(() => {

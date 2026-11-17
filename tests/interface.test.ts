@@ -39,7 +39,7 @@ dom.window.HTMLElement.prototype.scrollIntoView = () => {};
 dom.window.HTMLElement.prototype.hasPointerCapture = () => false;
 dom.window.HTMLElement.prototype.setPointerCapture = () => {};
 dom.window.HTMLElement.prototype.releasePointerCapture = () => {};
-const { render, screen, fireEvent, cleanup, waitFor, act } = await import("@testing-library/react");
+const { render, screen, fireEvent, cleanup, waitFor, act, within } = await import("@testing-library/react");
 const { ProviderPicker } = await import("../src/web/features/ProviderPicker.js");
 const { AgentModelConfigPicker } = await import("../src/web/features/AgentModelConfigPicker.js");
 const { SettingsPage } = await import("../src/web/features/SettingsPage.js");
@@ -272,11 +272,15 @@ test("Web Bridge refreshes browser profiles and offers newly registered profiles
   try {
     render(createElement(WebBridgeSettings));
     fireEvent.click(await screen.findByRole("button", { name: "环境" }));
+    const add = screen.getByRole("button", { name: "新增环境" });
+    fireEvent.click(add);
     assert.ok(screen.getByText("暂无已连接的浏览器资料，请先启动 Chrome 扩展。"));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     connected = true;
     fireEvent.click(screen.getByRole("button", { name: "浏览器连接" }));
     fireEvent.click(screen.getByRole("button", { name: "刷新浏览器资料" }));
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    fireEvent.click(add);
     assert.ok(await screen.findByRole("option", { name: "Chrome · klmnop · ijklmnop · 已连接" }));
     assert.equal(screen.queryByText("浏览器资料：1 个在线"), null);
   } finally { globalThis.fetch = originalFetch; }
@@ -310,16 +314,19 @@ test("Web Bridge lists named browser profiles with details and refreshes names w
     assert.equal(list.querySelector("time")!.dateTime, new Date(lastSeen).toISOString());
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     fireEvent.click(await screen.findByRole("button", { name: "环境" }));
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
     const select = screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement;
     const work = screen.getByRole("option", { name: "工作 Chrome · ile-work · 已连接" }) as HTMLOptionElement;
     assert.equal(work.value, "profile-work");
+    assert.equal(select.value, "profile-work");
     assert.equal((screen.getByRole("option", { name: "测试 Chrome · ile-test · 已断开" }) as HTMLOptionElement).disabled, true);
-    fireEvent.change(select, { target: { value: "profile-work" } });
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     name = "财务工作浏览器";
     fireEvent.click(screen.getByRole("button", { name: "刷新网页桥接" }));
-    await screen.findByRole("option", { name: "财务工作浏览器 · ile-work · 已连接" });
-    assert.equal(select.value, "profile-work");
-    assert.ok(screen.getByText("财务工作浏览器 · 已连接"));
+    await screen.findByText("财务工作浏览器 · 已连接");
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    assert.ok(screen.getByRole("option", { name: "财务工作浏览器 · ile-work · 已连接" }));
+    assert.equal((screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement).value, "profile-work");
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -341,6 +348,10 @@ test("Web Bridge saves a named environment without a browser and validates dupli
   try {
     render(createElement(WebBridgeSettings));
     fireEvent.click(await screen.findByRole("button", { name: "环境" }));
+    const add = screen.getByRole("button", { name: "新增环境" });
+    assert.equal(screen.queryByLabelText("环境标识"), null);
+    fireEvent.click(add);
+    assert.ok(screen.getByRole("dialog", { name: "新增环境" }));
     const button = screen.getByRole("button", { name: "添加环境" }) as HTMLButtonElement;
     fireEvent.change(screen.getByLabelText("网站 Origin"), { target: { value: "https://example.test" } });
     assert.equal(button.disabled, true);
@@ -348,11 +359,17 @@ test("Web Bridge saves a named environment without a browser and validates dupli
     assert.equal(button.disabled, false);
     fireEvent.click(button);
     await screen.findByText("本机未绑定浏览器");
+    assert.equal(screen.queryByRole("dialog"), null);
     assert.deepEqual(writes, [{ key: "production", origin: "https://example.test", profileId: "", enabled: true }]);
+    fireEvent.click(add);
+    const submit = screen.getByRole("button", { name: "添加环境" }) as HTMLButtonElement;
     fireEvent.change(screen.getByLabelText("环境标识"), { target: { value: "production" } });
     fireEvent.change(screen.getByLabelText("网站 Origin"), { target: { value: "https://another.test" } });
-    assert.equal(button.disabled, true);
+    assert.equal(submit.disabled, true);
     assert.ok(screen.getByText("该应用中已存在相同的环境标识"));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    assert.equal(screen.queryByRole("dialog"), null);
+    assert.equal(writes.length, 1);
     fireEvent.click(screen.getByRole("button", { name: "编辑" }));
     assert.equal((screen.getByLabelText("环境标识") as HTMLInputElement).value, "production");
     assert.equal((screen.getByRole("combobox", { name: "选择浏览器资料" }) as HTMLSelectElement).value, "");
@@ -1325,18 +1342,21 @@ test("navigation supports keyboard access and settings defaults to general", asy
     dom.window.history.replaceState({}, "", "/");
     render(createElement(App));
     const sidebar = screen.getByRole("complementary", { name: "侧栏" });
-    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "工作流定义");
+    assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "快速执行");
     assert.equal(screen.queryByText("创建和编排流程，管理草稿与已发布版本。"), null);
-    assert.equal(screen.getByRole("link", { name: "运行记录" }).getAttribute("href"), "/runs");
+    assert.equal(window.location.pathname, "/quick-launch");
+    const navigation = within(screen.getByRole("navigation", { name: "主导航" }));
+    assert.equal(navigation.getByRole("link", { name: "运行记录" }).getAttribute("href"), "/runs");
     const user = userEvent.setup({ document: dom.window.document });
     await user.tab();
-    assert.equal((document.activeElement as HTMLAnchorElement).getAttribute("href"), "/");
+    assert.equal((document.activeElement as HTMLAnchorElement).getAttribute("href"), "/quick-launch");
     await user.tab();
     assert.equal(document.activeElement?.getAttribute("aria-label"), "折叠侧栏");
     await user.tab();
-    assert.equal(document.activeElement?.getAttribute("aria-label"), "工作流");
-    await user.tab();
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "快速执行");
     assert.equal(document.activeElement?.getAttribute("aria-current"), "page");
+    await user.tab();
+    assert.equal(document.activeElement?.getAttribute("aria-label"), "工作流");
     await user.click(screen.getByRole("link", { name: "设置" }));
     assert.equal(window.location.pathname, "/settings");
     assert.equal(screen.getByRole("complementary", { name: "侧栏" }), sidebar);
@@ -1346,7 +1366,7 @@ test("navigation supports keyboard access and settings defaults to general", asy
     fireEvent.click(screen.getByRole("button", { name: "Provider" }));
     assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置Provider");
     window.history.back();
-    await waitFor(() => assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "工作流定义"));
+    await waitFor(() => assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "快速执行"));
     window.history.forward();
     await waitFor(() => assert.equal(screen.getByRole("navigation", { name: "面包屑导航" }).textContent, "设置常规"));
     fireEvent.click(screen.getByRole("button", { name: "配置同步" }));
@@ -1365,7 +1385,7 @@ test("sidebar collapse persists and workflow children remain accessible", async 
     assert.equal(localStorage.getItem("orchard.sidebar.collapsed"), "true");
     assert.equal(screen.queryByRole("link", { name: "运行记录" }), null);
     fireEvent.click(screen.getByRole("button", { name: "工作流" }));
-    assert.equal(screen.getByRole("link", { name: "工作流定义" }).getAttribute("href"), "/");
+    assert.equal(screen.getByRole("link", { name: "工作流定义" }).getAttribute("href"), "/workflows");
     fireEvent.keyDown(document, { key: "Escape" });
     assert.equal(screen.queryByRole("link", { name: "工作流定义" }), null);
     view.unmount();

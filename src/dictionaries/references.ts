@@ -1,3 +1,7 @@
+import { readConfiguredBridge } from "../web-bridge/configured.js";
+import type { JsonSchema } from "../domain/types.js";
+import { inputDictionaryDefaults } from "../domain/input-defaults.js";
+import type { ScriptDefinition } from "../domain/scripts.js";
 import { createHash } from "node:crypto";
 import { check } from "../domain/errors.js";
 import { normalizeDictionaryBindings } from "../domain/dictionaries.js";
@@ -5,7 +9,7 @@ import { validateWorkflow } from "../domain/validation.js";
 import type { Store } from "../persistence/store.js";
 
 export interface DictionaryReference {
-  objectType: "workflow" | "script" | "quick_launch";
+  objectType: "workflow" | "script" | "quick_launch" | "browser_tool";
   objectId: string;
   name: string;
   versionId: string;
@@ -19,7 +23,7 @@ export interface DictionaryReference {
 export interface ReferenceScan {
   items: DictionaryReference[];
   complete: boolean;
-  issues: { objectType: "workflow" | "script" | "quick_launch"; objectId: string; versionId: string; code: "REFERENCE_UNREADABLE" }[];
+  issues: { objectType: "workflow" | "script" | "quick_launch" | "browser_tool"; objectId: string; versionId: string; code: "REFERENCE_UNREADABLE" }[];
 }
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -33,6 +37,11 @@ export class DictionaryReferenceScanner {
     };
     const declarations = (value: unknown, base: Omit<DictionaryReference, "keys" | "via">, via: DictionaryReference["via"]) => {
       for (const declaration of Object.values(normalizeDictionaryBindings(value) ?? {})) if (declaration.dictionaryId === dictionaryId) items.push({ ...base, via, keys: declaration.keys });
+    };
+    const script = (definition: ScriptDefinition, base: Omit<DictionaryReference, "keys" | "via">, via: DictionaryReference["via"]) => {
+      declarations(definition.dictionaryBindings, base, via);
+      for (const [, ref] of inputDictionaryDefaults(definition.inputSchema))
+        if (ref.dictionaryId === dictionaryId) items.push({ ...base, via, keys: [ref.key] });
     };
     const workflow = (value: unknown, base: Omit<DictionaryReference, "keys" | "via">) => {
       // Drafts may be incomplete; retain readable references while marking their uncertainty.
@@ -62,7 +71,7 @@ export class DictionaryReferenceScanner {
             const version = this.store.scriptVersion(versionId);
             check(version.scriptId === scriptId && version.status === "published", "REFERENCE_UNREADABLE", "固定脚本版本无效");
             const definition = this.store.scriptDefinition(scriptId, versionId);
-            declarations(definition.dictionaryBindings, { ...nodeBase, scriptId, scriptVersionId: versionId }, "script");
+            script(definition, { ...nodeBase, scriptId, scriptVersionId: versionId }, "script");
           } else declarations(node.config.dictionaryBindings, nodeBase, "declaration");
         } catch { issue(base); }
       }
@@ -81,8 +90,18 @@ export class DictionaryReferenceScanner {
     }
     for (const row of this.store.all<{ id: string; script_id: string; name: string; status: string; current_published_version_id: string | null }>("SELECT v.id,v.script_id,v.status,s.name,s.current_published_version_id FROM script_versions v JOIN scripts s ON s.id=v.script_id ORDER BY v.script_id,v.id")) {
       const base = { objectType: "script" as const, objectId: row.script_id, name: row.name, versionId: row.id, state: row.status === "draft" ? "draft" as const : row.id === row.current_published_version_id ? "current" as const : "history" as const };
-      try { declarations(this.store.scriptDefinition(row.script_id, row.id).dictionaryBindings, base, "declaration"); } catch { issue(base); }
+      try { script(this.store.scriptDefinition(row.script_id, row.id), base, "declaration"); } catch { issue(base); }
     }
+    try {
+      const tools = readConfiguredBridge(this.store, true).tools;
+      check(object(tools), "REFERENCE_UNREADABLE", "工具定义不可读");
+      for (const [id, tool] of Object.entries(tools)) {
+        const base = { objectType: "browser_tool" as const, objectId: id, versionId: "", state: "current" as const };
+        if (!object(tool) || !object(tool.parameters)) { issue(base); continue; }
+        for (const [, ref] of inputDictionaryDefaults(tool.parameters as JsonSchema)) if (ref.dictionaryId === dictionaryId)
+          items.push({ ...base, name: id, via: "binding", keys: [ref.key] });
+      }
+    } catch { issue({ objectType: "browser_tool", objectId: "", versionId: "" }); }
     if (this.store.one("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='quick_launches'")) {
       for (const row of this.store.all<{ id: string; name: string; revision: number; input_sources_json: string; target_json: string }>(
         "SELECT id,name,revision,input_sources_json,target_json FROM quick_launches ORDER BY id")) {
@@ -112,7 +131,8 @@ export class DictionaryReferenceScanner {
     return keys.map(key => {
       const refs = scan.items.filter(item => item.keys.includes(key));
       const quickLaunches = new Set(refs.filter(ref => ref.objectType === "quick_launch").map(ref => ref.objectId)).size;
-      return { key, ...(quickLaunches ? { quickLaunches } : {}), workflows: new Set(refs.filter(i => i.objectType === "workflow").map(i => i.objectId)).size, scripts: new Set(refs.filter(i => i.objectType === "script").map(i => i.objectId)).size };
+      const browserTools = new Set(refs.filter(ref => ref.objectType === "browser_tool").map(ref => ref.objectId)).size;
+      return { key, ...(browserTools ? { browserTools } : {}), ...(quickLaunches ? { quickLaunches } : {}), workflows: new Set(refs.filter(i => i.objectType === "workflow").map(i => i.objectId)).size, scripts: new Set(refs.filter(i => i.objectType === "script").map(i => i.objectId)).size };
     });
   }
   list(dictionaryId: string, input: { view?: "current" | "history" | "all"; limit?: number; cursor?: string } = {}) {

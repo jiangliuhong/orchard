@@ -198,10 +198,14 @@ test("startup recovery preserves uncertain processes and queued tasks; reconcili
 });
 
 test("async stop checks fail closed and display records never replay credentials or history as a prompt", async t => {
-  const f = await fixture(t), sessionId = f.make(), task = f.sessions.enqueue("local", sessionId, f.input(sessionId)), launch = f.sessions.claim(task.id);
+  const f = await fixture(t), sessionId = f.make(), task = f.sessions.enqueue("local", sessionId, f.input(sessionId, "display", "Configure secret:true with PRIVATE_CREDENTIAL_MARKER.")), launch = f.sessions.claim(task.id);
   f.sessions.recordDisplay(launch.handle, "A user-visible explanation");
   assert.ok(!JSON.stringify(f.sessions.tasks("local", sessionId)).includes("A user-visible explanation"));
-  assert.throws(() => f.sessions.recordDisplay(launch.handle, "PRIVATE_CREDENTIAL_MARKER"), { code: "QUERY_SENSITIVE_CONTENT" });
+  f.sessions.recordDisplay(launch.handle, "Use secret:true; protected value PRIVATE_CREDENTIAL_MARKER.");
+  const history = f.sessions.ownerHistory("local", "workflow_draft", f.draft.id, sessionId);
+  assert.equal(history.conversations[0]!.title, "Configure secret:true with [已隐藏].");
+  assert.equal(history.tasks[0]!.prompt, "Configure secret:true with [已隐藏].");
+  assert.equal(history.tasks[0]!.text, "Use secret:true; protected value [已隐藏].");
   f.store.exec("UPDATE agent_maintenance_tasks SET error_code='PRIVATE_CREDENTIAL_MARKER' WHERE id=?", task.id);
   assert.equal(f.sessions.tasks("local", sessionId)[0]!.errorCode, "MAINTENANCE_TASK_FAILED");
   assert.ok(!JSON.stringify(f.sessions.tasks("local", sessionId)).includes("PRIVATE_CREDENTIAL_MARKER"));

@@ -1,5 +1,5 @@
 import { WORKSPACE_MAINTENANCE_SCHEMA } from "../src/agent/workspace-schema.js";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -65,7 +65,7 @@ import type { SessionProvider, ProviderSessionHandle, SessionOpenRequest, Sessio
 import type { SourceFiles, Workflow } from "../src/domain/types.js";
 
 export function temporary(t: TestContext) {
-  const root = mkdtempSync(join(tmpdir(), "orchard-workbench-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "orchard-workbench-"));
   t.after(() => rmSync(root, { force: true, recursive: true })); return root;
 }
 export class TestProvider implements AgentProvider {

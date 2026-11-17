@@ -1,9 +1,10 @@
+import { publicMaintenanceError } from "./maintenance-tool-errors.js";
 import { randomBytes } from "node:crypto";
 import { AppError, check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import { canonicalJson } from "../persistence/files.js";
 import type { Store } from "../persistence/store.js";
-import { assertTarget, MAINTENANCE_CONTRACT, type MaintenanceTarget } from "./maintenance-protocol.js";
+import { assertTarget, maintenanceProposalSchema, type MaintenanceTarget } from "./maintenance-protocol.js";
 import type { MaintenanceService } from "./maintenance-service.js";
 import { projectionState } from "./workspace-state.js";
 import type { ScopedWorkspaceReader } from "./workspace-files.js";
@@ -14,8 +15,6 @@ interface Grant {
   projectionGeneration: number; projectionHash: string; baseline: unknown; expiresAt: number; signal: AbortSignal; revoke(): void;
 }
 const id = { type: "string", minLength: 1, maxLength: 200 };
-const publicErrorCodes = new Set(["METHOD_NOT_FOUND", "MCP_NOT_INITIALIZED", "TOOL_INPUT_TOO_LARGE", "INVALID_REQUEST", "SCHEMA_MISMATCH", "TOOL_AUTHORIZATION_REVOKED", "MAINTENANCE_AUTHORIZATION_REVOKED", "FORBIDDEN", "CONFIRMATION_REQUIRED", "OWNER_UNAVAILABLE", "REVISION_CONFLICT", "PROPOSAL_TARGET_MISMATCH", "PROPOSAL_BUDGET_EXCEEDED", "QUERY_SENSITIVE_CONTENT", "TOOL_DENIED", "TOOL_RESULT_TOO_LARGE"]);
-const publicError = (error: unknown, fallback: string) => error instanceof AppError && publicErrorCodes.has(error.code) ? error.code : fallback;
 const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({ type: "object", properties, required, additionalProperties: false });
 export type MaintenanceToolName = "submit_proposal" | "apply_proposal" | "proposal_status";
 
@@ -64,9 +63,7 @@ export class MaintenanceToolGateway {
   tools(token: string) {
     const grant = this.validate(token);
     return [
-      { name: "submit_proposal", description: "提交固定目标的不可变候选变更并生成 diff；不应用、不确认、不发布。", inputSchema: object({
-        contractVersion: { const: MAINTENANCE_CONTRACT }, requestId: id, summary: { type: "string", minLength: 1, maxLength: 4000 }, target: { const: JSON.parse(canonicalJson(grant.target)) }, baseline: { const: JSON.parse(canonicalJson(grant.baseline)) }, change: { type: "object" },
-      }), annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false } },
+      { name: "submit_proposal", description: "提交固定目标的不可变候选变更并生成 diff；不应用、不确认、不发布。", inputSchema: maintenanceProposalSchema({ target: grant.target, baseline: grant.baseline }), annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false } },
       { name: "apply_proposal", description: "登记已获真实用户确认的提案应用请求；活动轮次仅返回 queued，停止读取后平台统一应用。", inputSchema: object({ proposalId: id, requestId: id }), annotations: { readOnlyHint: false, idempotentHint: true, destructiveHint: false, openWorldHint: false } },
       { name: "proposal_status", description: "查询本对话提案状态，不重放历史、不触发模型或业务执行。", inputSchema: object({ proposalId: id }), annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false } },
     ];
@@ -75,7 +72,7 @@ export class MaintenanceToolGateway {
     const grant = this.validate(token), tool = this.tools(token).find(tool => tool.name === name);
     check(tool, "TOOL_DENIED", "工具不在维护 allowlist 中", 403);
     check(Buffer.byteLength(canonicalJson(args)) <= 8 * 1024 * 1024, "TOOL_INPUT_TOO_LARGE", "工具参数超限");
-    assertSchema(args, tool.inputSchema, "维护工具参数");
+    assertSchema(args, tool.inputSchema, "维护工具参数", { safeSchemaPath: true });
     const value = args as { proposalId?: string; requestId?: string };
     if (name !== "submit_proposal") {
       const proposal = this.store.one<{ session_id: string; target_kind: string; target_id: string; target_scope_json: string }>("SELECT session_id,target_kind,target_id,target_scope_json FROM agent_maintenance_proposals WHERE id=? AND actor_key=?", value.proposalId!, grant.actor);
@@ -131,15 +128,15 @@ export class MaintenanceMcpConnection {
             const value = await this.gateway.call(this.token, params.name, params.arguments);
             result = { content: [{ type: "text", text: canonicalJson(value) }], structuredContent: value, isError: false };
           } catch (error) {
-            const code = publicError(error, "TOOL_FAILED");
-            result = { content: [{ type: "text", text: canonicalJson({ code, message: "维护工具调用未完成，请查看平台状态" }) }], isError: true };
+            const detail = publicMaintenanceError(error) ?? { code: "TOOL_FAILED", message: "维护工具调用未完成，请查看平台状态" };
+            result = { content: [{ type: "text", text: canonicalJson(detail) }], isError: true };
           }
         } else throw new AppError("METHOD_NOT_FOUND", "不支持的 MCP 方法");
       }
       check(Buffer.byteLength(canonicalJson(result)) <= 65536, "TOOL_RESULT_TOO_LARGE", "MCP 结果超限");
       return { jsonrpc: "2.0", id: requestId, result };
     } catch (error) {
-      return { jsonrpc: "2.0", id: requestId, error: { code: error instanceof AppError && error.code === "METHOD_NOT_FOUND" ? -32601 : -32600, message: publicError(error, "MCP_FAILED") } };
+      return { jsonrpc: "2.0", id: requestId, error: { code: error instanceof AppError && error.code === "METHOD_NOT_FOUND" ? -32601 : -32600, message: publicMaintenanceError(error)?.code ?? "MCP_FAILED" } };
     }
   }
 }

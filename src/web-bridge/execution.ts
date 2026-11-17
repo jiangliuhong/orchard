@@ -1,3 +1,4 @@
+import { browserFlowRequiresApproval, validateBrowserFlow } from "./browser-flow.js";
 import { credentialSchema, credentialProperties, credentialRequired } from "./credential-schema.js";
 import { allowsRequestBody, type BridgeHttpMethod } from "./http-methods.js";
 import { BROWSER_EXECUTION_SCHEMA, type BrowserExecution } from "./browser-execution.js";
@@ -61,6 +62,7 @@ const forbiddenHeaders = new Set(["host", "cookie", "origin", "referer", "conten
 export function validateHttpDefinition(path: string, method: string, execution: BridgeExecution, parameters: JsonSchema) {
   validatePath(path, execution.transport === "localHttp");
   if (execution.transport === "browser") {
+    if (execution.flow) validateBrowserFlow(execution.flow);
     const schema = credentialSchema(execution);
     assertSchema({}, { type: "object", properties: { credentials: schema } }, "凭据 Schema");
     const names = Object.keys(credentialProperties(execution));
@@ -82,10 +84,13 @@ export function validateHttpDefinition(path: string, method: string, execution: 
   }
 }
 
-export function validateStoredHttpTool(tool: { path: string; method: string; parameters: JsonSchema; execution?: BridgeExecution }) {
+export function validateStoredHttpTool(tool: { path: string; method: string; parameters: JsonSchema; execution?: BridgeExecution; risk?: string; approval?: string }) {
   if (!tool.execution) return;
   assertSchema(tool.execution, BRIDGE_HTTP_SCHEMA, "HTTP 执行配置");
   validateHttpDefinition(tool.path, tool.method, tool.execution, tool.parameters);
+  if (tool.execution.transport === "browser" && tool.execution.flow && browserFlowRequiresApproval(tool.method, tool.execution.flow)) {
+    check(tool.risk && tool.risk !== "read" && tool.approval === "user", "INVALID_BROWSER_FLOW", "包含非 GET/HEAD 步骤的浏览器请求链必须声明操作风险并要求用户确认");
+  }
 }
 
 export interface HttpTool { path: string; method: BridgeHttpMethod; fields: string[]; execution: BridgeHttpExecution }
@@ -93,6 +98,7 @@ export type CredentialResolver = (dictionaryId: string, key: string) => string;
 export interface HttpDependencies {
   fetch?: typeof fetch;
   resolveCredential?: CredentialResolver;
+  resolveInputDefault?: (id: string, key: string) => unknown;
   now?: () => number;
   nonce?: (bytes: number) => string;
 }

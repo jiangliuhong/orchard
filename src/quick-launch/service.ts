@@ -1,7 +1,9 @@
+import { unresolvedInputSchema } from "../domain/input-defaults.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { AppError, check } from "../domain/errors.js";
 import { assertSchema } from "../domain/validation.js";
 import { canonicalJson, digest, json } from "../persistence/files.js";
+import type { Channel } from "../external-agent/policy.js";
 import { configCoordinator } from "../config-git/coordinator.js";
 import type { Store } from "../persistence/store.js";
 import type { GraphRunner } from "../runtime/runner.js";
@@ -21,6 +23,7 @@ export class QuickLaunchService {
   private timer?: ReturnType<typeof setInterval>;
   private stopped = false;
   private readonly volatileInputs = new Map<string, unknown>();
+  private readonly agentBridgeOutputs = new Map<string, unknown>();
   private readonly completions = new Map<string, { status: string; error?: unknown; claim?: string }>();
   private readonly calls = new Map<string, { cancel: AbortController; done: Promise<void> }>();
 
@@ -65,6 +68,7 @@ export class QuickLaunchService {
     await Promise.allSettled([...this.calls.values()].map(call => call.done));
     this.volatileInputs.clear();
     this.completions.clear();
+    this.agentBridgeOutputs.clear();
   }
 
   private settleBridge(id: string, status: string, error?: unknown, claim?: string) {
@@ -139,7 +143,7 @@ export class QuickLaunchService {
         if (!this.volatileInputs.has(task.id)) { this.finish(task.id, "interrupted", undefined, claim); return; }
         input = this.volatileInputs.get(task.id);
       } else input = snapshot.fixedInput;
-      assertSchema(input, contract.schema, "运行参数");
+      assertSchema(input, unresolvedInputSchema(contract.schema, input), "运行参数");
     } catch (error) {
       this.volatileInputs.delete(task.id);
       this.finish(task.id, "start_failed", error, claim);
@@ -160,7 +164,15 @@ export class QuickLaunchService {
     const done = this.bridge.call(target.applicationId, target.toolId, input, {
       requestId: task.id, environmentId: target.environmentId ?? undefined, timeoutMs: target.timeoutMs, approved,
       signal: cancel.signal, credentialBindings: target.credentialBindings, omitHistoryArgs: true, skipLegacyHistory: true, onDispatch: () => { dispatched = true; }
-    }).then(() => this.settleBridge(task.id, "succeeded", undefined, claim),
+    }).then(result => {
+      if (this.store.one("SELECT id FROM execution_records WHERE id=? AND request_scope LIKE 'agent:%'", task.id)) {
+        if (Buffer.byteLength(JSON.stringify(result) ?? "") <= 256 * 1024) {
+          this.agentBridgeOutputs.set(task.id, result);
+          if (this.agentBridgeOutputs.size > 32) this.agentBridgeOutputs.delete(this.agentBridgeOutputs.keys().next().value!);
+        }
+      }
+      this.settleBridge(task.id, "succeeded", undefined, claim);
+    },
       error => this.settleBridge(task.id, dispatched ? "unknown" : "start_failed", error, claim)).finally(() => this.calls.delete(task.id));
     this.calls.set(task.id, { cancel, done });
   }
@@ -274,8 +286,8 @@ export class QuickLaunchService {
       Buffer.from(this.sign(row, input.requestId, Number(timestamp)), "hex")), "CONFIRMATION_REQUIRED", "确认已过期或目标已变化");
   }
 
-  start(id: string, input: Start) {
-    const scope = `quick-launch:${id}`, requestDigest = digest(canonicalJson({ revision: input.revision }));
+  start(id: string, input: Start, channel?: Channel) {
+    const scope = channel ? `agent:${channel}:${id}` : `quick-launch:${id}`, requestDigest = digest(canonicalJson({ revision: input.revision }));
     const admission = this.store.transaction(() => {
       const prior = this.store.one<Execution>("SELECT * FROM execution_records WHERE request_scope=? AND request_id=?", scope, input.requestId);
       if (prior) {
@@ -309,7 +321,7 @@ export class QuickLaunchService {
       const resolved = resolveInput(card.fixedInput, sources,
         (dictionaryId, key, field) => this.readDictionary(dictionaryId, key, isSensitiveField(schema, field)));
       const privateInput = Object.keys(sources).length > 0 || target.kind === "browser_tool";
-      assertSchema(resolved, schema, "运行参数");
+      assertSchema(resolved, unresolvedInputSchema(schema, resolved), "运行参数");
       this.dispatch(executionId, target, resolved, privateInput);
     } catch (error) {
       this.finish(executionId, "start_failed", error);
@@ -398,10 +410,10 @@ export class QuickLaunchService {
     }
   }
 
-  history(query: { q?: string; type?: string; source?: string; status?: string; from?: string; to?: string; cursor?: string; limit?: string }) {
+  history(query: { launchId?: string; q?: string; type?: string; source?: string; status?: string; from?: string; to?: string; cursor?: string; limit?: string }) {
     this.reconcile();
     const clauses = ["parent_execution_id IS NULL"], params: (string | number)[] = [];
-    for (const [key, column] of [["type", "target_kind"], ["source", "source"], ["status", "status"]] as const) {
+    for (const [key, column] of [["launchId", "launch_id"], ["type", "target_kind"], ["source", "source"], ["status", "status"]] as const) {
       if (query[key]) { clauses.push(`${column}=?`); params.push(query[key]!); }
     }
     for (const [key, operator] of [["from", ">="], ["to", "<="]] as const) if (query[key]) {
@@ -425,6 +437,34 @@ export class QuickLaunchService {
       ORDER BY accepted_at DESC,id DESC LIMIT ?`, ...params, limit + 1);
     const page = rows.slice(0, limit), last = page.at(-1);
     return { items: page.map(row => this.readDetail(row.id)), total, nextCursor: rows.length > limit && last ? `${last.accepted_at}:${last.id}` : null };
+  }
+
+  agentGrant(channel: Channel, id: string) {
+    const record = this.store.one<{ id: string; revision: number }>(`SELECT launch_id AS id, config_revision AS revision
+      FROM execution_records WHERE id=? AND request_scope=('agent:' || ? || ':' || launch_id)`, id, channel);
+    check(record, "NOT_FOUND", "该入口的运行记录不存在", 404);
+    return record;
+  }
+
+  agentResult(channel: Channel, id: string) {
+    this.agentGrant(channel, id);
+    const { status, name, underlyingKind, underlyingId, error } = this.detail(id);
+    let output: unknown;
+    let outputAvailability = "not_recorded";
+    if (status === "succeeded" && underlyingId) {
+      if (underlyingKind === "script_test") {
+        const test = this.store.scriptTest(underlyingId);
+        if (test.outputRedacted) outputAvailability = "restricted";
+        else output = test.output;
+      } else if (underlyingKind === "bridge_call") {
+        output = this.agentBridgeOutputs.get(id);
+      }
+    }
+    if (output !== undefined) {
+      if (Buffer.byteLength(JSON.stringify(output)) <= 256 * 1024) outputAvailability = "available";
+      else { output = undefined; outputAvailability = "too_large"; }
+    }
+    return { executionId: id, name, status, outputAvailability, output, error: error ? { code: error.code } : undefined };
   }
 
   detail(id: string) {

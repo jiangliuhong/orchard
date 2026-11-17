@@ -1,3 +1,4 @@
+import { applyInputDefaults } from "../domain/input-defaults.js";
 import { existsSync } from "node:fs";
 import { extensionDirectory } from "./catalog.js";
 import { nativeHostStatus } from "./install.js";
@@ -118,6 +119,11 @@ export class WebBridgeGateway {
       check(this.config?.toolEnabled(application, toolId) ?? tool.enabled, "PERMISSION_DENIED", "工具已停用");
       check((tool.risk === "read" && tool.approval === "none") || options.approved === true, "APPROVAL_REQUIRED", "该工具需要用户确认");
       check(!options.credentialBindings || tool.execution?.transport === "browser", "INVALID_CREDENTIALS", "调用凭据仅适用于 browser 执行模式");
+      args = applyInputDefaults(args, tool.parameters, (id, key) => {
+        const resolve = this.httpDependencies.resolveInputDefault;
+        check(resolve, "DICTIONARY_NOT_FOUND", "服务未配置默认值字典解析器");
+        return resolve(id, key);
+      });
       validateToolArgs(tool, args);
       check(!this.closed, "SERVER_NOT_RUNNING", "Web Bridge 已关闭");
       options.signal?.throwIfAborted();
@@ -140,7 +146,10 @@ export class WebBridgeGateway {
               return resolve(dictionaryId, key);
             };
             const { request, secrets } = await preprocessBrowser(tool.execution, args, tool, signal, resolveCredential, options.credentialBindings);
-            const result = await this.browserChannel.call(environment.profileId, { origin: environment.origin, request, maxBytes: tool.execution.response.maxBytes, timeoutMs: Math.max(1, deadline - Date.now()), deadline }, signal, options.onDispatch);
+            const dispatch = tool.execution.flow || request.query
+              ? { sequence: { initial: request, flow: tool.execution.flow } }
+              : { request };
+            const result = await this.browserChannel.call(environment.profileId, { origin: environment.origin, ...dispatch, maxBytes: tool.execution.response.maxBytes, timeoutMs: Math.max(1, deadline - Date.now()), deadline }, signal, options.onDispatch);
             const serialized = JSON.stringify(result);
             check(serialized !== undefined && Buffer.byteLength(serialized) <= tool.execution.response.maxBytes, "RESPONSE_TOO_LARGE", "响应超过限制");
             check(!secrets.filter(Boolean).some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1, -1))), "SENSITIVE_RESPONSE", "响应包含鉴权信息，已阻止返回");

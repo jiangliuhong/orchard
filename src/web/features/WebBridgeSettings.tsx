@@ -42,9 +42,8 @@ export function WebBridgeSettings() {
   const [connectionsOpen, setConnectionsOpen] = useState(false), [createOpen, setCreateOpen] = useState(false);
   const [error, setError] = useState(""), [notice, setNotice] = useState(""), [busy, setBusy] = useState(false);
   const [applicationId, setApplicationId] = useState(""), [applicationName, setApplicationName] = useState("");
-  const [origin, setOrigin] = useState(""), [profileId, setProfileId] = useState(""), [environmentId, setEnvironmentId] = useState<string>();
-  const [environmentKey, setEnvironmentKey] = useState("");
-  const validEnvironmentKey = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(environmentKey.trim());
+  const [environmentDraft, setEnvironmentDraft] = useState<{ original?: Environment; key: string; origin: string; profileId: string }>();
+  const environmentTrigger = useRef<HTMLButtonElement>(null);
   const [draft, setDraft] = useState<ToolDraft>(), [editorTab, setEditorTab] = useState("definition"), [editorError, setEditorError] = useState("");
   const [editorMode, setEditorMode] = useState("form"), [formInvalid, setFormInvalid] = useState(false);
   const [saveAsToolId, setSaveAsToolId] = useState<string>();
@@ -56,7 +55,15 @@ export function WebBridgeSettings() {
   const [pendingNavigation, setPendingNavigation] = useState<{ action: () => void }>();
   const saving = useRef(false), saveCallback = useRef<(() => void) | undefined>(undefined);
   const selected = apps.data?.items.find(application => application.id === selectedId) ?? apps.data?.items[0];
-  const duplicateEnvironmentKey = selected?.environments.some(env => env.id !== environmentId && (env.key ?? env.id) === environmentKey.trim());
+  const validEnvironmentKey = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(environmentDraft?.key.trim() ?? "");
+  const duplicateEnvironmentKey = environmentDraft && selected?.environments.some(env => env.id !== environmentDraft.original?.id && (env.key ?? env.id) === environmentDraft.key.trim());
+  const canSaveEnvironment = !busy && environmentDraft?.origin.trim() && validEnvironmentKey && !duplicateEnvironmentKey;
+  const openEnvironment = (trigger: HTMLButtonElement, original?: Environment) => {
+    environmentTrigger.current = trigger;
+    setError("");
+    setEnvironmentDraft({ original, key: original?.key ?? original?.id ?? "", origin: original?.origin ?? "", profileId: original?.profileId ?? "" });
+  };
+  const closeEnvironment = () => { setEnvironmentDraft(undefined); setError(""); };
   const selectedTools = useMemo(() => tools.data?.items.filter(tool => tool.application === selected?.id) ?? [], [tools.data, selected?.id]);
   const dirty = !!draft && (draft.value !== draft.original || formInvalid);
   const draftDefinition = useMemo(() => {
@@ -101,7 +108,7 @@ export function WebBridgeSettings() {
   };
   const selectApplication = (application: Application) => guard(() => {
     setSelectedId(application.id); setDraft(undefined); setFormInvalid(false); setEditorError(""); setToolQuery("");
-    setOrigin(""); setProfileId(""); setEnvironmentId(undefined); setEnvironmentKey(""); setTab("tools");
+    setTab("tools");
   });
   const saveTool = async (newId?: string) => {
     if (!draft || saving.current) return false;
@@ -176,7 +183,7 @@ export function WebBridgeSettings() {
       await api(`/web-bridge/applications/${application.id}`, { method: "DELETE" });
       saveBridgePreference(`${application.id}.tool`, "");
       setDraft(undefined); setFormInvalid(false); setEditorError("");
-      setOrigin(""); setProfileId(""); setEnvironmentId(undefined); setToolQuery("");
+      setToolQuery("");
       setTests(current => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${application.id}/`))));
       setSelectedId(apps.data?.items.find(item => item.id !== application.id)?.id ?? "");
       setTab("tools"); refresh();
@@ -189,7 +196,7 @@ export function WebBridgeSettings() {
       <Button size="sm" onClick={() => guard(() => setCreateOpen(true))}><Plus size={14} />新建应用</Button>
     </div></header>
     {apps.data
-      ? <WorkspaceError message={apps.error || tools.error || (!createOpen && !deletion && saveAsToolId === undefined && !pendingNavigation ? error : "")} />
+      ? <WorkspaceError message={apps.error || tools.error || (!createOpen && !environmentDraft && !deletion && saveAsToolId === undefined && !pendingNavigation ? error : "")} />
       : <ErrorNotice message={apps.error} />}
     <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     <div className={`bridge-workspace ${agentOpen && selected ? "has-agent" : ""}`} style={{ "--bridge-agent-width": `${agentWidth}px` } as CSSProperties}>
@@ -266,20 +273,9 @@ export function WebBridgeSettings() {
                 </div>)}
               </div>}
             </> : tab === "environments" ? <div className="bridge-environments">
-              <h3>{environmentId ? "编辑环境" : "添加环境"}</h3>
-              <label className="field" htmlFor="bridge-environment-key">环境标识</label><Input id="bridge-environment-key" placeholder="例如 production、staging" value={environmentKey} disabled={busy} onChange={event => setEnvironmentKey(event.target.value)} />
-              <p className="field-hint">在当前应用内唯一，随配置同步，用于匹配各机器的浏览器绑定。支持字母、数字、点、下划线和短横线，最长 100 位。</p>
-              {duplicateEnvironmentKey && <ErrorNotice message="该应用中已存在相同的环境标识" />}
-              <label className="field" htmlFor="bridge-origin">网站 Origin</label><Input id="bridge-origin" placeholder="https://example.test" value={origin} disabled={busy} onChange={event => { setOrigin(event.target.value); if (event.target.value.trim().replace(/\/$/, "") !== selected.environments.find(env => env.id === environmentId)?.origin) setProfileId(""); }} />
-              <label className="field" htmlFor="bridge-profile">浏览器资料</label><select id="bridge-profile" aria-label="选择浏览器资料" value={profileId} disabled={busy} onChange={event => setProfileId(event.target.value)}><option value="">暂不绑定</option>{profileId && !profiles.data?.items.some(profile => profile.id === profileId) && <option value={profileId}>已保存的本机资料 · 未连接</option>}{profiles.data?.items.map(profile => <option key={profile.id} value={profile.id} disabled={!profile.connected}>{profile.name} · {profile.id.slice(-8)}{profile.connected ? " · 已连接" : " · 已断开"}</option>)}</select>
-              <p className="field-hint">浏览器资料仅绑定到本机，不随配置同步。可先保存环境，使用浏览器工具前再绑定。更换网站 Origin 后请重新确认资料。</p>
-              <ErrorNotice message={profiles.error} />
-              {!profiles.data?.items.some(profile => profile.connected) && <p className="field-hint">暂无已连接的浏览器资料，请先启动 Chrome 扩展。</p>}
-              <div className="actions"><Button size="sm" disabled={busy || !origin.trim() || !validEnvironmentKey || !!duplicateEnvironmentKey} onClick={() => void run(async () => {
-                await send(`/web-bridge/applications/${selected.id}/environments${environmentId ? `/${environmentId}` : ""}`, { key: environmentKey.trim(), origin: origin.trim().replace(/\/$/, ""), profileId, enabled: selected.environments.find(env => env.id === environmentId)?.enabled ?? true }, environmentId ? "PATCH" : "POST");
-                setOrigin(""); setProfileId(""); setEnvironmentId(undefined); setEnvironmentKey(""); apps.reload();
-              }, "环境已保存")}>{environmentId ? "保存环境" : "添加环境"}</Button>{environmentId && <Button variant="ghost" size="sm" onClick={() => { setEnvironmentId(undefined); setEnvironmentKey(""); setOrigin(""); setProfileId(""); }}>取消编辑</Button>}</div>
-              {selected.environments.map(environment => <div className="bridge-environment" key={environment.id}><div className="min-w-0 break-all"><strong>{environment.key ?? environment.id}</strong><p>{environment.origin}</p><p>{!environment.profileId ? "本机未绑定浏览器" : `${profiles.data?.items.find(profile => profile.id === environment.profileId)?.name ?? "已保存的本机资料"} · ${profiles.data?.items.some(profile => profile.id === environment.profileId && profile.connected) ? "已连接" : "未连接"}`}</p></div><div className="actions"><Button variant="outline" size="sm" onClick={() => { setEnvironmentId(environment.id); setEnvironmentKey(environment.key ?? environment.id); setOrigin(environment.origin); setProfileId(environment.profileId ?? ""); }}>编辑</Button><Button variant="ghost" size="icon" aria-label={`删除环境 ${environment.origin}`} onClick={() => askDeletion("删除环境", `确定删除环境 ${environment.origin} 吗？`, async () => { await api(`/web-bridge/applications/${selected.id}/environments/${environment.id}`, { method: "DELETE" }); apps.reload(); })}><Trash2 size={14} /></Button></div></div>)}
+              <div className="bridge-toolbar"><h3>环境列表</h3><Button size="sm" aria-haspopup="dialog" disabled={busy} onClick={event => openEnvironment(event.currentTarget)}><Plus size={14} />新增环境</Button></div>
+              {!selected.environments.length && <p className="field-hint">还没有环境</p>}
+              {selected.environments.map(environment => <div className="bridge-environment" key={environment.id}><div className="min-w-0 break-all"><strong>{environment.key ?? environment.id}</strong><p>{environment.origin}</p><p>{!environment.profileId ? "本机未绑定浏览器" : `${profiles.data?.items.find(profile => profile.id === environment.profileId)?.name ?? "已保存的本机资料"} · ${profiles.data?.items.some(profile => profile.id === environment.profileId && profile.connected) ? "已连接" : "未连接"}`}</p></div><div className="actions"><Button variant="outline" size="sm" aria-haspopup="dialog" disabled={busy} onClick={event => openEnvironment(event.currentTarget, environment)}>编辑</Button><Button variant="ghost" size="icon" aria-label={`删除环境 ${environment.origin}`} onClick={() => askDeletion("删除环境", `确定删除环境 ${environment.origin} 吗？`, async () => { await api(`/web-bridge/applications/${selected.id}/environments/${environment.id}`, { method: "DELETE" }); apps.reload(); })}><Trash2 size={14} /></Button></div></div>)}
             </div> : <div className="bridge-settings"><h3>应用设置</h3><p>应用 ID：<code>{selected.id}</code></p><ApplicationSettings key={`${selected.id}:${selected.name}:${selected.enabled}`} application={selected} busy={busy} onSave={(name, enabled) => void run(async () => { await send(`/web-bridge/applications/${selected.id}`, { name, enabled }, "PATCH"); apps.reload(); }, "应用设置已保存")} />
               <div className="bridge-danger"><h3>删除应用</h3><p>同时删除 {selected.environments.length} 个环境和 {selectedTools.length} 个工具定义。</p><Button variant="destructive" size="sm" disabled={busy} onClick={deleteApplication}>删除应用</Button></div>
             </div>}
@@ -300,6 +296,59 @@ export function WebBridgeSettings() {
         <BridgeAgentPanel applicationId={selected.id} onApplied={() => { setDraft(undefined); refresh(); }} disabled={dirty || busy} onClose={() => setAgentOpen(false)} />
       </div>}
     </div>
+    <Dialog open={!!environmentDraft} onOpenChange={open => { if (!open && !busy) closeEnvironment(); }}>
+      <DialogContent className="bridge-environment-dialog" showCloseButton={!busy} onCloseAutoFocus={event => {
+        event.preventDefault();
+        environmentTrigger.current?.focus();
+      }}>
+        <DialogHeader>
+          <DialogTitle>{environmentDraft?.original ? "编辑环境" : "新增环境"}</DialogTitle>
+          <DialogDescription>配置 {selected?.name} 的网站和本机浏览器绑定。</DialogDescription>
+        </DialogHeader>
+        {environmentDraft && <form className="bridge-environment-form" onSubmit={event => {
+          event.preventDefault();
+          if (!selected || !canSaveEnvironment) return;
+          const { original, key, origin, profileId } = environmentDraft;
+          void run(async () => {
+            await send(`/web-bridge/applications/${selected.id}/environments${original ? `/${original.id}` : ""}`, {
+              key: key.trim(), origin: origin.trim().replace(/\/$/, ""), profileId, enabled: original?.enabled ?? true,
+            }, original ? "PATCH" : "POST");
+            closeEnvironment();
+            apps.reload();
+          }, "环境已保存");
+        }}>
+          <div className="field">
+            <label htmlFor="bridge-environment-key">环境标识</label>
+            <Input id="bridge-environment-key" placeholder="例如 production、staging" value={environmentDraft.key} disabled={busy} aria-describedby="bridge-environment-key-hint" aria-invalid={!!duplicateEnvironmentKey} onChange={event => setEnvironmentDraft({ ...environmentDraft, key: event.target.value })} />
+            <p id="bridge-environment-key-hint" className="field-hint">同一应用内唯一，以字母或数字开头，可包含点、下划线和短横线，最长 100 位。</p>
+            {duplicateEnvironmentKey && <ErrorNotice message="该应用中已存在相同的环境标识" />}
+          </div>
+          <div className="field">
+            <label htmlFor="bridge-origin">网站 Origin</label>
+            <Input id="bridge-origin" placeholder="https://example.test" value={environmentDraft.origin} disabled={busy} onChange={event => {
+              const origin = event.target.value;
+              setEnvironmentDraft({ ...environmentDraft, origin, profileId: origin.trim().replace(/\/$/, "") === environmentDraft.original?.origin ? environmentDraft.profileId : "" });
+            }} />
+          </div>
+          <div className="field">
+            <label htmlFor="bridge-profile">浏览器资料</label>
+            <select id="bridge-profile" aria-label="选择浏览器资料" aria-describedby="bridge-profile-hint" value={environmentDraft.profileId} disabled={busy} onChange={event => setEnvironmentDraft({ ...environmentDraft, profileId: event.target.value })}>
+              <option value="">暂不绑定</option>
+              {environmentDraft.profileId && !profiles.data?.items.some(profile => profile.id === environmentDraft.profileId) && <option value={environmentDraft.profileId}>已保存的本机资料 · 未连接</option>}
+              {profiles.data?.items.map(profile => <option key={profile.id} value={profile.id} disabled={!profile.connected}>{profile.name} · {profile.id.slice(-8)}{profile.connected ? " · 已连接" : " · 已断开"}</option>)}
+            </select>
+            <p id="bridge-profile-hint" className="field-hint">浏览器资料仅绑定到本机，不随配置同步。更换网站 Origin 后请重新选择资料。</p>
+            {!profiles.data?.items.some(profile => profile.connected) && <p className="field-hint">暂无已连接的浏览器资料，请先启动 Chrome 扩展。</p>}
+            <ErrorNotice message={profiles.error} />
+          </div>
+          <ErrorNotice message={error} />
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={busy} onClick={closeEnvironment}>取消</Button>
+            <Button type="submit" disabled={!canSaveEnvironment}>{busy ? "保存中…" : environmentDraft.original ? "保存环境" : "添加环境"}</Button>
+          </DialogFooter>
+        </form>}
+      </DialogContent>
+    </Dialog>
     <Dialog open={connectionsOpen} onOpenChange={setConnectionsOpen}><DialogContent className="bridge-connections-dialog"><DialogHeader><DialogTitle>浏览器连接与插件配置</DialogTitle><DialogDescription>安装插件，并为当前浏览器资料设置名称。</DialogDescription></DialogHeader>
       <label className="field" htmlFor="web-bridge-extension-directory">浏览器插件目录</label><div className="bridge-toolbar"><Input id="web-bridge-extension-directory" className="font-mono" readOnly value={extension.data?.directory ?? ""} placeholder={extension.error ? "目录加载失败" : "正在加载目录…"} /><Button variant="outline" size="icon" aria-label="复制插件目录" disabled={!extension.data?.directory} onClick={() => void run(async () => { await navigator.clipboard.writeText(extension.data!.directory); }, "浏览器插件目录已复制")}><Copy size={14} /></Button></div>
       <p className="field-hint">在 Chrome 中打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择此目录。</p><ErrorNotice message={extension.error} />

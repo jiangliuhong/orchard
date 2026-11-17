@@ -1,3 +1,4 @@
+import { applyInputDefaults } from "./input-defaults.js";
 import type { JsonSchema } from "./types.js";
 import { dictionaryIdSchema } from "./dictionaries.js";
 import { check } from "./errors.js";
@@ -27,8 +28,11 @@ export function stripReferencedInput(input: unknown, sources: ScriptInputSources
   return Object.fromEntries(Object.entries(input).filter(([key]) => !Object.hasOwn(sources, `/${pointerPart(key)}`)));
 }
 export function captureScriptInput(input: unknown, schema: JsonSchema, sources: ScriptInputSources) {
-  const captured = captureHistory(stripReferencedInput(input, sources), schema, sources);
-  return { input: captured.value ?? null, sources: captured.sources, transient: Object.values(captured.sources).some(s => s.source === "omitted") };
+  const manual = stripReferencedInput(input, sources);
+  const captured = captureHistory(manual, schema, sources);
+  const withDefaultMarkers = applyInputDefaults(manual, schema, () => null);
+  const policy = withDefaultMarkers === manual ? captured : captureHistory(withDefaultMarkers, schema, sources);
+  return { input: captured.value ?? null, sources: captured.sources, transient: Object.values(policy.sources).some(s => s.source === "omitted") };
 }
 export function dictionarySources(sources: HistorySources): ScriptInputSources {
   return Object.fromEntries(Object.entries(sources).filter((entry): entry is [string, ScriptInputSources[string]] => entry[1].source === "dictionary"));

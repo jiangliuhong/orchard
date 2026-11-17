@@ -17,6 +17,8 @@ const port = Number(value("--port", "7441")), serverUrl = value("--server-url", 
 const dataDir = resolve(value("--data-dir", join(homedir(), ".orchard")));
 function value(name: string, fallback: string) { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1] ?? fallback; }
 function help() { console.log(`orchard server [--port <port>] [--data-dir <dir>]
+orchard quick-launch --stdio [--port <port>] [--data-dir <dir>]
+orchard quick-launch list|run <id> <revision>|status <execution-id> [--port <port>] [--data-dir <dir>]
 orchard agent-reset preview --data-dir <dir> [--pretty]
 orchard workspace-migration preview --data-dir <dir> [--pretty]
 orchard web-bridge install|uninstall|chrome-ext|status|applications|tools [application]|tool <application> <tool>|doctor
@@ -37,6 +39,20 @@ async function main() {
   if (!args.length || args.includes("--help")) return help();
   if (args[0] === "server") {
     const child = execFileSync(process.execPath, [new URL("../server/main.js", import.meta.url).pathname, ...args.slice(1)], { stdio: "inherit" }); return child;
+  }
+  if (args[0] === "quick-launch") {
+    const { quickLaunchCommands } = await import("./quick-launch.js");
+    const [, action, id, revision] = args;
+    if (action === "--stdio") {
+      const { serveAgentMcp } = await import("../external-agent/mcp.js");
+      return serveAgentMcp(quickLaunchCommands(dataDir, port, "mcp"));
+    }
+    if (!["list", "run", "status"].includes(action)) return help();
+    const commands = quickLaunchCommands(dataDir, port, "cli");
+    const data = action === "list" ? await commands.list() :
+      action === "status" ? await commands.status(id) :
+        await commands.run(id, Number(revision), value("--request-id", randomUUID()));
+    return console.log(JSON.stringify(data, null, args.includes("--pretty") ? 2 : undefined));
   }
   if (args[0] === "agent-reset" && args[1] === "preview") {
     check(value("--data-dir", "") && !value("--data-dir", "").startsWith("--"),
@@ -78,7 +94,16 @@ async function main() {
     const application = args[2], tool = args[3]; let body = "{}";
     const jsonArg = value("--args-json", ""); const file = value("--args-file", "");
     if (jsonArg) body = jsonArg; else if (file) body = await (await import("node:fs/promises")).readFile(file, "utf8"); else if (args.includes("--stdin-json")) body = await new Promise<string>(resolve => { let text = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => text += chunk); process.stdin.on("end", () => resolve(text)); });
-    return request("/api/web-bridge/calls", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: randomUUID(), application, tool, args: JSON.parse(body), environmentId: value("--environment-id", "") || undefined, approved: args.includes("--approve") }) });
+    check(!args.includes("--approve"), "CONFIRMATION_REQUIRED", "请在工作台确认执行需要审批的工具");
+    const { agentClient } = await import("../external-agent/client.js");
+    const endpoint = new URL(serverUrl);
+    check(endpoint.protocol === "http:" && ["127.0.0.1", "localhost"].includes(endpoint.hostname) &&
+      endpoint.pathname === "/" && !endpoint.search && !endpoint.hash && !endpoint.username && !endpoint.password,
+      "INVALID_SERVER_URL", "CLI 执行仅支持 Orchard 的本机服务");
+    const client = agentClient(dataDir, Number(endpoint.port || 80), "cli");
+    const result = await client.runBridge({ application, tool, args: JSON.parse(body),
+      environmentId: value("--environment-id", "") || undefined, requestId: value("--request-id", randomUUID()) });
+    return console.log(JSON.stringify(result, null, args.includes("--pretty") ? 2 : undefined));
   }
   if (command === "doctor") return request("/api/web-bridge/doctor");
   if (command === "host") {

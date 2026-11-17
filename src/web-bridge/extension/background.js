@@ -2,7 +2,9 @@ const polling = new Map();
 function startPolling(server, profileId, token) {
   const existing = polling.get(server);
   if (existing?.token === token) return;
-  const session = { token };
+  for (const controller of existing?.active.values() ?? []) controller.abort();
+  const active = new Map();
+  const session = { token, active };
   polling.set(server, session);
   const post = async (path, value) => {
     const response = await fetch(server + "/api/web-bridge/browser/" + path, {
@@ -15,13 +17,24 @@ function startPolling(server, profileId, token) {
   const poll = async () => {
     if (polling.get(server) !== session) return;
     try {
-      const { items } = await post("poll", {});
-      await Promise.all(items.map(async ({ id, payload }) => {
-        let result;
-        try { result = { result: await executeBrowserRequest(payload) }; }
-        catch (error) { result = { error: error.message }; }
-        await post("result", { id, ...result });
-      }));
+      const activeIds = [...active.keys()];
+      const reply = await post("poll", { activeIds });
+      if (Array.isArray(reply.activeIds)) {
+        const remaining = new Set(reply.activeIds);
+        for (const id of activeIds) if (!remaining.has(id)) active.get(id)?.abort();
+      }
+      for (const { id, payload } of reply.items) {
+        const controller = new AbortController();
+        active.set(id, controller);
+        void (async () => {
+          try {
+            let result;
+            try { result = { result: await executeBrowserRequest(payload, id, controller.signal) }; }
+            catch (error) { result = { error: error.message }; }
+            if (!controller.signal.aborted) await post("result", { id, ...result });
+          } catch {} finally { active.delete(id); }
+        })();
+      }
     } catch {}
     if (polling.get(server) === session) setTimeout(poll, 1000);
   };
@@ -125,8 +138,8 @@ function reconcileBridgeTabs(tabId, removed, navigatedUrl) {
   }).catch(error => console.warn("Orchard 无法更新桥接页签绑定", error));
 }
 
-async function executeBrowserRequest(payload) {
-  const { origin, request, maxBytes, timeoutMs, deadline } = payload;
+async function executeBrowserRequest(payload, id, cancellation) {
+  const { origin, request, sequence, maxBytes, timeoutMs, deadline } = payload;
   if (deadline && deadline <= Date.now()) throw new Error("BROWSER_REQUEST_FAILED");
   const binding = await manageBridgeTab(origin);
   if (binding.state !== "ready") {
@@ -135,41 +148,169 @@ async function executeBrowserRequest(payload) {
   }
   const remainingMs = deadline ? Math.min(timeoutMs, deadline - Date.now()) : timeoutMs;
   if (remainingMs <= 0) throw new Error("BROWSER_REQUEST_FAILED");
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: binding.tabId }, world: "MAIN",
-    func: async (origin, request, maxBytes, timeoutMs) => {
-      if (location.origin !== origin) return { error: "TAB_REQUIRED" };
-      try {
-        const url = new URL(request.path, origin);
-        if (url.origin !== origin || !request.path.startsWith("/") || request.path.startsWith("//")) return { error: "INVALID_REQUEST" };
-        const response = await fetch(url.href, {
-          method: request.method, headers: request.headers, body: request.body,
-          credentials: "include", redirect: "error", signal: AbortSignal.timeout(timeoutMs),
-        });
-        if (response.status === 401 || response.status === 403) return { error: "GATEWAY_AUTH_REQUIRED" };
-        if (!response.ok) return { error: "BROWSER_REQUEST_FAILED" };
-        if (request.method === "HEAD" || response.status === 204 || response.status === 205) return { result: null };
-        if (!response.headers.get("content-type")?.toLowerCase().includes("json")) return { error: "GATEWAY_AUTH_REQUIRED" };
-        const reader = response.body.getReader();
-        let size = 0;
-        const chunks = [];
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            size += value.byteLength;
-            if (size > maxBytes) return { error: "RESPONSE_TOO_LARGE" };
-            chunks.push(value);
+  cancellation?.throwIfAborted();
+  const cancel = () => {
+    if (!sequence || !id) return;
+    void chrome.scripting.executeScript({
+      target: { tabId: binding.tabId }, world: "ISOLATED",
+      func: id => globalThis.__orchardBrowserCalls?.get(id)?.abort(), args: [id],
+    }).catch(() => {});
+  };
+  cancellation?.addEventListener("abort", cancel, { once: true });
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: binding.tabId }, world: sequence ? "ISOLATED" : "MAIN",
+      func: async (origin, initial, sequence, maxBytes, timeoutMs, id) => {
+        if (location.origin !== origin) return { error: "TAB_REQUIRED" };
+        const controller = sequence && id ? new AbortController() : undefined;
+        let calls;
+        if (controller) {
+          calls = globalThis.__orchardBrowserCalls ??= new Map();
+          calls.set(id, controller);
+        }
+        const timeout = AbortSignal.timeout(timeoutMs);
+        const signal = controller ? AbortSignal.any([controller.signal, timeout]) : timeout;
+        const flow = sequence?.flow;
+        const variables = new Map(Object.entries(initial?.variables ?? {}));
+        const secrets = new Map();
+        const own = (value, at) => at.reduce((part, key) => part && Object.hasOwn(part, key) ? part[key] : undefined, value);
+        const fail = code => { throw new Error(code); };
+        const requestJson = async request => {
+          signal.throwIfAborted();
+          const url = new URL(request.path, origin);
+          if (url.origin !== origin || !request.path.startsWith("/") || request.path.startsWith("//") ||
+              /[?#]/.test(request.path)) fail("INVALID_REQUEST");
+          for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.append(key, value);
+          if (url.href.length > 32768) fail("INVALID_REQUEST");
+          const response = await fetch(url.href, {
+            method: request.method, headers: request.headers, body: request.body,
+            credentials: "include", redirect: "error", signal,
+          });
+          if (response.status === 401 || response.status === 403) fail("GATEWAY_AUTH_REQUIRED");
+          if (!response.ok) fail("BROWSER_REQUEST_FAILED");
+          if (request.method === "HEAD" || response.status === 204 || response.status === 205) return null;
+          if (!response.headers.get("content-type")?.toLowerCase().includes("json")) fail("GATEWAY_AUTH_REQUIRED");
+          const reader = response.body.getReader();
+          let size = 0;
+          const chunks = [];
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              size += value.byteLength;
+              if (size > maxBytes) fail("RESPONSE_TOO_LARGE");
+              chunks.push(value);
+            }
+          } finally { await reader.cancel().catch(() => {}); }
+          const bytes = new Uint8Array(size);
+          let offset = 0;
+          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+          return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+        };
+        const positiveInteger = value => /^[1-9][0-9]*$/.test(String(value)) && Number.isSafeInteger(Number(value));
+        const capture = (definitions, response) => {
+          for (const [name, spec] of Object.entries(definitions ?? {})) {
+            let value = own(response, spec.at);
+            if (spec.match) {
+              const expected = variables.get(spec.match.equalsFrom);
+              if (!Array.isArray(value) || expected === undefined || secrets.has(spec.match.equalsFrom)) fail("BROWSER_FLOW_FAILED");
+              const matches = value.filter(item => own(item, spec.match.field) === expected);
+              if (matches.length !== 1) fail(matches.length ? "BROWSER_FLOW_MATCH_AMBIGUOUS" : "BROWSER_FLOW_MATCH_NOT_FOUND");
+              value = own(matches[0], spec.match.value);
+            }
+            if (spec.optional && (value === undefined || value === null || value === "")) {
+              (spec.secret ? secrets : variables).delete(name);
+              continue;
+            }
+            if ((typeof value !== "string" && typeof value !== "number") ||
+                !String(value) || String(value).length > 8192) fail("BROWSER_FLOW_FAILED");
+            if (spec.positiveInteger && !positiveInteger(value)) fail("BROWSER_FLOW_FAILED");
+            (spec.secret ? secrets : variables).set(name, String(value));
           }
-        } finally { await reader.cancel().catch(() => {}); }
-        const bytes = new Uint8Array(size);
-        let offset = 0;
-        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-        return { result: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) };
-      } catch { return { error: "BROWSER_REQUEST_FAILED" }; }
-    },
-    args: [origin, request, maxBytes, remainingMs],
-  });
+        };
+        const expand = (template, context) => template.replace(/\{([A-Za-z][A-Za-z0-9_]*)(:rison)?\}/g, (_, key, rison) => {
+          const value = (context === "header" && secrets.has(key) ? secrets : variables).get(key);
+          if (value === undefined || (secrets.has(key) && context !== "header")) fail("BROWSER_FLOW_FAILED");
+          if (context === "path" && (!/^[A-Za-z0-9_-]+$/.test(value) || rison)) fail("INVALID_REQUEST");
+          if (rison) {
+            if (context !== "query") fail("INVALID_REQUEST");
+            return "'" + value.replace(/!/g, "!!").replace(/'/g, "!'") + "'";
+          }
+          return value;
+        });
+        const fields = (entries, context) => Object.fromEntries(
+          Object.entries(entries ?? {}).map(([key, template]) => [key, expand(template, context)]),
+        );
+        try {
+          let result = await requestJson(initial);
+          if (!flow) return { result };
+          for (const group of [flow.capture, ...flow.steps.map(step => step.capture)]) {
+            if (Object.keys(group ?? {}).some(name => variables.has(name))) fail("BROWSER_FLOW_FAILED");
+          }
+          capture(flow.capture, result);
+          for (const step of flow.steps) {
+            if (step.when && (!variables.has(step.when) || secrets.has(step.when))) continue;
+            const path = expand(step.path, "path");
+            if (/[{}]/.test(path)) fail("INVALID_REQUEST");
+            const headers = fields(step.headers, "header");
+            if (Object.values(headers).some(value => value.length > 8192 || /[\r\n\u0000]/.test(value))) fail("INVALID_REQUEST");
+            let body = step.bodyFrom ? variables.get(step.bodyFrom) : undefined;
+            if (step.bodyFrom && (body === undefined || secrets.has(step.bodyFrom))) fail("BROWSER_FLOW_FAILED");
+            if (step.jsonFields) {
+              let json;
+              try { json = JSON.parse(body); } catch { fail("BROWSER_FLOW_FAILED"); }
+              if (!json || typeof json !== "object" || Array.isArray(json)) fail("BROWSER_FLOW_FAILED");
+              const additions = Object.entries(step.jsonFields).map(([key, spec]) => {
+                const value = variables.get(spec.from);
+                if (value === undefined || secrets.has(spec.from)) fail("BROWSER_FLOW_FAILED");
+                if (spec.type === "positiveInteger") {
+                  if (!positiveInteger(value)) fail("BROWSER_FLOW_FAILED");
+                  return [key, Number(value)];
+                }
+                return [key, value];
+              });
+              body = JSON.stringify({ ...json, ...Object.fromEntries(additions) });
+              if (new TextEncoder().encode(body).byteLength > 262144) fail("INVALID_REQUEST");
+            }
+            const request = { path, method: step.method, headers, query: fields(step.query, "query"), body };
+            const poll = step.poll;
+            for (let attempt = 1; ; attempt++) {
+              result = await requestJson(request);
+              if (!poll) break;
+              const status = String(own(result, poll.at) ?? "").toLowerCase();
+              if (poll.failure.some(value => value.toLowerCase() === status)) fail("BROWSER_FLOW_FAILED");
+              if (poll.success.some(value => value.toLowerCase() === status)) break;
+              if (attempt >= poll.maxAttempts) fail("BROWSER_FLOW_TIMEOUT");
+              await new Promise((resolve, reject) => {
+                signal.throwIfAborted();
+                const abort = () => { clearTimeout(timer); reject(signal.reason); };
+                const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, poll.intervalMs);
+                signal.addEventListener("abort", abort, { once: true });
+              });
+            }
+            capture(step.capture, result);
+          }
+          const output = JSON.stringify(result);
+          for (const secret of secrets.values()) {
+            if (output.includes(secret) || output.includes(JSON.stringify(secret).slice(1, -1))) fail("SENSITIVE_RESPONSE");
+          }
+          return { result };
+        } catch (error) {
+          if (signal.aborted && flow) return { error: "BROWSER_FLOW_TIMEOUT" };
+          const codes = ["TAB_REQUIRED", "INVALID_REQUEST", "GATEWAY_AUTH_REQUIRED", "BROWSER_REQUEST_FAILED",
+            "RESPONSE_TOO_LARGE", "BROWSER_FLOW_FAILED", "BROWSER_FLOW_TIMEOUT", "SENSITIVE_RESPONSE",
+            "BROWSER_FLOW_MATCH_NOT_FOUND", "BROWSER_FLOW_MATCH_AMBIGUOUS"];
+          return { error: codes.includes(error?.message) ? error.message : "BROWSER_REQUEST_FAILED" };
+        } finally {
+          calls?.delete(id);
+        }
+      },
+      args: [origin, sequence?.initial ?? request, sequence ?? null, maxBytes, remainingMs, id ?? null],
+    });
+  } finally {
+    cancellation?.removeEventListener("abort", cancel);
+  }
   const value = results[0]?.result;
   if (!value || value.error) throw new Error(value?.error || "BROWSER_REQUEST_FAILED");
   return value.result;

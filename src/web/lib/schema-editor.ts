@@ -5,7 +5,7 @@ import { parseStrictJson } from "../../dictionaries/canonical.js";
 
 export type SchemaObject = Record<string, unknown>;
 export const schemaTypes = ["object", "array", "string", "number", "integer", "boolean", "null"] as const;
-const common = ["type", "title", "description", "default", "x-history"];
+const common = ["type", "title", "description", "default", "x-history", "x-dictionary-default"];
 const keywords: Record<string, string[]> = {
   object: ["properties", "required", "additionalProperties"], array: ["items", "minItems", "maxItems", "uniqueItems"],
   string: ["enum", "minLength", "maxLength", "pattern", "x-ui"], number: ["enum", "minimum", "maximum"], integer: ["enum", "minimum", "maximum"], boolean: [], null: [],

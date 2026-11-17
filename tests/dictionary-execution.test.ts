@@ -181,3 +181,40 @@ test("large script input and snapshot files prepare outside admission transactio
   assert.deepEqual(f.store.scriptTestInput(row.id), input);
   assert.ok(String(f.store.one("SELECT result_json FROM command_receipts WHERE request_id='large-test'")!.result_json).length < 100);
 });
+
+test("script dictionary defaults fill missing required fields in tests and workflows", async t => {
+  const f = services(t);
+  const definition: ScriptDefinition = {
+    ...script(),
+    files: { "main.ts": "export default input => input" },
+    inputSchema: {
+      type: "object", required: ["baseUrl"], additionalProperties: false,
+      properties: { baseUrl: { type: ["string", "null"], "x-dictionary-default": { dictionaryId: f.plain.dictionaryId, key: "baseUrl" } } },
+    },
+  };
+  await f.library.create(definition);
+  const published = f.store.publishScript(definition.id, 0);
+  const workflow = graph();
+  workflow.nodes[0] = {
+    ...workflow.nodes[0]!, type: "script", input: { source: "literal", value: {} },
+    inputSchema: definition.inputSchema, config: { scriptId: definition.id, scriptVersionId: published.version.id },
+  };
+  const pending = await draft(f, workflow);
+  const version = await f.authoring.publish(pending.id, pending.revision, randomUUID());
+  const runner = new GraphRunner(f.store, f.providers), tests = new ScriptTestRunner(f.store);
+  t.after(async () => { await runner.close(); await tests.close(); });
+  const samples = [{ input: {}, output: { baseUrl: "first" } }, { input: { baseUrl: "" }, output: { baseUrl: "" } }, { input: { baseUrl: null }, output: { baseUrl: null } }];
+  for (const sample of samples) {
+    const row = f.store.createScriptTest(definition.id, published.version.id, null, sample.input);
+    tests.enqueue(row.id);
+    await until(() => ["succeeded", "failed"].includes(f.store.scriptTest(row.id).status));
+    assert.deepEqual(f.store.scriptTest(row.id).output, sample.output);
+  }
+  f.dictionaries.update(f.plain.dictionaryId, {
+    requestId: randomUUID(), expectedRevision: 1,
+    operations: [{ op: "set", key: "baseUrl", type: "string", value: "updated" }],
+  });
+  const job = runner.create(version.id, {}, randomUUID());
+  await until(() => ["succeeded", "failed"].includes(f.store.run(job.id).status));
+  assert.deepEqual(f.store.run(job.id).output, { value: { baseUrl: "updated" } });
+});

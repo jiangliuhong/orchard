@@ -29,25 +29,27 @@ const emptyFiles = (runtime: string) => runtime === "shell"
   : { "main.ts": "export default async function run(input: unknown) {\n  return input;\n}\n" };
 
 function CreateScript({ copy, iconOnly = false }: { copy?: { id: string; versionId: string; name: string }; iconOnly?: boolean }) {
+  const [inputSchema, setInputSchema] = useState("true"), [inputInvalid, setInputInvalid] = useState(false);
   const [open, setOpen] = useState(false), [id, setId] = useState(""), [name, setName] = useState(""), [runtime, setRuntime] = useState("nodejs");
   const [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const commandKey = useCommandKey();
   const create = async () => {
     setBusy(true); setError("");
     try {
-      const input = copy ? { id, name, versionId: copy.versionId } : { id, name, description: "", runtime, entryFile: runtime === "shell" ? "main.sh" : "main.ts", inputSchema: true, outputSchema: true, files: emptyFiles(runtime) };
+      const input = copy ? { id, name, versionId: copy.versionId } : { id, name, description: "", runtime, entryFile: runtime === "shell" ? "main.sh" : "main.ts", inputSchema: parseEditorSchema(inputSchema), outputSchema: true, files: emptyFiles(runtime) };
       const result = await send<{ script: ScriptView }>(copy ? `/scripts/${copy.id}/copy` : "/scripts", { ...input, requestId: commandKey(input) });
       setOpen(false);
       navigate(`/scripts/${result.script.id}`);
     } catch (error) { setError((error as Error).message); } finally { setBusy(false); }
   };
   return <><Button variant={iconOnly ? "ghost" : copy ? "outline" : "default"} className={iconOnly ? "empty-symbol h-auto" : undefined} aria-label={iconOnly ? "添加脚本" : undefined} onClick={() => { setError(""); setName(copy ? `${copy.name}（副本）` : ""); setOpen(true); }}>{iconOnly ? <Plus className="size-[25px]" /> : copy ? "复制为新脚本" : "新建脚本"}</Button>
-    <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent><DialogHeader><DialogTitle>{copy ? "复制脚本" : "新建脚本"}</DialogTitle><DialogDescription>新脚本从未发布的草稿开始，脚本 ID 创建后不能修改。</DialogDescription></DialogHeader>
+    <Dialog open={open} onOpenChange={value => { if (!busy) setOpen(value); }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto"><DialogHeader><DialogTitle>{copy ? "复制脚本" : "新建脚本"}</DialogTitle><DialogDescription>新脚本从未发布的草稿开始，脚本 ID 创建后不能修改。</DialogDescription></DialogHeader>
       <label htmlFor="create-script-id">脚本 ID</label><Input id="create-script-id" value={id} disabled={busy} onChange={event => setId(event.target.value)} placeholder="normalize-text" />
       <span className="field-hint">以小写字母开头，支持小写字母、数字和短横线，最多 100 字符。</span>
       <label htmlFor="create-script-name">脚本名称</label><Input id="create-script-name" value={name} disabled={busy} onChange={event => setName(event.target.value)} />
       {!copy && <><label htmlFor="create-script-runtime">运行时</label><select id="create-script-runtime" value={runtime} disabled={busy} onChange={event => setRuntime(event.target.value)}><option value="nodejs">Node.js / TypeScript</option><option value="shell">Shell / Bash</option></select></>}
-      <ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>取消</Button><Button disabled={busy || !id || !name} onClick={() => void create()}>{busy ? "正在创建…" : "创建草稿"}</Button></DialogFooter>
+      {!copy && <details><summary>输入参数（可选）</summary><SchemaEditor label="输入参数" value={inputSchema} disabled={busy} dictionaryDefaults onChange={setInputSchema} onDirty={() => {}} onInvalidChange={setInputInvalid} /></details>}
+      <ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>取消</Button><Button disabled={busy || !id || !name || (!copy && inputInvalid)} onClick={() => void create()}>{busy ? "正在创建…" : "创建草稿"}</Button></DialogFooter>
     </DialogContent></Dialog></>;
 }
 
@@ -145,7 +147,7 @@ function ScriptEditor({ script, version, onSaved, onDirtyChange }: Omit<ScriptWo
       <label>超时（毫秒）<Input type="number" min={1000} max={300000} value={timeoutMs} onChange={event => { setTimeoutMs(Number(event.target.value)); setDirty(true); }} /></label>
       {script.runtime === "shell" && <label>Shell 输出协议<select value={resultMode} onChange={event => { setResultMode(event.target.value as "process" | "json"); setDirty(true); }}><option value="process">进程输出：stdout / stderr / exitCode</option><option value="json">结构化 JSON：$ORCHARD_RESULT_FILE</option></select></label>}
     </fieldset><div className="script-schema-fields">
-      <SchemaEditor label="输入参数" value={inputSchema} disabled={readOnly || busy} onChange={value => { setInputSchema(value); setDirty(true); }} onDirty={() => setDirty(true)} onInvalidChange={setInputInvalid} />
+      <SchemaEditor label="输入参数" value={inputSchema} disabled={readOnly || busy} dictionaryDefaults onChange={value => { setInputSchema(value); setDirty(true); }} onDirty={() => setDirty(true)} onInvalidChange={setInputInvalid} />
       {script.runtime === "shell" && <p className="field-hint">切换输出协议不会自动修改 Schema，请核对返回定义。{resultMode === "process" ? "process 固定返回 stdout、stderr、exitCode。" : "JSON 模式将业务结果写入 $ORCHARD_RESULT_FILE。"}</p>}
       {script.runtime === "shell" && resultMode === "process" && <Button type="button" variant="outline" disabled={readOnly || busy} onClick={() => setTemplateOpen(true)}>使用进程输出结构…</Button>}
       <SchemaEditor key={outputGeneration} label="返回结果" value={outputSchema} disabled={readOnly || busy} onChange={value => { setOutputSchema(value); setDirty(true); }} onDirty={() => setDirty(true)} onInvalidChange={setOutputInvalid} />

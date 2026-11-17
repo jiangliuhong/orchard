@@ -48,7 +48,8 @@ export class WebBridgeConfig {
     // The DB remains authoritative even when another platform backend commits or
     // an enclosing transaction rolls back. Nested getters share one validated
     // view; getters inside a mutation must not replace its in-progress object.
-    if (!this.readDepth && this.storage && !this.coordinator.ownsDefinitionWrite) {
+    // Workspace synchronization has exclusive access but cannot write definitions.
+    if (!this.readDepth && this.storage && (!this.coordinator.ownsDefinitionWrite || this.coordinator.definitionWritePurpose === "workspace.sync")) {
       const value = validateBridgeConfigV1(this.storage.read()) as unknown as ConfigFile;
       validateExecutions(value); this.value = value;
     }

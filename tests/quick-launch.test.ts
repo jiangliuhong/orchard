@@ -37,6 +37,22 @@ test("quick launch routes save a pinned workflow and dispatch once across retrie
     return ["succeeded", "failed"].includes(data.items[0].status) ? data.items[0] : null;
   });
   assert.equal(settled.status, "succeeded");
+  const copy = await request("POST", `/api/quick-launches/${saved.id}/copy`, { requestId: randomUUID() });
+  assert.equal(copy.statusCode, 200, copy.body);
+  const copied = copy.json();
+  const copyRun = await request("POST", `/api/quick-launches/${copied.id}/executions`, { requestId: randomUUID(), revision: copied.revision });
+  assert.equal(copyRun.statusCode, 202, copyRun.body);
+  const second = await request("POST", `/api/quick-launches/${saved.id}/executions`, { requestId: randomUUID(), revision: saved.revision });
+  assert.equal(second.statusCode, 202, second.body);
+  const firstPage = (await request("GET", `/api/executions?launchId=${saved.id}&limit=1`)).json();
+  assert.equal(firstPage.total, 2);
+  assert.equal(firstPage.items[0].id, second.json().id);
+  const older = (await request("GET", `/api/executions?launchId=${saved.id}&cursor=${encodeURIComponent(firstPage.nextCursor)}`)).json();
+  assert.deepEqual(older.items.map((run: { id: string }) => run.id), [settled.id]);
+  await until(async () => {
+    const records = (await request("GET", "/api/executions")).json().items;
+    return records.length === 3 && records.every((item: { status: string }) => item.status === "succeeded");
+  });
 });
 
 test("script quick launch resolves a dictionary reference without storing it", async t => {

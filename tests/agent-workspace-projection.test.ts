@@ -127,11 +127,11 @@ test("projection rejects byte budget overflow without partial output", () => {
 test("only approved safe metadata is attached to the two restricted resources", () => {
   const resource = script();
   resource.snapshot.id = "fm-rex-outbound-api";
-  resource.snapshot.definition = { runtime: "nodejs", resultMode: "json", outputSchema: true, inputSchema: { password: {} } };
+  resource.snapshot.definition = { runtime: "nodejs", resultMode: "json", outputSchema: true, inputSchema: { password: { default: "local credential" } } };
   const tool: AssetSnapshot = { kind: "bridge_tool", id: "fm-rex/outbound_request", name: "outbound_request",
     revision: "1", version: "1", files: {}, definition: { method: "POST", fields: ["result"], execution: { authorization: "fixture" } } };
   const project = (knownSecrets: string[] = []) => buildWorkspaceProjection({
-    resources: [resource], applications: [{ id: "fm-rex", revision: "1", definition: {}, tools: [tool] }], knownSecrets,
+    resources: [resource], applications: [{ id: "fm-rex", revision: "1", definition: {}, tools: [tool] }], knownSecrets: ["local credential", ...knownSecrets],
   }).files;
   const scriptPath = "scripts/fm-rex-outbound-api/draft";
   const toolPath = "browser-tools/fm-rex/outbound_request";

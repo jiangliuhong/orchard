@@ -1,0 +1,156 @@
+{
+  "application": "superset",
+  "site": "superset",
+  "toolId": "superset_sql_query",
+  "description": "在已配置为只读的 Superset 数据库连接上运行单条 SELECT。默认连接名为 test_starrocks；按连接能力设置 runAsync。最多返回 100 行。",
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "sql"
+    ],
+    "properties": {
+      "sql": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 8192,
+        "x-ui": {
+          "widget": "textarea",
+          "rows": 7
+        },
+        "x-history": {
+          "record": false
+        }
+      },
+      "runAsync": {
+        "type": "boolean"
+      },
+      "databaseName": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "default": "test_starrocks"
+      }
+    }
+  },
+  "path": "/api/v1/database/",
+  "method": "GET",
+  "risk": "execute",
+  "approval": "user",
+  "fields": [],
+  "timeoutMs": 120000,
+  "catalogVersion": "1",
+  "enabled": true,
+  "execution": {
+    "transport": "browser",
+    "version": 1,
+    "response": {
+      "mode": "fullJson",
+      "maxBytes": 262144
+    },
+    "preprocess": {
+      "runtime": "nodejs",
+      "code": "const sql = args.sql.trim().replace(/;$/, \"\").trim();\n// Conservative single-SELECT subset. The Superset connection must enforce read-only privileges.\nif (!/^select\\s/i.test(sql) || /[;\\u0000\\\\]|--|\\/\\*|\\*\\/|\\b(insert|update|delete|merge|create|drop|alter|truncate|replace|grant|revoke|call|set|use|load|unload|copy|into|lock|for\\s+update)\\b/i.test(sql)) {\n  throw new Error(\"A single read-only SELECT is required\");\n}\nconst runAsync = args.runAsync === true;\nreturn { ...request, headers: {}, variables: {\n  databaseName: args.databaseName ?? \"test_starrocks\",\n  sqlBody: JSON.stringify({ sql, runAsync, json: true }),\n  ...(runAsync ? { asynchronous: \"yes\" } : {}),\n} };"
+    },
+    "postprocess": {
+      "runtime": "nodejs",
+      "code": "const payload = Array.isArray(response?.data) ? response : response?.result ?? response?.data ?? response;\nconst status = String(payload?.query?.status ?? payload?.status ?? \"\").toLowerCase();\nconst rows = Array.isArray(payload?.data) ? payload.data : payload?.rows;\nif ([\"failed\", \"error\", \"stopped\"].includes(status) || !Array.isArray(rows)) throw new Error(\"Missing SQL result\");\nconst limit = 100;\nconst columns = Array.isArray(payload.columns)\n  ? payload.columns.map(column => typeof column === \"string\" ? column : column?.name).filter(name => typeof name === \"string\")\n  : [];\nreturn { columns, rows: rows.slice(0, limit), rowCount: Math.min(rows.length, limit), truncated: rows.length > limit };"
+    },
+    "flow": {
+      "capture": {
+        "databaseId": {
+          "at": [
+            "result"
+          ],
+          "match": {
+            "field": [
+              "database_name"
+            ],
+            "equalsFrom": "databaseName",
+            "value": [
+              "id"
+            ]
+          },
+          "positiveInteger": true
+        }
+      },
+      "steps": [
+        {
+          "path": "/api/v1/security/csrf_token/",
+          "method": "GET",
+          "capture": {
+            "csrf": {
+              "at": [
+                "result"
+              ],
+              "secret": true
+            }
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/sqllab/execute/",
+          "headers": {
+            "X-CSRFToken": "{csrf}",
+            "Content-Type": "application/json"
+          },
+          "bodyFrom": "sqlBody",
+          "capture": {
+            "queryId": {
+              "at": [
+                "data",
+                "query",
+                "id"
+              ],
+              "optional": true
+            }
+          },
+          "jsonFields": {
+            "database_id": {
+              "from": "databaseId",
+              "type": "positiveInteger"
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/query/{queryId}",
+          "when": "asynchronous",
+          "poll": {
+            "at": [
+              "result",
+              "status"
+            ],
+            "success": [
+              "success",
+              "done"
+            ],
+            "failure": [
+              "failed",
+              "error",
+              "stopped"
+            ],
+            "intervalMs": 1000,
+            "maxAttempts": 120
+          },
+          "capture": {
+            "resultsKey": {
+              "at": [
+                "result",
+                "results_key"
+              ]
+            }
+          }
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/sqllab/results/",
+          "when": "resultsKey",
+          "query": {
+            "q": "(key:{resultsKey:rison},rows:!n)"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -26,8 +26,8 @@ const readinessLabels: Record<DictionaryReadiness, string> = {
   ready: "可解密", "missing-key": "缺少密钥", "authentication-failed": "认证失败", "keyring-unavailable": "密钥环不可用",
 };
 
-const readError = (error: unknown): { message: string; details?: { impacts: { key: string; workflows: number; scripts: number; quickLaunches?: number }[]; confirmationToken: string; expiresAt: number } } => {
-  const value = error as Error & { details?: { impacts: { key: string; workflows: number; scripts: number; quickLaunches?: number }[]; confirmationToken: string; expiresAt: number } };
+const readError = (error: unknown): { message: string; details?: { impacts: { key: string; workflows: number; scripts: number; quickLaunches?: number; browserTools?: number }[]; confirmationToken: string; expiresAt: number } } => {
+  const value = error as Error & { details?: { impacts: { key: string; workflows: number; scripts: number; quickLaunches?: number; browserTools?: number }[]; confirmationToken: string; expiresAt: number } };
   return { message: value.message, details: value.details };
 };
 
@@ -109,7 +109,7 @@ function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: Dictio
   const [removals, setRemovals] = useState<string[]>([]);
   const [newKey, setNewKey] = useState(""), [newType, setNewType] = useState("string"), [newValue, setNewValue] = useState("");
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
-  const [pending, setPending] = useState<{ operations: Operation[]; label: string; confirmationToken: string; impacts: { key: string; workflows: number; scripts: number; quickLaunches?: number }[] } | null>(null);
+  const [pending, setPending] = useState<{ operations: Operation[]; label: string; confirmationToken: string; impacts: { key: string; workflows: number; scripts: number; quickLaunches?: number; browserTools?: number }[] } | null>(null);
   useEffect(() => { setEdits({}); setRemovals([]); setPending(null); setError(""); setNotice(""); }, [detail.revision, detail.currentVersionId]);
   const hasEdits = Object.keys(edits).length > 0 || removals.length > 0;
   const dirty = hasEdits || !!newKey || !!newValue;
@@ -167,7 +167,7 @@ function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: Dictio
     <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     {pending && <div className="notice error" role="alert">
       <p>移除以下正在被引用的键需要确认：</p>
-      <ul>{pending.impacts.map(impact => <li key={impact.key}>键 {impact.key} · {impact.workflows} 个工作流 · {impact.scripts} 个脚本{impact.quickLaunches ? ` · ${impact.quickLaunches} 张快速执行卡片` : ""}</li>)}</ul>
+      <ul>{pending.impacts.map(impact => <li key={impact.key}>键 {impact.key} · {impact.workflows} 个工作流 · {impact.scripts} 个脚本{impact.quickLaunches ? ` · ${impact.quickLaunches} 张快速执行卡片` : ""}{impact.browserTools ? ` · ${impact.browserTools} 个浏览器工具` : ""}</li>)}</ul>
       <Button variant="outline" size="sm" disabled={busy} onClick={() => void submit(pending.operations, pending.label, pending.confirmationToken)}>确认移除并保存</Button>
     </div>}
     <div className="dictionary-table-scroll">

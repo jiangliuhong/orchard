@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, chmod, access, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, chmod, access, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -8,7 +8,7 @@ import { GitRepositoryService, validateGitRemote, type GitRepositoryOptions } fr
 
 const git=(cwd:string,...args:string[])=>execFileSync('git',args,{cwd,encoding:'utf8',stdio:['pipe','pipe','pipe']}).trim();
 async function fixture(t: test.TestContext) {
-  const root=await mkdtemp(join(tmpdir(),'orchard-git-test-'));t.after(async()=>{const {rm}=await import('node:fs/promises');await rm(root,{recursive:true,force:true});});
+  const root=await mkdtemp(join(await realpath(tmpdir()),'orchard-git-test-'));t.after(async()=>{const {rm}=await import('node:fs/promises');await rm(root,{recursive:true,force:true});});
   const remote=join(root,'remote.git');await mkdir(remote);git(remote,'init','--bare','--initial-branch=main');
   const options={testTransport:()=>remote,validateSnapshot:(files:Record<string,string>)=>{assert.equal(JSON.parse(files['manifest.json']).formatVersion,1);}};
   const service=(name:string,extra:GitRepositoryOptions={})=>new GitRepositoryService(join(root,name),{...options,...extra});

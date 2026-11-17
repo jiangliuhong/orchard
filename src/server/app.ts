@@ -1,3 +1,5 @@
+import { registerAgentAccess } from "../external-agent/routes.js";
+import { DictionaryExecution } from "../dictionaries/execution.js";
 import Fastify from "fastify";
 import { QuickLaunchService } from "../quick-launch/service.js";
 import { registerQuickLaunchRoutes } from "../quick-launch/routes.js";
@@ -145,6 +147,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
       const keyring = new KeyringStore(resolveKeyringPath(opened.root));
       const secretsService = new SecretsService(opened, keyring, new CommandHmac(opened, opened.root, keyring));
       add("secrets", secretsService);
+      gateway.httpDependencies.resolveInputDefault = new DictionaryExecution(opened).readCurrentPlain;
       gateway.httpDependencies.resolveCredential = dictionaryCredentials(opened, secretsService);
       const dictionaryService = add("dictionaries", new DictionaryService(opened, secretsService));
       const readCredential = dictionaryCredentials(opened, secretsService);
@@ -229,6 +232,7 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     reply.header("Referrer-Policy", "no-referrer");
   });
   registerQuickLaunchRoutes(app, quickLaunch);
+  registerAgentAccess(app, store, quickLaunch, token => apiAuth.valid(token), bootstrap?.port ?? 7441);
   registerQuickLaunchGroupRoutes(app, proxy<QuickLaunchGroups>("quickLaunchGroups"));
   if (maintenanceFactory) registerMaintenanceRoutes(app, {
     service: proxy<MaintenanceService>("maintenance"),
@@ -334,9 +338,12 @@ export function createApp(initialStore?: Store, suppliedProviders?: ProviderRegi
     return { ...bridge.registerProfile(profile), bridgeToken: bridge.browserChannel.register(profile.id, profile.extensionId) };
   });
   app.post("/api/web-bridge/browser/poll", async request => {
-    const input = request.body as { profileId: string };
+    const input = request.body as { profileId: string; activeIds?: unknown[] };
     bridge.browserChannel.authenticate(input?.profileId, request.headers["x-orchard-bridge-token"], request.headers.origin);
-    return { items: bridge.browserChannel.poll(input.profileId) };
+    return {
+      items: bridge.browserChannel.poll(input.profileId),
+      ...(Array.isArray(input.activeIds) ? { activeIds: bridge.browserChannel.activeCalls(input.profileId, input.activeIds) } : {}),
+    };
   });
   app.post("/api/web-bridge/browser/result", async request => {
     const input = request.body as { profileId: string; id: string; result?: unknown; error?: string };

@@ -1,3 +1,4 @@
+import { InputDictionaryDefaults } from "./InputDictionaryDefaults";
 import { useState } from "react";
 import { BRIDGE_HTTP_METHODS } from "../../web-bridge/http-methods";
 import type { WebBridgeTool } from "../../web-bridge/catalog";
@@ -48,6 +49,7 @@ export function BridgeToolForm({ value, existing, disabled, onChange, onInvalidC
       {key === "parameters" && <p className="field-hint">测试输入由此 JSON Schema 生成。根节点声明 type: object 和 properties；string 默认单行，多行需配置 {"\"x-ui\": { \"widget\": \"textarea\", \"rows\": 7 }"}。使用 title、description 和 required 配置标签、说明与必填项。历史记录默认保存手动值；敏感字段或父对象请声明 {"\"x-history\": { \"record\": false }"}，历史仅保留未记录占位。</p>}
       {key === "execution" && <p className="field-hint">localHttp 不复用浏览器 Cookie；凭据填写普通或加密字典的字符串键引用，敏感凭据建议加密保存，勿填写真实 AK/SK。browser 使用运行环境绑定的已登录页签，需在插件授权站点。调用凭据推荐用 credentialSchema（object、string 属性、required、additionalProperties:false）声明，并以 x-history.record 控制手动值的历史记录；旧 credentialInputs 默认不记录手动值。字典引用会随历史恢复；完整返回设置 response.mode 为 fullJson。两种模式均可配置 postprocess: {"{ runtime: \"nodejs\", code: \"return response;\", timeoutMs: 1000 }"}，使用 response 和 args 处理筛选后的结果。</p>}
     </details>)}
+    <InputDictionaryDefaults schema={definition.parameters} disabled={disabled || !!error} onChange={schema => jsonField("parameters", JSON.stringify(schema, null, 2))} />
     <ErrorNotice message={error} />
   </fieldset>;
 }

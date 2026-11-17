@@ -33,8 +33,8 @@ function DictionaryKeys({ dictionaryId, disabled, onSelect, acceptedTypes = ["st
   </section>;
 }
 
-export function CredentialDictionaryPicker({ name, disabled, initialDictionaryId, onSelect, onClose, acceptedTypes }: {
-  name: string; disabled: boolean; initialDictionaryId: string; onSelect: (dictionaryId: string, key: string) => void; onClose: () => void; acceptedTypes?: string[];
+export function CredentialDictionaryPicker({ name, disabled, initialDictionaryId, onSelect, onClose, acceptedTypes, plainOnly }: {
+  name: string; disabled: boolean; initialDictionaryId: string; onSelect: (dictionaryId: string, key: string) => void; onClose: () => void; acceptedTypes?: string[]; plainOnly?: boolean;
 }) {
   const [search, setSearch] = useState(""), [dictionaryId, setDictionaryId] = useState(initialDictionaryId);
   const [items, setItems] = useState<DictionaryListView[]>([]), [loading, setLoading] = useState(true);
@@ -57,7 +57,7 @@ export function CredentialDictionaryPicker({ name, disabled, initialDictionaryId
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [revision]);
-  const dictionaries = items.filter(item => item.name.toLowerCase().includes(search.trim().toLowerCase()));
+  const dictionaries = items.filter(item => (!plainOnly || item.kind === "plain") && item.name.toLowerCase().includes(search.trim().toLowerCase()));
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
     <DialogContent className="bridge-credential-dialog">
       <DialogHeader><DialogTitle>引入字典 · {name}</DialogTitle><DialogDescription>选择字典，点击类型匹配的 Key 即可引用。这里只展示名称和类型，不展示值。</DialogDescription></DialogHeader>
@@ -78,7 +78,7 @@ export function CredentialDictionaryPicker({ name, disabled, initialDictionaryId
             {!loading && !error && !dictionaries.length && <p className="field-hint" role="status">{search.trim() ? "没有匹配的字典。" : "暂无字典，请先在字典页面创建。"}</p>}
           </div>
         </section>
-        {dictionaryId ? <DictionaryKeys key={dictionaryId} dictionaryId={dictionaryId} disabled={disabled} acceptedTypes={acceptedTypes} onSelect={key => onSelect(dictionaryId, key)} />
+        {dictionaryId && (!plainOnly || items.some(item => item.id === dictionaryId && item.kind === "plain")) ? <DictionaryKeys key={dictionaryId} dictionaryId={dictionaryId} disabled={disabled} acceptedTypes={acceptedTypes} onSelect={key => onSelect(dictionaryId, key)} />
           : <section className="bridge-dictionary-column" aria-label="Key 列表"><label htmlFor="credential-key-search">Key</label><Input id="credential-key-search" placeholder="搜索 Key…" disabled /><p className="field-hint">请先选择左侧字典。</p></section>}
       </div>
     </DialogContent>
