@@ -83,6 +83,7 @@ export function ScriptRunInspector({ script, version, disabled, suggestedInput, 
   const changed = () => { setRefresh(value => value + 1); onTestsChanged?.(); };
   const resultId = selected || tests[0]?.id;
   return <aside className="panel script-inspector" aria-label="运行与引用">
+    <ErrorNotice message={error} />
     <div className="script-page-tabs" role="tablist" aria-label="运行与引用">{tabs.map((item, index) => <button type="button" key={item.id} id={`${prefix}-tab-${item.id}`} role="tab" aria-selected={tab === item.id} aria-controls={`${prefix}-panel-${item.id}`} tabIndex={tab === item.id ? 0 : -1} onClick={() => selectTab(item.id)} onKeyDown={event => {
       const next = event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[tabs.length - 1] : event.key === "ArrowRight" ? tabs[(index + 1) % tabs.length] : event.key === "ArrowLeft" ? tabs[(index + tabs.length - 1) % tabs.length] : undefined;
       if (next) { event.preventDefault(); selectTab(next.id, true); }
@@ -90,14 +91,14 @@ export function ScriptRunInspector({ script, version, disabled, suggestedInput, 
     <section className="script-parameters-tab" role="tabpanel" id={`${prefix}-panel-parameters`} aria-labelledby={`${prefix}-tab-parameters`} hidden={tab !== "parameters"}>
       <div className="script-parameters-scroll"><p className="field-hint">使用已保存的 v{version.number}{version.status === "draft" ? ` 草稿修订 ${version.revision}` : ""}，测试会实际执行脚本。</p>
         <ScriptTestParameters schema={version.inputSchema} value={input} sources={sources} onChange={setInput} onSources={setSources} disabled={disabled || busy} onInvalidChange={setParametersInvalid} resetKey={inputGeneration} missing={missing} />
-        {reuseNotice && <p className="field-hint" role="status">{reuseNotice}</p>}<ErrorNotice message={error} />
+        {reuseNotice && <p className="field-hint" role="status">{reuseNotice}</p>}
       </div><div className="script-run-actions"><Button disabled={disabled || busy || parametersInvalid} onClick={() => void run()}>{busy ? "正在提交…" : "运行测试"}</Button></div>
     </section>
     <section className="script-results-tab" role="tabpanel" id={`${prefix}-panel-results`} aria-labelledby={`${prefix}-tab-results`} hidden={tab !== "results"}>
       <div className="script-history-toolbar"><label htmlFor={`${prefix}-history`}>测试历史</label><select id={`${prefix}-history`} value={resultId ?? ""} onChange={event => setSelected(event.target.value)}>
         {!tests.length && !selected && <option value="">暂无测试</option>}{selected && !tests.some(test => test.id === selected) && <option value={selected}>刚提交的测试</option>}
         {tests.map(test => <option key={test.id} value={test.id}>{new Date(test.createdAt).toLocaleString("zh-CN")} · {test.status} · {test.scriptVersionId ? `版本 ${test.scriptVersionId.slice(0, 8)}` : `草稿修订 ${test.draftRevision}`}</option>)}
-      </select><div className="actions"><Button variant="outline" disabled={!offset} onClick={() => { setSelected(""); setOffset(Math.max(0, offset - 20)); }}>上一页</Button><span>{total} 条</span><Button variant="outline" disabled={offset + 20 >= total} onClick={() => { setSelected(""); setOffset(offset + 20); }}>下一页</Button></div><ErrorNotice message={error} /></div>
+      </select><div className="actions"><Button variant="outline" disabled={!offset} onClick={() => { setSelected(""); setOffset(Math.max(0, offset - 20)); }}>上一页</Button><span>{total} 条</span><Button variant="outline" disabled={offset + 20 >= total} onClick={() => { setSelected(""); setOffset(offset + 20); }}>下一页</Button></div></div>
       {resultId ? <ScriptTestResult key={resultId} scriptId={script.id} testId={resultId} onInput={reuse} onChange={changed} /> : <div className="empty script-result-empty"><p>暂无测试结果，请在运行参数中发起测试。</p><Button variant="outline" onClick={() => selectTab("parameters", true)}>填写运行参数</Button></div>}
     </section>
     <div className="script-reference-tab" role="tabpanel" id={`${prefix}-panel-references`} aria-labelledby={`${prefix}-tab-references`} hidden={tab !== "references"}><ScriptReferences scriptId={script.id} /><ScriptCleanup scriptId={script.id} onCleaned={() => { setSelected(""); setOffset(0); changed(); }} /></div>

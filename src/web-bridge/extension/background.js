@@ -91,18 +91,13 @@ function manageBridgeTab(origin, selectedId) {
 
     const available = tabs.filter(tab => !tab.discarded && !tab.frozen &&
       (!tab.pendingUrl || tabOrigin(tab.pendingUrl) === origin));
-    // Tab IDs are browser-session scoped. Keep only the fact of a previous
-    // binding across browser restarts so a replacement always requires consent.
-    const historyKey = "bridgeTabPreviouslyBound:" + origin;
-    const previouslyBound = (await chrome.storage.local.get(historyKey))[historyKey];
     const selected = selectedId === undefined
-      ? (!binding && !previouslyBound && tabs.length === 1 ? available[0] : undefined)
+      ? (binding ? undefined : available[0])
       : available.find(tab => tab.id === selectedId);
     if (selectedId !== undefined && !selected) throw new Error("TAB_UNAVAILABLE");
     if (selected && selected.id !== binding?.tabId) {
       if (!await canAccessOrigin(origin)) throw new Error("TAB_REQUIRED");
       if (binding) await releaseTab(bindings, origin, primary);
-      await chrome.storage.local.set({ [historyKey]: true });
       binding = { tabId: selected.id, restoreAutoDiscardable: selected.autoDiscardable !== false };
       bindings[origin] = binding;
       await saveBindings(bindings);
@@ -116,7 +111,7 @@ function manageBridgeTab(origin, selectedId) {
     return {
       tabId: binding?.tabId,
       state: ready ? "ready" : primary?.discarded ? "discarded" : primary?.frozen ? "frozen"
-        : binding ? "unavailable" : previouslyBound || tabs.length > 1 ? "select" : "missing",
+        : binding ? "unavailable" : "missing",
       tabs: tabs.map(tab => ({
         id: tab.id, windowId: tab.windowId, index: tab.index, title: tab.title, url: tab.url,
         available: available.includes(tab),
@@ -143,7 +138,7 @@ async function executeBrowserRequest(payload, id, cancellation) {
   if (deadline && deadline <= Date.now()) throw new Error("BROWSER_REQUEST_FAILED");
   const binding = await manageBridgeTab(origin);
   if (binding.state !== "ready") {
-    const errors = { select: "TAB_SELECTION_REQUIRED", discarded: "TAB_DISCARDED", frozen: "TAB_FROZEN" };
+    const errors = { discarded: "TAB_DISCARDED", frozen: "TAB_FROZEN" };
     throw new Error(errors[binding.state] || "TAB_REQUIRED");
   }
   const remainingMs = deadline ? Math.min(timeoutMs, deadline - Date.now()) : timeoutMs;

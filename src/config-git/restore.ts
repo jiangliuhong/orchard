@@ -6,7 +6,7 @@ import type { Store } from "../persistence/store.js";
 import { canonicalJson, digest } from "../persistence/files.js";
 import { configCoordinator, registerConfigCoordinator, type ConfigWriteCoordinator } from "./coordinator.js";
 import { workspaceSchemaInstalled, assertNoMaintenanceTask } from "../agent/workspace-business-hooks.js";
-import type { PortableSnapshot, SnapshotCategory, SnapshotTheme } from "./snapshot-types.js";
+import type { PortableSnapshot, SnapshotCategory } from "./snapshot-types.js";
 import { durableJson, durableWrite, readJson, readOptional, syncFile } from "./restore-files.js";
 import { captureSnapshot, prepareImport, importDefinitions, targetFingerprint, databaseFingerprint, assertIdle, type PreparedImport } from "./restore-import.js";
 export type { PortableSnapshot } from "./snapshot-types.js";
@@ -16,8 +16,6 @@ export interface RestorePreviewOptions {
   mappings?: Record<string, string>;
   source?: { kind: "git"; sha: string } | { kind: "recovery-point"; id: string };
   context?: unknown;
-  clientId?: string;
-  preferenceRevision?: number;
 }
 export interface RestorePreview {
   token: string; planHash: string; targetHash: string; generation: number; expiresAt: number;
@@ -32,7 +30,6 @@ export interface RestoreOperation {
   result?: { operationId: string; planHash: string; recoveryPointId: string; changed: number; phase: "completed"; sourceSha?: string; changes?: RestorePreview["changes"]; reconnect?: string[] };
   error?: string;
 }
-interface GeneralState { theme: SnapshotTheme; pending: { clientId: string | null; operationId: string; revision: number | null; theme: SnapshotTheme; requiresConfirmation?: boolean; acknowledged?: "applied" | "kept" }[] }
 interface InternalPreview { keyFingerprint: string | null; public: RestorePreview; snapshot: PortableSnapshot; options: RestorePreviewOptions; prepared: PreparedImport }
 export interface RestoreServiceOptions {
   afterRestore?: () => void | Promise<void>;
@@ -44,15 +41,8 @@ export class ConfigRestoreService {
   private previews = new Map<string, InternalPreview>();
   readonly coordinator: ConfigWriteCoordinator;
   constructor(readonly store: Store, coordinator = configCoordinator(store), readonly options: RestoreServiceOptions = {}) { this.coordinator = coordinator; registerConfigCoordinator(store, coordinator); }
-  getGeneralTheme(): SnapshotTheme | undefined { const raw = readOptional(this.store, "config-git/general.json"); return raw ? (JSON.parse(raw) as GeneralState).theme : undefined; }
-  saveGeneralSnapshot(theme: SnapshotTheme) {
-    check(["light", "dark", "system"].includes(theme), "INVALID_THEME", "外观值无效");
-    this.coordinator.withWrite(() => { const state = this.general(); state.theme = theme; durableJson(this.store, "config-git/general.json", state); });
-  }
-  private general(): GeneralState { const raw = readOptional(this.store, "config-git/general.json"); return raw ? { pending: [], ...JSON.parse(raw) } : { theme: "system", pending: [] }; }
   async preview(snapshot: PortableSnapshot, options: RestorePreviewOptions = {}): Promise<RestorePreview> {
     return this.coordinator.withRead(async () => {
-      if (options.clientId !== undefined) check(typeof options.clientId === "string" && options.clientId.length > 0 && options.clientId.length <= 200 && Number.isSafeInteger(options.preferenceRevision) && options.preferenceRevision! >= 0, "INVALID_PREFERENCE", "浏览器偏好身份或修订无效");
       const copy = structuredClone(snapshot), settings = structuredClone(options);
       const keyFingerprint = dictionaryFingerprint(this.store);
       const prepared = await prepareImport(this.store, copy, settings);
@@ -81,14 +71,9 @@ export class ConfigRestoreService {
       const operation: RestoreOperation = { operationId: randomUUID(), requestId, planHash: preview.public.planHash, recoveryPointId: randomUUID(), previewToken, phase: "accepted", createdAt: Date.now(), ...(preview.options.source ? { source: preview.options.source } : {}), files: [], installed: [] };
       this.save(operation); this.options.fault?.("accepted", operation);
       try {
-        const recovery = captureSnapshot(this.store, this.general().theme);
+        const recovery = captureSnapshot(this.store);
         durableJson(this.store, `config-git/recovery-points/${operation.recoveryPointId}.json`, { id: operation.recoveryPointId, createdAt: Date.now(), snapshot: recovery.snapshot, mappings: recovery.mappings, categories: preview.public.categories });
         const files = { ...preview.prepared.files };
-        if (preview.public.categories.includes("general")) {
-          const state = this.general(); state.theme = preview.snapshot.general.theme;
-          state.pending.push({ clientId: preview.options.clientId ?? null, operationId: operation.operationId, revision: preview.options.preferenceRevision ?? null, theme: state.theme });
-          files["config-git/general.json"] = JSON.stringify(state);
-        }
         for (const [target, content] of Object.entries(files)) {
           const staged = `config-git/staging/${operation.operationId}/${operation.files.length}.json`;
           durableWrite(this.store, staged, content); operation.files.push({ target, staged, hash: digest(content) });
@@ -128,8 +113,10 @@ export class ConfigRestoreService {
     const receipt = this.receipt(operation); check(receipt, "RECOVERY_REQUIRED", "恢复回执缺失", 503);
     check(databaseFingerprint(this.store) === receipt.databaseHash, "RECOVERY_REQUIRED", "恢复数据库或源码最终摘要不匹配", 503);
     check(!workspaceSchemaInstalled(this.store) || !operation.files.some(file => file.target === "config/web-bridge.json"), "WORKSPACE_LEGACY_RESTORE_PENDING", "旧浏览器文件恢复与数据库事实源不兼容，须先完成迁移恢复审核", 503);
-    for (const file of operation.files) {
-      check(["config/web-bridge.json", "config/web-bridge-bindings.json", "config-git/general.json", "config-git/local-mappings.json"].includes(file.target), "RECOVERY_REQUIRED", "恢复文件目标无效", 503);
+    // Older interrupted restores may contain a retired appearance delivery file.
+    const files = operation.files.filter(file => file.target !== "config-git/general.json");
+    for (const file of files) {
+      check(["config/web-bridge.json", "config/web-bridge-bindings.json", "config-git/local-mappings.json"].includes(file.target), "RECOVERY_REQUIRED", "恢复文件目标无效", 503);
       const content = readOptional(this.store, file.staged);
       check(content !== null && digest(content) === file.hash, "RECOVERY_REQUIRED", "恢复暂存文件缺失或损坏", 503);
       this.options.fault?.(`before_file:${file.target}`, operation);
@@ -140,7 +127,7 @@ export class ConfigRestoreService {
     }
     operation.phase = "files_installed"; this.save(operation); this.options.fault?.("files_installed", operation);
     await this.options.afterRestore?.();
-    for (const file of operation.files) check(digest(readOptional(this.store, file.target) ?? "") === file.hash, "RECOVERY_REQUIRED", "恢复文件最终校验失败", 503);
+    for (const file of files) check(digest(readOptional(this.store, file.target) ?? "") === file.hash, "RECOVERY_REQUIRED", "恢复文件最终校验失败", 503);
     this.options.fault?.("before_completed", operation);
     operation.phase = "completed"; delete operation.error;
     operation.result = { ...receipt, phase: "completed" }; this.save(operation);
@@ -175,7 +162,7 @@ export class ConfigRestoreService {
   operation(id: string): RestoreOperation { const item = this.operations().find(item => item.operationId === id); check(item, "NOT_FOUND", "恢复操作不存在", 404); return item; }
   recoveryPoints() {
     const path = this.store.files.path("config-git/recovery-points");
-    return existsSync(path) ? readdirSync(path).filter(name => /^[a-f0-9-]+\.json$/.test(name)).map(name => { const value = readJson<{ id: string; createdAt: number; categories: SnapshotCategory[] }>(this.store, `config-git/recovery-points/${name}`); return { id: value.id, createdAt: value.createdAt, categories: value.categories }; }) : [];
+    return existsSync(path) ? readdirSync(path).filter(name => /^[a-f0-9-]+\.json$/.test(name)).map(name => { const value = readJson<{ id: string; createdAt: number; categories: SnapshotCategory[] }>(this.store, `config-git/recovery-points/${name}`); return { id: value.id, createdAt: value.createdAt, categories: value.categories.filter(category => category !== "general") }; }) : [];
   }
   previewRecoveryPoint(id: string, options: RestorePreviewOptions = {}) {
     check(this.recoveryPoints().some(item => item.id === id), "NOT_FOUND", "恢复点不存在", 404);
@@ -188,20 +175,5 @@ export class ConfigRestoreService {
       check(!this.operations().some(item => item.recoveryPointId === id && !["completed", "failed"].includes(item.phase)), "CONFIG_BUSY", "未完成恢复正在引用恢复点", 409);
       rmSync(this.store.files.path(`config-git/recovery-points/${id}.json`)); syncFile(this.store.files.path("config-git/recovery-points"));
     });
-  }
-  pendingGeneral(clientId: string) { this.coordinator.assertAvailable(); return this.general().pending.filter(item => item.clientId === clientId && !item.acknowledged); }
-  claimGeneralSnapshot(clientId: string, revision: number) {
-    return this.coordinator.withWrite(() => {
-      check(typeof clientId === "string" && clientId.length > 0 && Number.isSafeInteger(revision) && revision >= 0, "INVALID_PREFERENCE", "浏览器偏好身份无效");
-      check(this.getGeneralTheme(), "GENERAL_SNAPSHOT_MISSING", "尚无服务端常规快照", 422);
-      const state = this.general(), item = { clientId, operationId: randomUUID(), revision, theme: state.theme, requiresConfirmation: true };
-      state.pending.push(item); durableJson(this.store, "config-git/general.json", state); return item;
-    });
-  }
-  claimGeneral(clientId: string, operationId: string, revision: number) {
-    return this.coordinator.withWrite(() => { const state = this.general(), item = state.pending.find(item => item.operationId === operationId); check(item && (!item.clientId || item.clientId === clientId), "NOT_FOUND", "可领取的偏好不存在", 404); if (!item.clientId) { item.clientId = clientId; item.revision = revision; durableJson(this.store, "config-git/general.json", state); } return item; });
-  }
-  acknowledgeGeneral(clientId: string, operationId: string, revision: number, choice: "applied" | "kept", force = false) {
-    return this.coordinator.withWrite(() => { const state = this.general(), item = state.pending.find(item => item.operationId === operationId && item.clientId === clientId); check(item, "NOT_FOUND", "待恢复偏好不存在", 404); if (item.acknowledged) return item; check(choice === "applied" || choice === "kept", "INVALID_CHOICE", "偏好回执无效"); check(choice === "kept" || force || !item.requiresConfirmation && item.revision === revision, "PREFERENCE_CONFLICT", "浏览器偏好已变化，请明确选择", 409); item.acknowledged = choice; durableJson(this.store, "config-git/general.json", state); return item; });
   }
 }

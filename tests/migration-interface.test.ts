@@ -1,13 +1,17 @@
 import {test,afterEach} from 'node:test';
 import assert from 'node:assert/strict';
-import {createElement} from 'react';
+import {createElement,useEffect,useState} from 'react';
 import {JSDOM} from 'jsdom';
 import type {Plan,Status} from '../src/migrations/types.js';
 const dom=new JSDOM('<!doctype html><html><body></body></html>',{url:'http://localhost:7443/workflows/deep-link',pretendToBeVisual:true});
-for(const key of ['window','document','HTMLElement','HTMLInputElement','HTMLFormElement','Element','Node','MutationObserver','Event','MouseEvent','CustomEvent','getComputedStyle'] as const)Object.defineProperty(globalThis,key,{value:(dom.window as unknown as Record<string,unknown>)[key],configurable:true});
+for(const key of ['window','document','HTMLElement','HTMLInputElement','HTMLFormElement','DocumentFragment','NodeFilter','Element','Node','MutationObserver','Event','MouseEvent','CustomEvent','getComputedStyle'] as const)Object.defineProperty(globalThis,key,{value:(dom.window as unknown as Record<string,unknown>)[key],configurable:true});
 Object.defineProperty(globalThis,'navigator',{value:dom.window.navigator,configurable:true});
 const {render,screen,fireEvent,cleanup,waitFor,act}=await import('@testing-library/react');
 const {BootstrapGate}=await import('../src/web/Bootstrap.js');
+const {api,send,useResource,serviceUnavailableMessage}=await import('../src/web/lib/api.js');
+const {ErrorNotice}=await import('../src/web/components/common.js');
+const {MessageLayer}=await import('../src/web/components/ToastNotice.js');
+const {useLeaveGuard}=await import('../src/web/lib/navigation.js');
 const originalFetch=globalThis.fetch;
 afterEach(()=>{cleanup();globalThis.fetch=originalFetch;});
 function mount(){return render(createElement(BootstrapGate,null,createElement('p',null,'已打开工作台业务')));}
@@ -33,10 +37,76 @@ function server(initial:Status['state']='migration_required'){
  return {plan,requests,handle(value:typeof handler){handler=value;},state(value:Status['state']){state=value;if(value==='migrating')hadMigration=true;revision++;},restart(){session='replacement-'+Math.random();revision=0;},get session(){return session;}};
 }
 async function confirmation(){fireEvent.click(await screen.findByRole('button',{name:'继续填写参数'}));fireEvent.click(screen.getByRole('button',{name:'验证并查看确认摘要'}));await screen.findByRole('heading',{name:'确认升级'});fireEvent.click(screen.getByRole('checkbox',{name:'我已确认升级范围和备份位置'}));}
-test('deep links remain gated until readiness and registered business failures return to the gate',async()=>{
+test('deep links remain gated until readiness and confirmed migrations open a dialog',async()=>{
  const mock=server('checking');mount();await screen.findByRole('heading',{name:'正在检查数据'});assert.equal(screen.queryByText('已打开工作台业务'),null);
  mock.state('ready');await wake();await screen.findByText('已打开工作台业务');
- mock.state('installing');await act(async()=>{window.dispatchEvent(new dom.window.CustomEvent('orchard:not-ready'));});await screen.findByRole('heading',{name:'正在安装升级结果'});assert.equal(screen.queryByText('已打开工作台业务'),null);
+ mock.state('installing');await wake();await screen.findByRole('dialog',{name:'正在安装升级结果'});assert.ok(screen.getByText('已打开工作台业务'));
+});
+
+for(const guarded of [false,true])test(`restart recovery keeps workspace and scroll position (${guarded?'unsaved editor':'auto-refreshed read'})`,async()=>{
+ const mock=server('ready');
+ const bootstrapFetch=globalThis.fetch;
+ let mode:'ready'|'offline'|'proxy'|'starting'|'recovered'='ready', writes=0, reads=0, mounts=0;
+ globalThis.fetch=async(input,options)=>{
+  const path=String(input);
+  if(path==='/api/example'){
+   if(options?.method==='POST')writes++;else reads++;
+   if(mode==='offline')throw new TypeError('Failed to fetch');
+   if(mode==='proxy')return new Response('<html>proxy unavailable</html>',{status:502});
+   if(mode==='starting')return Response.json({code:'MIGRATION_IN_PROGRESS'},{status:503});
+   return Response.json({value:mode==='ready'?'原响应':'恢复后响应'});
+  }
+  if(mode==='offline')throw new TypeError('Failed to fetch');
+  return bootstrapFetch(input,options);
+ };
+ function Workspace(){
+  const resource=useResource<{value:string}>('/example');
+  const [draft,setDraft]=useState('');
+  useLeaveGuard(guarded&&!!draft,()=>{});
+  useEffect(()=>{mounts++;},[]);
+  return createElement('main',{'aria-label':'编辑工作区'},
+   createElement('input',{'aria-label':'草稿',value:draft,onChange:(event:{target:{value:string}})=>setDraft(event.target.value)}),
+   createElement('p',null,resource.data?.value),
+   createElement(ErrorNotice,{message:resource.error}),
+   createElement('button',{onClick:resource.reload},'刷新读取'));
+ }
+ const view=render(createElement(MessageLayer,null,createElement(BootstrapGate,null,createElement(Workspace))));
+ await screen.findByText('原响应');
+ const workspace=screen.getByRole('main',{name:'编辑工作区'});
+ const draft=screen.getByRole<HTMLInputElement>('textbox',{name:'草稿'});
+ fireEvent.change(draft,{target:{value:'未保存内容'}});
+ workspace.scrollTop=157;
+ mode='offline';
+ fireEvent.click(screen.getByRole('button',{name:'刷新读取'}));
+ await screen.findByText(serviceUnavailableMessage);
+ assert.equal(screen.getAllByText(serviceUnavailableMessage).length,1);
+ assert.equal(view.container.textContent?.includes(serviceUnavailableMessage),false);
+ await act(async()=>{await assert.rejects(send('/example',{draft:draft.value}),{message:serviceUnavailableMessage});});
+ mode='proxy';
+ await act(async()=>{await assert.rejects(api('/example'),{httpStatus:502});});
+ mode='starting';mock.restart();mock.state('initializing');
+ await act(async()=>{await assert.rejects(api('/example'),{httpStatus:503});});
+ await wake();
+ assert.equal(screen.queryByRole('dialog'),null);
+ assert.equal(screen.getAllByText(serviceUnavailableMessage).length,1);
+ assert.equal(screen.getByRole('main',{name:'编辑工作区'}),workspace);
+ assert.equal(draft.value,'未保存内容');
+ assert.equal(workspace.scrollTop,157);
+ assert.ok(screen.getByText('原响应'));
+ mode='recovered';mock.state('ready');
+ await wake();
+ await screen.findByText(guarded?'原响应':'恢复后响应');
+ await waitFor(()=>assert.equal(screen.queryByText(serviceUnavailableMessage),null));
+ assert.equal(screen.getByRole('textbox',{name:'草稿'}),draft);
+ assert.equal(draft.value,'未保存内容');
+ assert.equal(workspace.scrollTop,157);
+ assert.equal(mounts,1);
+ assert.equal(writes,1);
+ assert.equal(reads,guarded?4:5);
+ if(guarded){
+  fireEvent.click(screen.getByRole('button',{name:'刷新读取'}));
+  await screen.findByText('恢复后响应');
+ }
 });
 test('a new page opened after commitment enters the workspace without displaying the upgrade wizard again',async()=>{
  const mock=server('migrating');mock.state('ready');mount();await screen.findByText('已打开工作台业务');await wake();assert.equal(screen.queryByRole('heading',{name:'数据升级完成'}),null);assert.equal(screen.queryByRole('button',{name:'进入工作台'}),null);

@@ -85,7 +85,9 @@ test("rejected submission stays in parameters and keeps entered values", async (
   fireEvent.change(screen.getByRole("textbox", { name: /query/ }), { target: { value: "preserved" } });
   await waitFor(() => assert.equal((screen.getByRole("button", { name: "运行测试" }) as HTMLButtonElement).disabled, false));
   fireEvent.click(screen.getByRole("button", { name: "运行测试" }));
-  await within(screen.getByRole("tabpanel", { name: "运行参数" })).findByText("草稿修订冲突");
+  const notice = await screen.findByText("草稿修订冲突");
+  assert.ok(notice.closest(".operation-message-layer"));
+  assert.equal(within(screen.getByRole("tabpanel", { name: "运行参数" })).queryByText("草稿修订冲突"), null);
   assert.equal(screen.getByRole("tab", { name: "运行参数" }).getAttribute("aria-selected"), "true");
   assert.equal((screen.getByRole("textbox", { name: /query/ }) as HTMLInputElement).value, "preserved");
 });

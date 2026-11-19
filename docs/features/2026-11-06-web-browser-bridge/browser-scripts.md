@@ -67,7 +67,7 @@ browser 和 localHttp 均支持在工具的“执行配置（JSON）”中添加
 1. 重新加载浏览器扩展以获得 scripting 和站点权限请求能力。
 2. 打开目标 HTTPS 业务页签，手动完成网关登录。在扩展弹窗点击“授权当前站点桥接”。权限按站点授予，不自动请求所有站点。
 3. 工作台环境配置 origin 和 profileId；多个启用环境必须选择 environmentId。
-4. 同源匹配只有一个页签时使用该页签；多个匹配时要求唯一 active 页签，否则返回 TAB_REQUIRED，不猜测账号。
+4. 站点已授权且尚未绑定主桥接页签时，扩展自动绑定列表中的第一个可用同源页签。可在扩展弹窗手动切换主桥接页签。
 5. execute/write/delete/download 或 approval:user 的工具必须逐次确认。工作台“确认并执行”弹窗通过后调用 `/api/web-bridge/calls`，带 `approved:true`。API/CLI 调用方仅应在取得用户对本次参数的明确确认后传入该字段；未传则拒绝。只读测试接口不接受确认字段。CLI 对应 `--environment-id <id> --approve`，`--approve` 表示调用者已取得本次执行的用户确认。
 
 浏览器执行在目标页签 MAIN world 以 credentials:include 发送，脚本只返回路径、headers、原始字符串 body，不在浏览器运行 Node.js。发送时不重新序列化 body。业务 Authorization:Bearer 与网关 Cookie 分别承担业务鉴权和网关登录；不会提取、回传 Cookie，也不会用 AK/SK 绕过网关。401/403 或非 JSON 登录页返回 GATEWAY_AUTH_REQUIRED；重定向被拒绝（浏览器 fetch 对此可能仅给出通用失败），请在页签手动登录后重新确认调用。不自动重试有副作用的请求。取消可终止 Node.js 预处理并移除待投递任务；已投递的浏览器 fetch 按剩余总超时截止，不能保证立即撤销，已被上游接受的业务动作不能回滚。

@@ -19,6 +19,7 @@ const token = "superset-session-csrf";
 const path = {
   databases: "/api/v1/database/",
   tables: "/api/v1/database/12/tables/",
+  search: "/api/v1/database/12/tables/search/",
   csrf: "/api/v1/security/csrf_token/",
   execute: "/api/v1/sqllab/execute/",
   status: "/api/v1/query/99",
@@ -34,7 +35,19 @@ test("Superset proposal saves and runs synchronous and asynchronous calls throug
     summary: "新增 Superset SQL Lab 查询",
     changes: [{ operation: "create", toolId: definition.toolId, definition }],
   });
-  assert.throws(() => prepareBridgeProposal("superset", [], proposal({ ...sample, risk: "read", approval: "none" })), { code: "INVALID_BROWSER_FLOW" });
+  const tableExecution = tableSample.execution;
+  assert.ok(tableExecution?.transport === "browser" && tableExecution.flow);
+  const postSearch: WebBridgeTool = {
+    ...tableSample,
+    toolId: "table_search",
+    execution: {
+      ...tableExecution,
+      flow: { ...tableExecution.flow, steps: [{ ...tableExecution.flow.steps[0], method: "POST", path: "/api/v1/database/{databaseId}/tables/search/" }] },
+    },
+  };
+  for (const risk of ["write", "delete", "execute"] as const) {
+    assert.throws(() => prepareBridgeProposal("superset", [], proposal({ ...sample, risk, approval: "none" })), { code: "INVALID_BROWSER_FLOW" });
+  }
   const target = { kind: "browser_application" as const, id: "superset", scope: {} };
   const baseline = { revision: 1 };
   const schema = maintenanceProposalSchema({ target, baseline });
@@ -46,6 +59,15 @@ test("Superset proposal saves and runs synchronous and asynchronous calls throug
   bridge.saveApplication({ id: "superset", name: "Superset" });
   bridge.saveTool(candidate[0]!);
   bridge.saveTool(tableSample);
+  bridge.saveTool(postSearch);
+  for (const risk of ["write", "delete"] as const) {
+    const tool = bridge.saveTool({ ...sample, toolId: `requires_${risk}`, risk });
+    const response = await app.inject({
+      method: "POST", url: "/api/web-bridge/calls",
+      payload: { application: "superset", tool: tool.toolId, args: { sql: "SELECT 1" } },
+    });
+    assert.equal(response.json().code, "APPROVAL_REQUIRED");
+  }
   bridge.saveEnvironment("superset", { origin, profileId });
   const extensionOrigin = "chrome-extension://" + "a".repeat(32);
   const registration = await app.inject({
@@ -59,11 +81,12 @@ test("Superset proposal saves and runs synchronous and asynchronous calls throug
   });
   assert.equal((await call(false, false)).json().code, "APPROVAL_REQUIRED");
   assert.equal((await call(false, true, "SELECT 1; DROP TABLE x")).json().code, "PREPROCESS_FAILED");
-  for (const mode of ["sync", "async", "failed", "exhausted", "echo", "cancelled", "missing", "duplicate", "tables"] as const) {
+  for (const mode of ["sync", "async", "failed", "exhausted", "echo", "cancelled", "missing", "duplicate", "tables", "post-search"] as const) {
     const runAsync = ["async", "failed", "exhausted", "cancelled"].includes(mode);
-    const pending = (mode === "tables" ? app.inject({
+    const tableTool = mode === "tables" ? tableSample : mode === "post-search" ? postSearch : undefined;
+    const pending = (tableTool ? app.inject({
       method: "POST", url: "/api/web-bridge/calls",
-      payload: { application: "superset", tool: "superset_table_list", args: { schema: "a!'&b" } },
+      payload: { application: "superset", tool: tableTool.toolId, args: { schema: "a!'&b" } },
     }) : call(runAsync)).then(value => value);
     let item: { id: string; payload: { sequence: { flow: { steps: { poll?: { maxAttempts: number } }[] } } } } | undefined;
     for (let attempt = 0; !item && attempt < 100; attempt++) {
@@ -104,6 +127,8 @@ test("Superset proposal saves and runs synchronous and asynchronous calls throug
             return Response.json({ result });
           }
           case path.tables:
+          case path.search:
+            assert.equal(options.method, mode === "post-search" ? "POST" : "GET");
             assert.equal(url.searchParams.get("q"), "(schema_name:'a!!!'&b')");
             assert.equal(url.searchParams.size, 1);
             return Response.json({ result: [{ name: "sample", type: "table" }] });
@@ -140,8 +165,8 @@ test("Superset proposal saves and runs synchronous and asynchronous calls throug
     const expectedPaths = mode === "async" ? [path.csrf, path.execute, path.status, path.status, path.results]
       : runAsync ? [path.csrf, path.execute, path.status] : [path.csrf, path.execute];
     const lookupFailed = mode === "missing" || mode === "duplicate";
-    assert.deepEqual(visited, lookupFailed ? [path.databases] : mode === "tables" ? [path.databases, path.tables] : [path.databases, ...expectedPaths]);
-    if (mode === "tables") assert.deepEqual(response.json(), [{name: "sample", type: "table", schema: "a!'&b"}]);
+    assert.deepEqual(visited, lookupFailed ? [path.databases] : tableTool ? [path.databases, mode === "post-search" ? path.search : path.tables] : [path.databases, ...expectedPaths]);
+    if (tableTool) assert.deepEqual(response.json(), [{name: "sample", type: "table", schema: "a!'&b"}]);
     else if (mode === "missing") assert.equal(response.json().code, "BROWSER_FLOW_MATCH_NOT_FOUND");
     else if (mode === "duplicate") assert.equal(response.json().code, "BROWSER_FLOW_MATCH_AMBIGUOUS");
     else if (mode === "echo") assert.equal(response.json().code, "SENSITIVE_RESPONSE");

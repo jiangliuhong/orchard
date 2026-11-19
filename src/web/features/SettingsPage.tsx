@@ -94,7 +94,7 @@ function ProviderRow({ provider, reload }: { provider: ProviderView; reload: () 
         配置<ChevronDown size={14} className={expanded ? "rotate-180" : ""} />
       </Button>
     </div>
-    {error && <div className="provider-feedback"><ErrorNotice message={error} /></div>}
+    <ErrorNotice message={error} />
     <ToastNotice message={notice} onDismiss={() => setNotice("")} />
     {expanded && <div className="provider-config" id={`${provider.id}-details`}>
       <div className="provider-config-heading"><code>{provider.id}</code>{provider.readiness.version && <span>{provider.readiness.version}</span>}</div>

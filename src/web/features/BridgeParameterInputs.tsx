@@ -2,6 +2,7 @@ import { inputDictionaryDefaults, unresolvedInputSchema } from "../../domain/inp
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import type { JsonSchema } from "../../domain/types";
 import { assertSchema } from "../../domain/validation";
+import { ErrorNotice } from "../components/common";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 
@@ -90,11 +91,11 @@ export function BridgeParameterInputs({ schema, value, disabled, onChange, onInv
                 : field["x-ui"]?.widget === "textarea" ? <Textarea {...props} rows={field["x-ui"].rows ?? 5} placeholder={field["x-ui"].placeholder} />
                   : <Input {...props} type={field.type === "number" || field.type === "integer" ? "number" : "text"} step={field.type === "integer" ? 1 : "any"} placeholder={field["x-ui"]?.placeholder} />}
           {renderFieldActions?.(name)}</div>
-          <div id={`${inputId}-hint`}>{defaultRef && !boundFields?.includes(name) && <p className="field-hint">留空时使用字典键 {defaultRef.key}</p>}{field.description && <p className="field-hint">{field.description}</p>}{result.errors[name] && <p className="field-hint" role="alert">{result.errors[name]}</p>}</div>
+          <div id={`${inputId}-hint`}>{defaultRef && !boundFields?.includes(name) && <p className="field-hint">留空时使用字典键 {defaultRef.key}</p>}{field.description && <p className="field-hint">{field.description}</p>}</div>
         </div>
       </div>;
     })}
-    {result.error && <p className="field-hint" role="alert">{result.error}</p>}
+    <ErrorNotice message={[result.error, ...result.fields.flatMap(([name, field]) => result.errors[name] ? [`${field.title ?? name}：${result.errors[name]}`] : [])].filter(Boolean).join("；")} />
     {!result.fields.length && !result.error && <p className="field-hint">{emptyLabel}</p>}
   </fieldset>;
 }

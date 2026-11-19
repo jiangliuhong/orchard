@@ -99,8 +99,11 @@ export function validatePortableBridge(value: unknown): asserts value is Portabl
 export function validatePortableSnapshot(value: unknown): asserts value is PortableSnapshot {
   // Reject accessors and non-JSON data before touching caller-owned fields.
   canonicalSnapshotJson(value);
-  const s = object(value, ["general", "providers", "webBridge", "scripts", "workflows"], ["dictionaries"]);
-  const general = object(s.general, ["theme"]); check(["light", "dark", "system"].includes(String(general.theme)), "INVALID_SNAPSHOT", "Explicit theme is required");
+  const s = object(value, ["providers", "webBridge", "scripts", "workflows"], ["general", "dictionaries"]);
+  if (s.general !== undefined) {
+    const general = object(s.general, ["theme"]);
+    check(["light", "dark", "system"].includes(String(general.theme)), "INVALID_SNAPSHOT", "Invalid legacy theme");
+  }
   validatePortableBridge(s.webBridge);
   for (const k of ["providers", "scripts", "workflows"]) array(s[k]);
   const snapshot = value as PortableSnapshot;

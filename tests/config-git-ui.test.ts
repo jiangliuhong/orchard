@@ -14,8 +14,8 @@ dom.window.HTMLElement.prototype.hasPointerCapture = () => false;
 dom.window.HTMLElement.prototype.setPointerCapture = () => {};
 dom.window.HTMLElement.prototype.releasePointerCapture = () => {};
 const { render, screen, fireEvent, cleanup, waitFor } = await import("@testing-library/react");
-const { ConfigGitSettings, ConfigGitGeneralDelivery, adaptPreview } = await import("../src/web/features/ConfigGitSettings.js");
-const { ThemeProvider, useTheme, preferenceStorageKey } = await import("../src/web/lib/theme.js");
+const { ConfigGitSettings, adaptPreview } = await import("../src/web/features/ConfigGitSettings.js");
+const { ThemeProvider, useTheme, themeStorageKey } = await import("../src/web/lib/theme.js");
 const { ToastNotice } = await import("../src/web/components/ToastNotice.js");
 const originalFetch = globalThis.fetch;
 afterEach(() => { cleanup(); localStorage.clear(); globalThis.fetch = originalFetch; });
@@ -67,9 +67,10 @@ test("commit requires all diff pages and confirmation, carries browser preferenc
   assert.equal(preview.message, "backup");
   assert.equal(preview.push, true);
   assert.equal(commit.token, "p");
-  assert.equal(commit.clientId, preview.clientId);
-  assert.equal(commit.preferenceRevision, preview.preferenceRevision);
-  assert.equal(commit.theme, "system");
+  for (const field of ["theme", "clientId", "preferenceRevision"]) {
+    assert.equal(field in preview, false);
+    assert.equal(field in commit, false);
+  }
 });
 
 test("repository settings includes description generation settings without sync or restore controls", async () => {
@@ -191,38 +192,18 @@ test("raw previews preserve cumulative remote differences and restore details", 
   assert.equal(restore.diffs[0].detail, "preserve local binding");
 });
 
-test("global theme counts A to B to A and persists pre-apply receipt without double apply", async () => {
+test("the browser keeps its saved appearance and persists changes locally", async () => {
+  localStorage.setItem("orchard-browser-preference", JSON.stringify({ theme: "dark" }));
   function Probe() {
-    const theme = useTheme();
-    return createElement("button", { onClick: () => {
-      theme.setTheme("dark"); theme.setTheme("system");
-      const receipt = theme.consumePreference("restore-op", "apply", "light", true);
-      assert.equal(receipt.revision, 2);
-      assert.deepEqual(theme.consumePreference("restore-op", "apply", "light", true), receipt);
-    } }, `${theme.theme}:${theme.preferenceRevision}`);
+    const { theme, setTheme } = useTheme();
+    return createElement("button", { onClick: () => setTheme("light") }, theme);
   }
+  const view = render(createElement(ThemeProvider, null, createElement(Probe)));
+  fireEvent.click(screen.getByRole("button", { name: "dark" }));
+  assert.equal(localStorage.getItem(themeStorageKey), "light");
+  view.unmount();
   render(createElement(ThemeProvider, null, createElement(Probe)));
-  fireEvent.click(screen.getByRole("button"));
-  await screen.findByRole("button", { name: "light:3" });
-  const saved = JSON.parse(localStorage.getItem(preferenceStorageKey)!);
-  assert.deepEqual(saved.consumed["restore-op"], { decision: "apply", revision: 2, force: true });
-});
-
-test("automatic delivery acknowledges the pre-application revision with force false", async () => {
-  const acks: Record<string, unknown>[] = [];
-  globalThis.fetch = async (url, options) => {
-    if (String(url).includes("/pending?")) {
-      const clientId = new URL(String(url), "http://localhost").searchParams.get("clientId");
-      return Response.json([{ clientId, operationId: "delivery", revision: 0, theme: "dark" }]);
-    }
-    if (String(url).endsWith("/ack")) acks.push(JSON.parse(String(options?.body)));
-    return Response.json({});
-  };
-  render(createElement(ThemeProvider, null, createElement(ConfigGitGeneralDelivery)));
-  await waitFor(() => assert.equal(acks.length, 1));
-  assert.equal(acks[0].preferenceRevision, 0);
-  assert.equal(acks[0].force, false);
-  assert.equal(JSON.parse(localStorage.getItem(preferenceStorageKey)!).preferenceRevision, 1);
+  assert.ok(screen.getByRole("button", { name: "light" }));
 });
 
 const { RemoteConfigSync, canApplyRemote } = await import("../src/web/features/RemoteConfigSync.js");
@@ -277,10 +258,11 @@ test("discarding sync previews requires confirmation in the application dialog",
 });
 
 test("remote sync fixes source SHA, requires every diff page, confirms and previews recovery points", async () => {
+  localStorage.setItem(themeStorageKey, "dark");
   const requests: { path: string; body: Record<string, unknown> }[] = [];
   mock((path, body) => {
     requests.push({ path, body });
-    if (path.endsWith("/remote-sync-source")) return remoteSource;
+    if (path.endsWith("/remote-sync-source")) return { ...remoteSource, supportedCategories: ["general", ...remoteSource.supportedCategories] };
     if (path.endsWith("/restore-preview")) return { token: "remote-preview", expiresAt: Date.now() + 60000, categories: ["dictionaries", "workflows", "scripts"], diffs: [{ category: "dictionaries", path: "dictionaries/id", changeType: "update", sensitive: true, before: "HIDDEN_SENTINEL" }], blockers: [], requiredMappings: [], nextCursor: "next" };
     if (path.includes("/diffs?")) return { diffs: [{ category: "workflows", path: "workflows/id", changeType: "preserve" }] };
     if (path.endsWith("/restore")) return { sourceSha: remoteSource.sourceSha, recoveryPointId: "point", result: { updated: 1 } };
@@ -289,6 +271,7 @@ test("remote sync fixes source SHA, requires every diff page, confirms and previ
   render(createElement(ThemeProvider, null, createElement(RemoteConfigSync, { visible: true, binding: remoteBinding, onApplied: () => {}, onLeave: () => {} })));
   fireEvent.click(screen.getByRole("button", { name: "获取远端配置" }));
   await screen.findByText("跨设备配置");
+  assert.equal(screen.queryByRole("checkbox", { name: "快照元数据" }), null);
   fireEvent.click(screen.getByRole("button", { name: "预览同步" }));
   await screen.findByText(/依赖自动补入：脚本/);
   assert.equal(screen.queryByText("HIDDEN_SENTINEL"), null);
@@ -302,6 +285,9 @@ test("remote sync fixes source SHA, requires every diff page, confirms and previ
   fireEvent.click(screen.getByRole("button", { name: "预览同步" }));
   await waitFor(() => assert.equal(requests.filter(r => r.path.endsWith("/restore-preview")).length, 2));
   const previews = requests.filter(r => r.path.endsWith("/restore-preview"));
+  assert.deepEqual(previews[0].body.categories, ["dictionaries", "workflows"]);
+  assert.deepEqual(Object.keys(previews[0].body).sort(), ["categories", "mappings", "requestId", "source"]);
+  assert.equal(localStorage.getItem(themeStorageKey), "dark");
   assert.deepEqual(previews[0].body.source, { kind: "git", sha: remoteSource.sourceSha });
   assert.deepEqual(previews[1].body.source, { kind: "recovery-point", id: "point" });
   const applyBody = requests.find(r => r.path.endsWith("/restore"))!.body;

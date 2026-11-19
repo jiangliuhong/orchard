@@ -30,14 +30,14 @@ test("dictionary restore preserves identity, local sequence, history and current
  const conflict = structuredClone(s); conflict.dictionaries![0]!.versions[0]!.description = "changed";
  await assert.rejects(restore.preview(conflict, {categories:["dictionaries"]}), code("VERSION_ID_CONFLICT"));
  const other = snapshot(); await assert.rejects(restore.preview(other, {categories:["dictionaries"]}), code("IDENTITY_CONFLICT"));
- const exported = exportSnapshot(store, { ...s.webBridge }, "dark"); assert.equal(exported.manifest.formatVersion,2); assert.equal(exported.snapshot.dictionaries![0]!.versions.length,1);
+ const exported = exportSnapshot(store, { ...s.webBridge }); assert.equal(exported.manifest.formatVersion,3); assert.equal(exported.snapshot.dictionaries![0]!.versions.length,1);
 });
 test("missing keys and authentication failures block selected dictionaries, unrelated categories remain usable and key changes expire previews", async t => {
  const {store,restore} = setup(t), d = dictionary(), material = generateKeyMaterial(), keyId = randomUUID();
  d.kind = "encrypted"; d.versions[0]!.kind = "encrypted"; d.versions[0]!.entries = { token:{type:"string",encryptedValue:encryptValue(material,{keyId,dictionaryId:d.id,key:"token"},"secret-never-exported")} };
  const s = snapshot(d), files = serializeSnapshot(s).files; assert.ok(!JSON.stringify(files).includes("secret-never-exported"));
  await assert.rejects(restore.preview(s,{categories:["dictionaries"]}),code("SECRET_KEY_MISSING"));
- await restore.preview(s,{categories:["general"]});
+ await restore.preview(s,{categories:["webBridge"]});
  const keyring = new KeyringStore(resolveKeyringPath(store.files.root)); keyring.save({formatVersion:1,generation:1,keys:[{keyId,algorithm:"aes-256-gcm",material:material.toString("base64"),createdAt:Date.now()}],operations:[]});
  const preview = await restore.preview(s,{categories:["dictionaries"]});
  keyring.save({...keyring.load()!, generation:2}); await assert.rejects(restore.apply("expired",preview.token),code("PREVIEW_EXPIRED"));

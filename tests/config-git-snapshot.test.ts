@@ -37,7 +37,7 @@ test("complete snapshot roundtrip preserves identity, archived dependencies, hid
   assert.equal(bundle.digest, snapshotDigest(bundle.files["manifest.json"]!));
   assert.equal(bundle.manifest.files.some(f => f.path === "manifest.json"), false);
   assert.equal(bundle.manifest.objects.find(o => o.category === "workflows")!.dependencies.length, 2);
-  assert.equal(new ConfigSnapshotService().parse(bundle.files).general.theme, "dark");
+  assert.equal(new ConfigSnapshotService().parse(bundle.files).general?.theme, "dark");
 });
 
 test("stable ordering is Unicode code point order, arrays retain business order, source LF normalization is deterministic", () => {
@@ -102,7 +102,7 @@ test("refresh updates authoritative object/version/source digests while preservi
   const refreshed = refreshManifest(files);
   for (const path of Object.keys(files).filter(p => p !== "manifest.json")) assert.equal(refreshed.files[path], files[path]);
   assert.notEqual(refreshed.manifest.objects.find(o => o.category === "scripts")!.versions[1]!.digest, original.manifest.objects.find(o => o.category === "scripts")!.versions[1]!.digest);
-  assert.equal(parseSnapshot(refreshed.files).general.theme, "light");
+  assert.equal(parseSnapshot(refreshed.files).general?.theme, "light");
   const bad: SourceFiles = { ...files, "settings/general.config.ts": 'export default {theme:"dark",secret:"VALUE"};\n' };
   assert.throws(() => refreshManifest(bad));
   assert.equal(bad["manifest.json"], original.files["manifest.json"]);
@@ -188,16 +188,19 @@ test("Store export gathers current/baseline workflow and fixed archived script c
   const draftTree = store.files.saveTree(workflowFiles());
   store.exec("INSERT INTO drafts(id,workflow_id,base_version_id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", "LOCAL-DRAFT-ID", "workflow", "old-workflow", 123, draftTree.path, '{"valid":true}', "draft", now, now);
   const bridge = { applications: { app: { id: "app", name: "App", enabled: true } }, environments: { app: [{ id: "local-env", origin: "https://example.com", enabled: true, bound: true, tabAvailable: true, profileId: "SECRET-PROFILE", extensionId: "SECRET-EXTENSION" }] }, tools: {}, enabledTools: {} };
-  const bundle = exportSnapshot(store, bridge, "system"), dto = parseSnapshot(bundle.files);
+  const bundle = exportSnapshot(store, bridge), dto = parseSnapshot(bundle.files);
   assert.deepEqual(dto.workflows[0]!.versions.map(v => v.id), ["new-workflow", "old-workflow"]);
   assert.deepEqual(dto.scripts[0]!.versions.map(v => v.id), ["new-script", "old-script"]);
   assert.equal(dto.scripts[0]!.versions[1]!.definition.name, "old-script");
   const all = JSON.stringify(bundle.files);
   for (const privateText of ["SECRET", "LOCAL-DRAFT-ID", "tabAvailable", "bound", "revision", "unused-script", "unused-workflow", "content_hash"]) assert.equal(all.includes(privateText), false, privateText);
-  assert.deepEqual(exportSnapshot(store, bridge, "system").files, bundle.files);
-  assert.throws(() => exportSnapshot(store, bridge, undefined as any), code("GENERAL_REQUIRED"));
+  assert.deepEqual(exportSnapshot(store, bridge).files, bundle.files);
+  assert.equal(bundle.manifest.formatVersion, 3);
+  assert.equal(dto.general, undefined);
+  assert.equal(bundle.files["settings/general.config.ts"], undefined);
+  assert.deepEqual(refreshManifest(bundle.files).files, bundle.files);
   store.saveProvider({ ...store.provider("pi-cli")!, config: { executable: "/SECRET/cli", token: "DONT-LEAK" } });
-  assert.throws(() => exportSnapshot(store, bridge, "light"), error => String(error).includes("token") && !String(error).includes("DONT-LEAK"));
+  assert.throws(() => exportSnapshot(store, bridge), error => String(error).includes("token") && !String(error).includes("DONT-LEAK"));
   assert.equal(existsSync(join(root, "config-git")), false);
 });
 
@@ -207,7 +210,7 @@ test("Store export includes never-published drafts and rejects ambiguous draft i
   const insert = (id: string) => store.exec("INSERT INTO drafts(id,revision,artifact_path,validation_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", id, 0, tree.path, '{"valid":false}', "draft", now, now);
   insert("draft-1");
   const bridge = { applications: {}, environments: {}, tools: {}, enabledTools: {} };
-  const result = exportSnapshot(store, bridge, "light");
+  const result = exportSnapshot(store, bridge);
   assert.equal(result.snapshot.workflows[0]!.id, "new-workflow"); assert.equal(result.snapshot.workflows[0]!.currentPublishedVersionId, null);
-  insert("draft-2"); assert.throws(() => exportSnapshot(store, bridge, "light"), code("DUPLICATE_ID"));
+  insert("draft-2"); assert.throws(() => exportSnapshot(store, bridge), code("DUPLICATE_ID"));
 });

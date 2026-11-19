@@ -82,9 +82,9 @@ test("two isolated devices transfer keys independently, restore a real Git snaps
   plainWorkflow.nodes[0]!.config = { scriptId: identity.id, scriptVersionId: identityVersion.id };
   const plainVersion = publishWorkflow(a, plainWorkflow);
   await ag.repository.bind({ remoteUrl: "https://fixture.invalid/portable.git", branch: "main", identity: { name: "Device A", email: "a@fixture.invalid" } });
-  const backup = await ag.commitPreview({ theme: "dark", message: "Portable dictionaries and fixed scripts", push: true });
+  const backup = await ag.commitPreview({ message: "Portable dictionaries and fixed scripts", push: true });
   assert.deepEqual(backup.blockers, []);
-  const committed = await ag.commit({ requestId: "push-A", token: backup.token, theme: "dark" }); assert.ok(committed.pushed);
+  const committed = await ag.commit({ requestId: "push-A", token: backup.token }); assert.ok(committed.pushed);
   await bg.repository.bind({ remoteUrl: "https://fixture.invalid/portable.git", branch: "main", identity: { name: "Device B", email: "b@fixture.invalid" } });
   const source = await bg.remoteSyncSource(); assert.equal(source.sourceSha, committed.sha); assert.equal(source.snapshotState, "valid"); assert.ok(source.supportedCategories.includes("dictionaries"));
   const locked = await bg.restorePreview({ source: { kind: "git", sha: source.sourceSha }, categories: ["workflows"] });
@@ -101,8 +101,8 @@ test("two isolated devices transfer keys independently, restore a real Git snaps
   assert.equal(old.status, "queued"); assert.equal(new DictionaryExecution(b).metadata("run", old.id)[0]!.versionId, plain.versionId);
   const aPlainNext = am.dictionaries.update(plain.dictionaryId, { requestId: "plain-A-next", expectedRevision: 1, operations: [{ op: "set", key: "label", type: "string", value: "A-second" }] });
   const aSecretNext = am.dictionaries.update(encrypted.dictionaryId, { requestId: "secret-A-next", expectedRevision: 1, operations: [{ op: "set", key: "apiToken", type: "string", value: replacement }] });
-  const nextBackup = await ag.commitPreview({ theme: "dark", message: "Updated dictionary versions", push: true });
-  await ag.commit({ requestId: "push-A-next", token: nextBackup.token, theme: "dark" });
+  const nextBackup = await ag.commitPreview({ message: "Updated dictionary versions", push: true });
+  await ag.commit({ requestId: "push-A-next", token: nextBackup.token });
   const nextSource = await bg.remoteSyncSource();
   await assert.rejects(bg.restorePreview({ source: { kind: "git", sha: nextSource.sourceSha }, categories: ["dictionaries"] }), { code: "CONFIG_BUSY" });
   // Ordinary edits may coexist with a queue; this also proves that execution does not read the mutable current pointer.

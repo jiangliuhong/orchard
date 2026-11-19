@@ -1,3 +1,4 @@
+import { ErrorNotice } from "../components/common";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BookOpen, Unlink } from "lucide-react";
 import type { JsonSchema } from "../../domain/types.js";
@@ -45,7 +46,7 @@ export function ScriptTestParameters({ schema, value, sources, disabled, onChang
     onSources(next);
   };
   return <div className="script-test-parameters"><div className="actions"><Button type="button" aria-pressed={mode === "form"} variant={mode === "form" ? "secondary" : "ghost"} disabled={!supportsForm || disabled} onClick={() => { if (!formValueSupported) { setSwitchError("请先将测试输入修正为合法 JSON 对象，再切换参数表单；原始内容不会被覆盖。"); return; } setSwitchError(""); setFormGeneration(v => v + 1); setFormEdited(false); setMode("form"); }}>参数表单</Button><Button type="button" aria-pressed={mode === "json"} variant={mode === "json" ? "secondary" : "ghost"} disabled={disabled} onClick={() => { setSwitchError(""); if (formInvalid && formEdited) setConfirmJson(true); else { setMode("json"); onInvalidChange(false); } }}>JSON</Button></div>
-    {switchError && <p role="alert" className="field-hint">{switchError}</p>}
+    <ErrorNotice message={switchError} />
     {mode === "form" && supportsForm ? <BridgeParameterInputs key={`${resetKey}:${formGeneration}:${JSON.stringify(sources)}`} legend="测试参数" emptyLabel="没有声明的参数，可切换 JSON 填写。" schema={schema} validationSchema={formSchema} allowGeneric preserveUnknown boundFields={boundFields} value={value} disabled={disabled} onChange={change} onInvalidChange={reportInvalid} onFieldChange={() => setFormEdited(true)}
       renderBoundField={(name, id) => { const ref = sources[`/${pointerPart(name)}`]!; return <button id={id} type="button" aria-label={`{{dictionary:${ref.dictionaryId}:${ref.key}}}`} className="script-parameter-reference font-mono" disabled={disabled} onClick={() => setPicker(name)}>{`{{dictionary:${ref.dictionaryId}:${ref.key}}}`}</button>; }}
       renderFieldActions={name => { const ref = sources[`/${pointerPart(name)}`]; return <Button type="button" variant="ghost" size="icon-sm" disabled={disabled} aria-label={`${ref ? "清空字典" : "引入字典"} ${name}`} onClick={() => ref ? setReference(name) : setPicker(name)}>{ref ? <Unlink size={15} /> : <BookOpen size={15} />}</Button>; }}

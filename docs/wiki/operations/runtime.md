@@ -4,6 +4,8 @@
 
 正式运行默认使用 `~/.orchard`；执行 `pnpm dev` 时使用仓库目录下的 `.orchard`。两者都可以通过 `--data-dir` 显式覆盖。
 
+开发模式下，确认没有运行中或排队的任务后，在另一个终端执行 `pnpm dev` 启动日志列出的 `kill -USR2 <PID>` 命令。使用日志里的启动器 PID，启动器会等旧后端退出后重新启动 7443 后端，7441 的 Vite 进程继续运行。
+
 运行状态：queued → running → succeeded / failed；活动取消经过 cancel_requested → cancelled。排队取消直接 cancelled。异常退出后遗留活动状态在下次启动时标记 interrupted，排队记录保留。成功和取消竞争按先提交者确定结果，取消获胜后不接受迟到成功。
 
 节点状态：pending、running、succeeded、failed、cancelled、skipped、interrupted。未选中分支在流程终结时标记 skipped / branch_not_selected；上游失败使用 upstream_failed；取消或中断使用 run_terminated。共享后继不在初次选路时提前跳过。

@@ -165,14 +165,14 @@ test("export never silently strips declarations and recovery captures keep them 
   t.after(() => store.close());
   const library = new ScriptLibrary(store);
   await library.create({ ...definition(), dictionaryBindings: declarations() });
-  const captured = captureSnapshot(store, "system");
+  const captured = captureSnapshot(store);
   assert.deepEqual(captured.snapshot.scripts[0]!.draft!.dictionaryBindings, declarations());
   assert.notEqual(portableScriptHash("draft", captured.snapshot.scripts[0]!.draft!), portableScriptHash("draft", definition()));
   const bridge = { applications: {}, environments: {}, tools: {}, enabledTools: {} };
-  assert.throws(() => exportSnapshot(store, bridge, "system"), { code: "DEPENDENCY_MISSING" });
+  assert.throws(() => exportSnapshot(store, bridge), { code: "DEPENDENCY_MISSING" });
   store.publishScript("dict-script", 0);
-  assert.deepEqual(captureSnapshot(store, "system").snapshot.scripts[0]!.versions[0]!.definition.dictionaryBindings, declarations());
-  assert.throws(() => exportSnapshot(store, bridge, "system"), { code: "DEPENDENCY_MISSING" });
+  assert.deepEqual(captureSnapshot(store).snapshot.scripts[0]!.versions[0]!.definition.dictionaryBindings, declarations());
+  assert.throws(() => exportSnapshot(store, bridge), { code: "DEPENDENCY_MISSING" });
 });
 
 test("execution without a pinned context is rejected before compilation and process startup", async () => {

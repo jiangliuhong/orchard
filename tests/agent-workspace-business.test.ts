@@ -143,8 +143,8 @@ test("migrated export/capture/fingerprints never read stale legacy JSON; restore
   const fingerprint = targetFingerprint(f.store), legacy = f.store.files.path("config/web-bridge.json");
   writeFileSync(legacy, "LEGACY_STALE_MARKER_NOT_JSON");
   assert.equal(targetFingerprint(f.store), fingerprint);
-  const exported = exportSnapshot(f.store, bridge, "light"); assert.equal(exported.snapshot.webBridge.applications.crm!.name, "Database app");
-  const captured = captureSnapshot(f.store, "light").snapshot; captured.webBridge.applications.crm!.name = "Restored database app";
+  const exported = exportSnapshot(f.store, bridge); assert.equal(exported.snapshot.webBridge.applications.crm!.name, "Database app");
+  const captured = captureSnapshot(f.store).snapshot; captured.webBridge.applications.crm!.name = "Restored database app";
   const restore = new ConfigRestoreService(f.store, configCoordinator(f.store), { async afterRestore() { bridge.reloadAfterRestore(); } });
   const preview = await restore.preview(captured, { categories: ["webBridge"] }), generation = f.generation();
   const result = await restore.apply("restore-db-bridge", preview.token);
@@ -216,7 +216,7 @@ test("connection-only profile registration stays live during model reads but aut
 test("browser DB restore rolls back as a unit and recovers a lost post-commit acknowledgement without JSON writes", async t => {
   const f = await fixture(t, { portable: true }), bridge = configuredWebBridge(f.store);
   bridge.saveApplication({ id: "crm", name: "Before" });
-  const snapshot = captureSnapshot(f.store, "light").snapshot; snapshot.webBridge.applications.crm!.name = "After";
+  const snapshot = captureSnapshot(f.store).snapshot; snapshot.webBridge.applications.crm!.name = "After";
   const before = f.store.one("SELECT * FROM bridge_configuration"), generation = f.generation();
   const failing = new ConfigRestoreService(f.store, configCoordinator(f.store), { fault(phase) { if (phase === "transaction") throw new Error("rollback"); } });
   await assert.rejects(failing.apply("rollback", (await failing.preview(snapshot, { categories: ["webBridge"] })).token), /rollback/);
@@ -239,7 +239,7 @@ test("Git preview redaction collects DB-backed local references instead of legac
   const git = new ConfigGitService(f.store, bridge, new ConfigRestoreService(f.store));
   git.repository.previewCommit = async () => ({ token: "preview", expiresAt: Date.now() + 10000, diff: [{ path: "scripts/demo/main.ts", before: null, after: "db-private-profile-marker" }], cumulativeDiff: [], push: false, regenerate: false }) as any;
   try {
-    const preview = await git.commitPreview({ theme: "light", message: "Backup" });
+    const preview = await git.commitPreview({ message: "Backup" });
     assert.equal(preview.diffs[0]!.sensitive, true); assert.equal(preview.diffs[0]!.after, "[已隐藏敏感内容]");
   } finally { await git.close(); }
 });
@@ -257,7 +257,7 @@ test("production startup refuses uncertain persisted tasks before legacy recover
 });
 
 test("bulk workflow import creates draft bindings inside its one business commit", async t => {
-  const f = await fixture(t, { portable: true }), snapshot = captureSnapshot(f.store, "light").snapshot;
+  const f = await fixture(t, { portable: true }), snapshot = captureSnapshot(f.store).snapshot;
   const files = { ...f.files, "workflow.json": JSON.stringify({ ...JSON.parse(f.files["workflow.json"]!), id: "imported", name: "Imported" }) };
   snapshot.workflows.push({ id: "imported", name: "Imported", currentPublishedVersionId: null, draft: { files, baseVersionId: null }, versions: [] });
   const service = new ConfigRestoreService(f.store), preview = await service.preview(snapshot, { categories: ["workflows"] }), generation = f.generation();

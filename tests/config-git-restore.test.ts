@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigRestoreService } from "../src/config-git/restore.js";
 import { ConfigWriteCoordinator, configCoordinator } from "../src/config-git/coordinator.js";
@@ -30,7 +30,7 @@ test("Git restore carries named Agent configurations with Providers and retains 
   const first = setup(t), options = { mappings: { [localReference("providers", "pi-cli", "executable").localRef]: process.execPath } };
   await first.service.apply("restore-model-config", (await first.service.preview(source, options)).token);
   assert.equal(first.store.one("SELECT revision FROM agent_model_configs WHERE id='analysis-config'")!.revision, 1);
-  const bundle = exportSnapshot(first.store, { applications: {}, environments: {}, tools: {}, enabledTools: {} }, "dark");
+  const bundle = exportSnapshot(first.store, { applications: {}, environments: {}, tools: {}, enabledTools: {} });
   const second = setup(t);
   await second.service.apply("clone", (await second.service.preview(parseSnapshot(bundle.files), options)).token);
   assert.equal(second.store.version("analysis-version").definition.defaults!.agent!.agentConfigId, "analysis-config");
@@ -88,7 +88,6 @@ test("transaction failure rolls back every business row and receipt", async t =>
   assert.equal(store.all("SELECT * FROM script_versions").length, 0);
   assert.equal(store.all("SELECT * FROM command_receipts WHERE scope='config-git:restore'").length, 0);
   assert.equal(service.operations()[0]!.phase, "failed");
-  assert.equal(service.getGeneralTheme(), undefined);
 });
 
 test("coordinator preserves synchronous returns and nested ownership, denies unrelated work", async () => {
@@ -119,7 +118,7 @@ test("preview expires on direct database changes and persisted queued work block
 test("file recovery stays in maintenance when staged content is corrupt and retries forward", async t => {
   const { store, root } = setup(t);
   const service = new ConfigRestoreService(store, configCoordinator(store), { fault(phase) { if (phase === "database_committed_before_journal") throw new Error("crash window"); } });
-  await assert.rejects(service.apply("recover", (await service.preview(snapshot())).token), /crash window/);
+  await assert.rejects(service.apply("recover", (await service.preview(snapshot(), { mappings: { legacy: "/local/bin" } })).token), /crash window/);
   assert.equal(store.scriptVersion("v-fixed").id, "v-fixed");
   const operation = service.operations()[0]!, staged = join(root, operation.files[0]!.staged), original = readFileSync(staged, "utf8");
   writeFileSync(staged, "corrupt");
@@ -130,25 +129,29 @@ test("file recovery stays in maintenance when staged content is corrupt and retr
   writeFileSync(staged, original);
   await restarted.recover();
   assert.equal(restarted.operation(operation.operationId).phase, "completed");
-  assert.equal(restarted.getGeneralTheme(), "dark");
   assert.equal(configCoordinator(store).maintenance, null);
   assert.equal(store.all("SELECT * FROM command_receipts WHERE scope='config-git:restore'").length, 1);
 });
 
-test("browser delivery survives disconnect, enforces client identity and revision, idempotent ack", async t => {
-  const { service } = setup(t), preview = await service.preview(snapshot(), { categories: ["general"], clientId: "browser-a", preferenceRevision: 4 });
-  const operation = await service.apply("general", preview.token);
-  assert.equal(service.pendingGeneral("browser-b").length, 0);
-  assert.equal(service.pendingGeneral("browser-a").length, 1);
-  assert.throws(() => service.acknowledgeGeneral("browser-a", operation.operationId, 5, "applied"), { code: "PREFERENCE_CONFLICT" });
-  service.acknowledgeGeneral("browser-a", operation.operationId, 5, "kept");
-  assert.equal(service.acknowledgeGeneral("browser-a", operation.operationId, 5, "applied").acknowledged, "kept");
-  assert.equal(service.pendingGeneral("browser-a").length, 0);
-  const claimed = service.claimGeneralSnapshot("new-browser", 0);
-  assert.equal(claimed.requiresConfirmation, true);
-  assert.equal(service.pendingGeneral("new-browser")[0]!.requiresConfirmation, true);
-  assert.throws(() => service.acknowledgeGeneral("new-browser", claimed.operationId, 0, "applied"), { code: "PREFERENCE_CONFLICT" });
-  service.acknowledgeGeneral("new-browser", claimed.operationId, 0, "applied", true);
+test("restoring a legacy snapshot and recovery point skips appearance", async t => {
+  const { service, store } = setup(t);
+  const legacyThemeFile = store.files.path("config-git/general.json");
+  const legacyTheme = '{"theme":"light","pending":[]}';
+  mkdirSync(store.files.path("config-git"), { recursive: true });
+  writeFileSync(legacyThemeFile, legacyTheme);
+  const preview = await service.preview(snapshot(), { categories: ["general", "scripts"] });
+  assert.deepEqual(preview.categories, ["scripts"]);
+  const operation = await service.apply("legacy-theme", preview.token);
+  assert.equal(store.scriptVersion("v-fixed").id, "v-fixed");
+  assert.equal(readFileSync(legacyThemeFile, "utf8"), legacyTheme);
+  const point = JSON.parse(readFileSync(store.files.path(`config-git/recovery-points/${operation.recoveryPointId}.json`), "utf8"));
+  assert.equal(point.snapshot.general, undefined);
+  const pointPath = store.files.path(`config-git/recovery-points/${operation.recoveryPointId}.json`);
+  writeFileSync(pointPath, JSON.stringify({ ...point, snapshot: snapshot(), categories: ["general", "scripts"] }));
+  const legacyPoint = await service.previewRecoveryPoint(operation.recoveryPointId);
+  assert.deepEqual(legacyPoint.categories, ["scripts"]);
+  await service.apply("legacy-point", legacyPoint.token);
+  assert.equal(readFileSync(legacyThemeFile, "utf8"), legacyTheme);
 });
 
 test("provider hidden models merge, local mappings required, unchanged revision preserved", async t => {
@@ -162,12 +165,12 @@ test("provider hidden models merge, local mappings required, unchanged revision 
   assert.equal(store.provider("pi-cli")!.revision, 1);
 });
 
-for (const boundary of ["accepted", "prepared", "transaction", "database_committed_before_journal", "before_file:config/web-bridge.json", "after_file:config/web-bridge.json", "before_file:config-git/general.json", "after_file:config-git/general.json", "before_completed"]) test(`SIGKILL restart at ${boundary} restores complete old or new state`, async t => {
+for (const boundary of ["accepted", "prepared", "transaction", "database_committed_before_journal", "before_file:config/web-bridge.json", "after_file:config/web-bridge.json", "before_file:config-git/local-mappings.json", "after_file:config-git/local-mappings.json", "before_completed"]) test(`SIGKILL restart at ${boundary} restores complete old or new state`, async t => {
   const legacyFile = boundary.endsWith(":config/web-bridge.json");
   const Fixture = legacyFile ? LegacyTestStore : TestStore;
   const root = temporary(t), initial = new Fixture(root); initial.close();
   const fixture = join(root, "snapshot.json"); writeFileSync(fixture, JSON.stringify(snapshot()));
-  const childCode = `import {readFileSync} from 'node:fs'; import {TestStore,LegacyTestStore} from './tests/helpers.ts'; import {ConfigRestoreService} from './src/config-git/restore.ts'; import {configCoordinator} from './src/config-git/coordinator.ts'; const store=new (process.argv[3]==='legacy'?LegacyTestStore:TestStore)(process.argv[1]); const service=new ConfigRestoreService(store,configCoordinator(store),{fault(phase){if(phase===process.argv[2])process.kill(process.pid,'SIGKILL')}}); const preview=await service.preview(JSON.parse(readFileSync(process.argv[1]+'/snapshot.json','utf8'))); await service.apply('killed',preview.token);`;
+  const childCode = `import {readFileSync} from 'node:fs'; import {TestStore,LegacyTestStore} from './tests/helpers.ts'; import {ConfigRestoreService} from './src/config-git/restore.ts'; import {configCoordinator} from './src/config-git/coordinator.ts'; const store=new (process.argv[3]==='legacy'?LegacyTestStore:TestStore)(process.argv[1]); const service=new ConfigRestoreService(store,configCoordinator(store),{fault(phase){if(phase===process.argv[2])process.kill(process.pid,'SIGKILL')}}); const preview=await service.preview(JSON.parse(readFileSync(process.argv[1]+'/snapshot.json','utf8')), {mappings:{legacy:'/local/bin'}}); await service.apply('killed',preview.token);`;
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", childCode, root, boundary, legacyFile ? "legacy" : "current"], { cwd: process.cwd(), encoding: "utf8", timeout: 30000 });
   assert.equal(child.signal, "SIGKILL", child.stderr);
   // Stale lease is reclaimed by the existing DirectoryLease protocol.
@@ -175,7 +178,6 @@ for (const boundary of ["accepted", "prepared", "transaction", "database_committ
   const service = new ConfigRestoreService(store); await service.recover(); store.recoverBusiness();
   const committed = !["accepted", "prepared", "transaction"].includes(boundary);
   assert.equal(!!store.one("SELECT id FROM scripts WHERE id='sample'"), committed);
-  assert.equal(service.getGeneralTheme(), committed ? "dark" : undefined);
   assert.equal(service.operations()[0]!.phase, committed ? "completed" : "failed");
   assert.equal(store.all("SELECT * FROM command_receipts WHERE scope='config-git:restore'").length, committed ? 1 : 0);
 });

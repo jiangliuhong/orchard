@@ -28,7 +28,7 @@ test("browser identifiers persist only in the local binding file, survive restar
   assert.equal(readBrowserBindings(store.root)[bindingKey("crm", env)]!.profileId, "MACHINE_PROFILE");
   assert.equal(statSync(store.files.path(BRIDGE_BINDINGS_PATH)).mode & 0o777, 0o600);
   assert.equal(configuredWebBridge(store).environments("crm")[0]!.profileId, "MACHINE_PROFILE");
-  const bundle = exportSnapshot(store, config, "light"), exported = parseSnapshot(bundle.files).webBridge.environments.crm![0]!;
+  const bundle = exportSnapshot(store, config), exported = parseSnapshot(bundle.files).webBridge.environments.crm![0]!;
   assert.equal(exported.key, "production");
   assert.equal(Object.hasOwn(exported, "profileId"), false);
   assert.equal(Object.hasOwn(exported, "extensionId"), false);
@@ -76,7 +76,7 @@ test("legacy locally stored profiles migrate without leaking into new exports or
 test("restoring legacy remote references succeeds without mappings and preserves each machine's own binding", async t => {
   const { store, config } = fixture(t);
   const env = config.saveEnvironment("crm", { id: "shared-uuid", key: "production", origin: "https://example.test", profileId: "LOCAL_ONLY" });
-  const source = exportSnapshot(store, config, "light").snapshot;
+  const source = exportSnapshot(store, config).snapshot;
   source.webBridge.environments.crm![0]!.profileId = localReference("webBridge", "crm", env.id, "profileId");
   source.webBridge.environments.crm![0]!.extensionId = localReference("webBridge", "crm", env.id, "extensionId");
   source.webBridge.applications.crm!.name = "Remote CRM";
@@ -98,7 +98,7 @@ test("restoring legacy remote references succeeds without mappings and preserves
 test("a new machine restores environment definitions without a browser and reports the missing binding only when executing", async t => {
   const source = fixture(t), targetStore = new TestStore(temporary(t)); t.after(() => targetStore.close());
   source.config.saveEnvironment("crm", { key: "production", origin: "https://example.test", profileId: "SOURCE_MACHINE" });
-  const snapshot = exportSnapshot(source.store, source.config, "light").snapshot;
+  const snapshot = exportSnapshot(source.store, source.config).snapshot;
   const restore = new ConfigRestoreService(targetStore);
   await restore.apply("new-machine", (await restore.preview(snapshot, { categories: ["webBridge"] })).token);
   const config = configuredWebBridge(targetStore), env = config.environments("crm")[0]!;
@@ -111,7 +111,7 @@ test("a new machine restores environment definitions without a browser and repor
 test("conflicting remote keys fail before applying configuration and changing a local binding invalidates an old restore plan", async t => {
   const { store, config } = fixture(t);
   const env = config.saveEnvironment("crm", { key: "production", origin: "https://example.test", profileId: "work" });
-  const snapshot = exportSnapshot(store, config, "light").snapshot;
+  const snapshot = exportSnapshot(store, config).snapshot;
   snapshot.webBridge.environments.crm![0]!.id = "different-object";
   const restore = new ConfigRestoreService(store);
   await assert.rejects(restore.preview(snapshot, { categories: ["webBridge"] }), { code: "ENVIRONMENT_KEY_CONFLICT" });
@@ -127,7 +127,7 @@ test("legacy database bindings survive a restore interrupted between the databas
   raw.environments.crm = [{ id: "legacy-db-env", origin: "https://example.test", profileId: "LEGACY_DB_PROFILE", enabled: true }];
   const declaration = canonicalJson(raw);
   store.exec("UPDATE bridge_configuration SET config_json=?,content_hash=?,revision=revision+1 WHERE id='current'", declaration, digest(declaration));
-  const source = exportSnapshot(store, config, "light").snapshot;
+  const source = exportSnapshot(store, config).snapshot;
   source.webBridge.applications.crm!.name = "Restored";
   const interrupted = new ConfigRestoreService(store, undefined, { fault(phase) { if (phase === "database_committed_before_journal") throw new Error("lost acknowledgement"); } });
   const plan = await interrupted.preview(source, { categories: ["webBridge"] });

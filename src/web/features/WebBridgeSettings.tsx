@@ -75,6 +75,15 @@ export function WebBridgeSettings() {
   const applicationConflict = !!draft && draftDefinition?.application !== undefined && draftDefinition.application !== draft.application;
   const testKey = draft ? `${draft.application}/${draft.toolId ?? "new"}` : "";
   const test = tests[testKey] ?? emptyTest();
+  const clearTestFieldHistory = (name: string) => {
+    const fieldPath = `/${pointerPart(name)}`;
+    setTests(current => {
+      const previous = current[testKey] ?? test;
+      const historySources = Object.fromEntries(Object.entries(previous.historySources ?? {})
+        .filter(([path]) => path !== "" && path !== fieldPath && !path.startsWith(`${fieldPath}/`)));
+      return { ...current, [testKey]: { ...previous, historySources } };
+    });
+  };
   const persistedTool = selectedTools.find(tool => tool.toolId === draft?.toolId);
   useEffect(() => { setCredentialBindings({}); }, [testKey, selectedId]);
   useEffect(() => {
@@ -252,10 +261,10 @@ export function WebBridgeSettings() {
                 {persistedTool?.execution && <><p className="field-hint">{persistedTool.execution.transport === "browser" ? "浏览器模式：使用绑定资料的已登录页签，可指定本次调用凭据。" : "本机 HTTP 模式：不复用浏览器 Cookie，不需要浏览器资料。凭据从普通或加密字典的字符串键解析，敏感凭据建议加密保存。"}</p><label htmlFor="bridge-test-environment" className="field">运行环境</label><select id="bridge-test-environment" value={test.environmentId ?? ""} disabled={test.busy} onChange={event => setTests(current => ({ ...current, [testKey]: { ...test, environmentId: event.target.value, output: "", error: "" } }))}><option value="">自动选择（仅一个启用环境时）</option>{selected.environments.filter(environment => environment.enabled).map(environment => <option key={environment.id} value={environment.id}>{environment.key ?? environment.id} · {environment.origin}</option>)}</select></>}
                 {test.historyNotice && <p className="field-hint" role="status">{test.historyNotice}</p>}
                 {Object.entries(test.historySources ?? {}).map(([path, source]) => source.source === "omitted" && <p className="field-hint" key={path}>参数 {path || "（根参数）"}：历史未记录原值，请按当前 Schema 补填（可选字段可留空）。</p>)}
-                {!!missing.length && <p className="field-hint" role="alert">请填写或选择调用凭据：{missing.join("、")}</p>}
-                {!!arrayPlaceholders.length && <p className="field-hint" role="alert">请编辑并补全历史中未记录的数组项。</p>}
+                <ErrorNotice message={missing.length ? `请填写或选择调用凭据：${missing.join("、")}` : undefined} />
+                <ErrorNotice message={arrayPlaceholders.length ? "请编辑并补全历史中未记录的数组项。" : undefined} />
                 {persistedTool?.execution?.transport === "browser" && <BridgeCredentialInputs execution={persistedTool.execution} value={credentialBindings} disabled={test.busy} onChange={setCredentialBindings} />}
-                {persistedTool && <BridgeParameterInputs key={`${testKey}/${JSON.stringify(persistedTool.parameters)}`} schema={persistedTool.parameters} value={test.args} disabled={test.busy} onInvalidChange={setTestParametersInvalid} onFieldChange={name => setTests(current => ({ ...current, [testKey]: { ...current[testKey], historySources: Object.fromEntries(Object.entries(current[testKey]?.historySources ?? {}).filter(([path]) => path !== `/${pointerPart(name)}` && !path.startsWith(`/${pointerPart(name)}/`) && path !== "")) } }))} onChange={args => setTests(current => ({ ...current, [testKey]: { ...current[testKey] ?? test, args } }))} />}
+                {persistedTool && <BridgeParameterInputs key={`${testKey}/${JSON.stringify(persistedTool.parameters)}`} schema={persistedTool.parameters} value={test.args} disabled={test.busy} onInvalidChange={setTestParametersInvalid} onFieldChange={clearTestFieldHistory} onChange={args => setTests(current => ({ ...current, [testKey]: { ...current[testKey] ?? test, args } }))} />}
                 </section>
                 <div className="bridge-toolbar bridge-test-actions"><Button size="sm" disabled={dirty || !canTest || test.busy || busy || testParametersInvalid || !!missing.length || !!arrayPlaceholders.length} onClick={() => void testTool()}><Check size={13} />{test.busy ? "执行中…" : requiresApproval ? "确认并执行" : "执行测试"}</Button>{(test.output || test.error) && <Button size="sm" variant="outline" onClick={() => setAgentOpen(true)}><MessageSquare size={13} />交给 Agent 分析</Button>}</div>
                 <section className="bridge-test-response" aria-label="测试结果" aria-busy={test.busy}>

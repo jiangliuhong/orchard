@@ -52,7 +52,7 @@ export const BRIDGE_AUTHORING_GUIDANCE = [
   "Act as the implementer, not a configuration questionnaire. Infer business intent from the user's description and supplied script; derive supported fields yourself and use platform defaults. When evidence is sufficient, return a complete proposal immediately, without asking permission to draft it; the host already requires explicit review before applying changes.",
   "Only ask focused questions about unresolved business intent or facts that change correctness or side effects. Tool IDs, schema syntax, legal risk/approval enums, site defaults and version/timeout defaults are platform responsibilities, not questions for the user. Reviewed Node.js code may be placed in execution.preprocess.code for browser transport.",
   "Historical assistant responses may describe obsolete platform limitations or missing schemas. They are not platform evidence. Re-evaluate the latest request against the current complete contract even when the user only says continue; never repeat a historical request for the platform schema.",
-  "Classify risk from actual effects, not the HTTP method or the user's preference: queries are read; mutations are write/delete; jobs or actions are execute; file retrieval is download. For new read-only tools use approval:none; default non-read tools to approval:user; calls require explicit per-call approved:true after user confirmation. Tests remain read/none. Do not ask the user for enum spellings or call an action read to bypass restrictions.",
+  "Classify risk from actual effects across the whole request chain. Read-only queries can use risk:read and approval:none, including POST queries. Mutations are write/delete, jobs or actions are execute, and file retrieval is download. Use approval:user for non-read tools. Non-read browser request chains require it when saved. Calls require explicit per-call approved:true after user confirmation. Tests remain read/none. Do not ask the user for enum spellings or call an action read to bypass restrictions.",
   "parameters only validates arguments. Declaring ak/sk, body or headers in parameters does not implement signing, secure secret handling, request headers or raw body serialization. Never request actual credentials or embed them in definitions.",
   "For requirements the contract cannot express, explain the specific unsupported capability in summary. Do not invent extension fields or silently drop requirements. If no complete definition can meet the request, return changes:[]; do not blame missing environments or ask for platform-format examples.",
   "fields is a response field allowlist. Do not claim fields:[] or fields:[\"*\"] returns complete JSON. Do not infer header/body/response semantics from GET or POST alone.",
@@ -124,8 +124,12 @@ export function prepareBridgeProposal(application: string, tools: WebBridgeTool[
       check(definition?.application === application && definition.toolId === change.toolId, "INVALID_PROPOSAL", "不能修改其他应用或工具的身份");
       check(!/[\\\u0000-\u0020\u007f?#]/.test(definition.path), "INVALID_PROPOSAL", "工具路径不能包含查询参数、片段、空白或反斜线");
       assertSchema({}, { type: "object", properties: { args: definition.parameters } }, "参数 Schema");
-      if (definition.execution) validateStoredHttpTool(definition);
-      else check(!/[{}]/.test(definition.path), "INVALID_PROPOSAL", "动态路径需要显式配置 localHttp 执行模式");
+      if (definition.execution) {
+        validateStoredHttpTool(definition);
+        if (definition.execution.transport === "browser" && definition.execution.flow && definition.risk !== "read") {
+          check(definition.approval === "user", "INVALID_BROWSER_FLOW", "非只读浏览器请求链必须要求用户确认");
+        }
+      } else check(!/[{}]/.test(definition.path), "INVALID_PROPOSAL", "动态路径需要显式配置 localHttp 执行模式");
       candidate.set(change.toolId, structuredClone(definition));
     }
   }

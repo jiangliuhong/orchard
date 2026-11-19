@@ -122,7 +122,7 @@ export function ModelManager({ provider, disabled, onUpdated }: {
           <div className="model-identity"><strong>{model.name}</strong><code>{model.id}</code>
             {verifying ? <span role="status" className="model-verification">正在验证…</span> : verification && <div role="status" className="model-verification" data-status={verification.status}>
               <span>{verification.status === "available" ? "可用" : verification.status === "cancelled" ? "已取消" : "验证失败"} · {(verification.durationMs / 1000).toFixed(2)} 秒 · {new Date(verification.checkedAt).toLocaleTimeString("zh-CN")}</span>
-              {verification.error && <p>{verification.error.message}</p>}
+              <ErrorNotice message={verification.error?.message} />
               {verification.actualModelId && verification.actualModelId !== model.id && <p>返回模型：{verification.actualModelId}</p>}
             </div>}
           </div>

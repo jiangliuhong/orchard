@@ -29,6 +29,7 @@ parameters 是参数 JSON Schema，不实现签名或请求映射。测试表单
 - 使用可选 `execution.flow: { capture?, steps }` 在同一已登录页签中执行请求链。定义的 path/method 及 preprocess 决定第一条请求，其后执行 1–8 个已审阅步骤。扩展在隔离执行环境中运行整条链；每条响应遵守 response.maxBytes，整条链受调用超时限制。配置请求链后应同步更新浏览器扩展。
 - 初始 preprocess 还可返回 `variables` 字符串映射。初始响应和每个后续步骤可用 `capture: { 变量名: { at: ["result", "field"], secret?, optional? } }` 提取标量。可选字段缺失时不设置变量。保护值 `secret:true` 仅能插入后续请求头，从不作为中间响应返回。扩展检查最终响应是否包含保护值。
 - 步骤支持 `{path,method,headers?,query?,bodyFrom?,when?,capture?,poll?}`。path、头和查询参数值里的 `{变量名}` 会替换；path 变量限 ASCII 字母、数字、下划线和连字符。查询参数值可用 `{变量名:rison}` 生成带引号的 Rison 字符串。bodyFrom 引用字符串变量作为完整请求体。when 表示仅在普通变量存在时执行，首个后续步骤必须执行。最后一个已执行步骤的响应进入常规字段筛选和 postprocess。
-- GET 步骤可配置 `poll: { at, success, failure, intervalMs, maxAttempts }`，用 at 路径读取状态，与成功和失败列表进行不区分大小写的比较。间隔 100–10000 毫秒，最多 120 次；到达次数或调用期限时失败。任何非 GET/HEAD 步骤要求声明非 read 风险并设置 approval:user。
+- GET 步骤可配置 `poll: { at, success, failure, intervalMs, maxAttempts }`，用 at 路径读取状态，与成功和失败列表进行不区分大小写的比较。间隔 100–10000 毫秒，最多 120 次；到达次数或调用期限时失败。
+- 按整条请求链的实际效果声明风险。只读查询即使用 POST，也可声明 `risk: "read"` 和 `approval: "none"`。写入、删除、提交任务及其他非只读请求链要求 `approval: "user"`。
 - 按名称解析 ID 可在初始响应或后续响应声明 `capture: { databaseId: { at: ["result"], match: { field: ["database_name"], equalsFrom: "databaseName", value: ["id"] }, positiveInteger: true } }`。at 指向数组，field 与 value 是相对每项的路径。equalsFrom 引用 preprocess 或前序捕获的普通字符串。比较区分大小写，零条或多条匹配分别返回明确错误。使用实际响应字段；Superset 原始数据库列表使用 database_name，工具归一后的输出可能使用 databaseName。
 - 后续步骤可以把捕获的 ID 插入 path，例如 `/api/v1/database/{databaseId}/tables/`。POST 可在 `bodyFrom` 引用的初始 JSON 对象上设置 `jsonFields: { database_id: { from: "databaseId", type: "positiveInteger" } }`，以 JSON 数字写入字段。type 也支持 string。保护值只可用于请求头。默认连接名可由 preprocess 在参数省略时填入 variables。

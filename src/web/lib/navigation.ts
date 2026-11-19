@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from "react";
 
 type LeaveGuard = (proceed: () => void) => void;
 let leaveGuard: LeaveGuard | undefined;
+export const hasUnsavedWorkspaceChanges = () => leaveGuard !== undefined;
 
 export function useLeaveGuard(dirty: boolean, guard: LeaveGuard) {
   const latest = useRef(guard);

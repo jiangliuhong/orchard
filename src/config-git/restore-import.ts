@@ -15,7 +15,7 @@ import { readConfiguredBridge } from "../web-bridge/configured.js";
 import { BRIDGE_BINDINGS_PATH, migrateBrowserBindings, readBrowserBindings } from "../web-bridge/local-bindings.js";
 import { DatabaseBridgeConfiguration, bridgeDeclaration } from "../web-bridge/database-config.js";
 import { workspaceSchemaInstalled, assertNoMaintenanceTask } from "../agent/workspace-business-hooks.js";
-import type { PortableSnapshot, PortableBridge, PortableProvider, PortableScript, PortableWorkflow, SnapshotCategory, SnapshotTheme, LocalRef } from "./snapshot-types.js";
+import type { PortableSnapshot, PortableBridge, PortableProvider, PortableScript, PortableWorkflow, SnapshotCategory, LocalRef } from "./snapshot-types.js";
 import type { RestorePreview, RestorePreviewOptions } from "./restore.js";
 import { persistArtifact, readOptional } from "./restore-files.js";
 import { localReference, compareCodePoints } from "./snapshot-primitives.js";
@@ -34,7 +34,7 @@ export interface PreparedImport {
   agentModelConfigs: { value: NonNullable<PortableProvider["agentModelConfigs"]>[number] & { providerId: string }; changed: boolean }[];
   bridge?: { revision: number; contentHash: string; runtimeJson: string };
 }
-const categories: SnapshotCategory[] = ["general", "providers", "webBridge", "scripts", "workflows", "dictionaries"];
+const categories = ["providers", "webBridge", "scripts", "workflows", "dictionaries"] as const;
 const ordered = <T extends { id: string }>(items: T[]) => [...items].sort((a, b) => compareCodePoints(a.id, b.id));
 const equal = (a: unknown, b: unknown) => canonicalJson(a) === canonicalJson(b);
 function rawBridge(store: Store): Row { return readConfiguredBridge(store, true); }
@@ -63,10 +63,10 @@ export function databaseFingerprint(store: Store) {
   return digest(canonicalJson({ rows, artifacts, scriptArtifacts }));
 }
 export function targetFingerprint(store: Store) {
-  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: workspaceSchemaInstalled(store) ? rawBridge(store) : readOptional(store, "config/web-bridge.json"), browserBindings: readOptional(store, BRIDGE_BINDINGS_PATH), general: readOptional(store, "config-git/general.json"), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
+  return digest(canonicalJson({ keyring: dictionaryFingerprint(store), database: databaseFingerprint(store), bridge: workspaceSchemaInstalled(store) ? rawBridge(store) : readOptional(store, "config/web-bridge.json"), browserBindings: readOptional(store, BRIDGE_BINDINGS_PATH), mappings: readOptional(store, "config-git/local-mappings.json"), projects: gitProjects(store).list(), sshReferences: gitProjects(store).profiles() }));
 }
 /** Independent source copies live inside the recovery point JSON, never just artifact paths. */
-export function captureSnapshot(store: Store, theme: SnapshotTheme) {
+export function captureSnapshot(store: Store) {
   const mappings: Record<string, string> = {}, providers: PortableProvider[] = [];
   for (const row of store.all<Row>("SELECT * FROM provider_settings ORDER BY id")) {
     const config = JSON.parse(row.config_json), ref = localReference("providers", row.id, "executable");
@@ -87,7 +87,7 @@ export function captureSnapshot(store: Store, theme: SnapshotTheme) {
     check(!workflow.draft, "IDENTITY_CONFLICT", `多个草稿声明同一工作流: ${identity.id}`, 409);
     workflow.draft = { files, baseVersionId: row.base_version_id }; workflows.set(identity.id, workflow);
   }
-  return { snapshot: { dictionaries: exportDictionaries(store), general: { theme }, providers, webBridge, scripts, workflows: [...workflows.values()] } satisfies PortableSnapshot, mappings };
+  return { snapshot: { dictionaries: exportDictionaries(store), providers, webBridge, scripts, workflows: [...workflows.values()] } satisfies PortableSnapshot, mappings };
 }
 function scriptDefinitionUnchecked(store: Store, scriptId: string, versionId: string): ScriptDefinition {
   const script = store.script(scriptId), version = store.scriptVersion(versionId), tree = store.files.readScriptTree(version.sourceRef);
@@ -101,9 +101,8 @@ function assertVersionIdentity(store: Store, id: string, kind: "script" | "workf
 }
 export async function prepareImport(store: Store, snapshot: PortableSnapshot, options: RestorePreviewOptions): Promise<PreparedImport> {
   if (snapshot.dictionaries !== undefined) validateDictionaries(snapshot);
-  const selected = new Set(options.categories ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined));
+  const selected = new Set((options.categories ?? categories.filter(c => c !== "dictionaries" || snapshot.dictionaries !== undefined)).filter(c => c !== "general"));
   check(selected.size > 0 && [...selected].every(item => categories.includes(item)), "INVALID_CATEGORY", "恢复类别无效");
-  check(["light", "dark", "system"].includes(snapshot.general.theme), "INVALID_THEME", "外观值无效");
   const mappings = options.mappings ?? {}, result: PreparedImport = { dictionaries: [], categories: [], changes: [], files: {}, scripts: [], workflows: [], providers: [], agentModelConfigs: [] };
   const identities = new Set<string>(), versions = new Set<string>();
   for (const object of [...snapshot.scripts, ...snapshot.workflows, ...(snapshot.dictionaries ?? [])]) {
@@ -284,9 +283,7 @@ export async function prepareImport(store: Store, snapshot: PortableSnapshot, op
     result.workflows.push(item);
     change("workflows", workflow.id, !!previous || drafts.length > 0, !previous && !drafts.length || item.versions.length > 0 || !!item.draft?.changed || !!previous && previous.name !== workflow.name || !!workflow.currentPublishedVersionId && previous?.current_version_id !== workflow.currentPublishedVersionId, `${workflow.draft ? "覆盖草稿" : "保留目标草稿"}；${workflow.currentPublishedVersionId ? "应用发布指针" : "保留目标发布指针"}`);
   }
-  if (selected.has("general")) { const raw = readOptional(store, "config-git/general.json"); change("general", "general", !!raw, !raw || JSON.parse(raw).theme !== snapshot.general.theme); }
-  const effective: PortableSnapshot = structuredClone(captureSnapshot(store, snapshot.general.theme).snapshot);
-  if (selected.has("general")) effective.general = snapshot.general;
+  const effective: PortableSnapshot = structuredClone(captureSnapshot(store).snapshot);
   for (const c of ["scripts", "workflows", "dictionaries"] as const) if (selected.has(c)) {
     const merged = new Map<string, any>((effective[c] ?? []).map(v => [v.id, v]));
     for (const incoming of snapshot[c] ?? []) {

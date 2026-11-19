@@ -9,6 +9,41 @@ const { render, screen, fireEvent, cleanup, waitFor } = await import("@testing-l
 const { BridgeExecutionHistory } = await import("../src/web/features/BridgeExecutionHistory.js");
 const { WebBridgeSettings } = await import("../src/web/features/WebBridgeSettings.js");
 
+test("editing the first browser tool test parameter keeps the request valid", async () => {
+  const original = globalThis.fetch;
+  localStorage.setItem("orchard.bridge.agentOpen", "false");
+  const tool: WebBridgeTool = {
+    application: "crm", site: "crm", toolId: "query", description: "Query", method: "GET", path: "/query",
+    enabled: true, risk: "read", approval: "none", fields: [], timeoutMs: 1000, catalogVersion: "1",
+    parameters: { type: "object", properties: { databaseId: { type: "integer" } }, additionalProperties: false },
+    execution: { version: 1, transport: "browser", preprocess: { runtime: "nodejs", code: "return { ...request, headers: {} };" }, response: { mode: "fullJson", maxBytes: 1000 } },
+  };
+  const calls: Record<string, unknown>[] = [];
+  globalThis.fetch = async (url, options) => {
+    const path = String(url);
+    if (path.endsWith("/applications")) return Response.json({ items: [{ id: "crm", name: "CRM", enabled: true, environments: [] }] });
+    if (path.endsWith("/tools")) return Response.json({ items: [tool] });
+    if (path.endsWith("/calls")) {
+      calls.push(JSON.parse(String(options?.body)));
+      return Response.json({ ok: true });
+    }
+    return Response.json({ items: [] });
+  };
+  try {
+    render(createElement(WebBridgeSettings));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑工具 query" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "databaseId:" }), { target: { value: "213" } });
+    const parseError = screen.queryByText(/is not valid JSON/);
+    assert.ok(!parseError, parseError?.textContent ?? "");
+    const execute = screen.getByRole<HTMLButtonElement>("button", { name: "执行测试" });
+    assert.equal(execute.disabled, false);
+    fireEvent.click(execute);
+    await screen.findByText("执行完成");
+    assert.deepEqual(calls.map(call => call.args), [{ databaseId: 213 }]);
+  } finally { cleanup(); globalThis.fetch = original; localStorage.clear(); }
+});
+
 test("history only loads parameters on explicit action and respects disabled state", async () => {
   const original = globalThis.fetch;
   const record = { id: "one", application: "crm", toolId: "query", source: "test" as const, args: { page: 2 }, startedAt: Date.now(), durationMs: 12, status: "succeeded" as const, redacted: false };

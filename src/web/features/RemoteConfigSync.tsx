@@ -1,6 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import { api, pretty, requestId, send } from "../lib/api";
-import { useTheme } from "../lib/theme";
 import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
@@ -23,6 +22,7 @@ function isPendingRequest(value: unknown): value is PendingRequest {
 }
 const storageKey = "orchard-config-git-remote-operation";
 const root = "/config-git";
+const syncCategories = (values: Category[]) => values.filter(category => category !== "general" && Object.hasOwn(categories, category));
 export function canApplyRemote(preview: Preview | undefined, confirmed: boolean, mappings: Record<string, string>, stale: boolean, now = Date.now()) {
   return !!preview && confirmed && !stale && !preview.nextCursor && !preview.noChanges && preview.expiresAt > now && !preview.blockers.length && !preview.diffs.some(d => d.blockingReason) && preview.requiredMappings.every(m => !!mappings[m.key]?.trim());
 }
@@ -30,7 +30,7 @@ export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave,
   visible: boolean; binding?: Binding | null; status?: RepositoryStatus; onApplied: () => unknown; onLeave: () => void;
   leaveRef?: Ref<(trigger: HTMLButtonElement) => void>; onLeaveFocus?: () => void;
 }) {
-  const theme = useTheme(), [source, setSource] = useState<RemoteSource>(), [restoreSource, setRestoreSource] = useState<Source>();
+  const [source, setSource] = useState<RemoteSource>(), [restoreSource, setRestoreSource] = useState<Source>();
   const [scope, setScope] = useState<Category[]>([]), [mappings, setMappings] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<Preview>(), [confirmed, setConfirmed] = useState(false), [stale, setStale] = useState(true);
   const [error, setError] = useState(""), [busy, setBusy] = useState(false), [operation, setOperation] = useState<Operation>();
@@ -39,12 +39,12 @@ export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave,
   const running = useRef(false), kind = useRef<Kind>("fetch");
   const pendingRequest = useRef<PendingRequest | undefined>(undefined);
   const [unacknowledged, setUnacknowledged] = useState(false);
-  const latest = useRef({ binding, theme, onApplied }); latest.current = { binding, theme, onApplied };
+  const latest = useRef({ binding, onApplied }); latest.current = { binding, onApplied };
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
   const receive = (value: unknown, action: Kind) => {
     if (action === "fetch") {
       const next = value as RemoteSource;
-      setSource(next); setRestoreSource({ kind: "git", sha: next.sourceSha }); setScope(next.supportedCategories.filter(c => c in categories)); setMappings({});
+      setSource(next); setRestoreSource({ kind: "git", sha: next.sourceSha }); setScope(syncCategories(next.supportedCategories)); setMappings({});
       setStale(next.snapshotState !== "valid" || next.bindingId !== latest.current.binding?.id); setResult(undefined); invalidate();
     } else if (action === "preview") { setPreview(adaptPreview(value)); setConfirmed(false); }
     else { setResult(value as Record<string, unknown>); invalidate(); setStale(true); void latest.current.onApplied(); window.dispatchEvent(new Event("orchard:config-restored")); }
@@ -96,7 +96,7 @@ export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave,
     const timer = setInterval(() => setClock(Date.now()), 1000); return () => clearInterval(timer);
   }, []);
   useEffect(() => { if (!visible) { invalidate(); setMappings({}); } }, [visible]);
-  useEffect(() => { invalidate(); setStale(true); }, [binding?.id, binding?.branch, theme.preferenceRevision]);
+  useEffect(() => { invalidate(); setStale(true); }, [binding?.id, binding?.branch]);
   const active = !!operation && !["completed", "failed", "interrupted", "recovery_required"].includes(operation.phase);
   useEffect(() => {
     if (!active || !operation) return;
@@ -127,8 +127,8 @@ export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave,
     pendingRequest.current = saved; setUnacknowledged(true);
     await resendPending();
   };
-  const createPreview = () => work(async () => { setConfirmed(false); setPreview(old => old ? { ...old, expiresAt: 0 } : old); const { theme: appearance, clientId, preferenceRevision } = theme.getPreference(); await mutate("/restore-preview", { source: restoreSource, categories: scope, mappings, theme: appearance, clientId, preferenceRevision }, "preview"); });
-  const available = restoreSource?.kind === "recovery-point" ? Object.keys(categories) as Category[] : source?.supportedCategories ?? [];
+  const createPreview = () => work(async () => { setConfirmed(false); setPreview(old => old ? { ...old, expiresAt: 0 } : old); await mutate("/restore-preview", { source: restoreSource, categories: scope, mappings }, "preview"); });
+  const available = restoreSource?.kind === "recovery-point" ? syncCategories(Object.keys(categories) as Category[]) : syncCategories(source?.supportedCategories ?? []);
   const [discardOpen, setDiscardOpen] = useState(false);
   const discardTrigger = useRef<HTMLButtonElement>(null);
   const requestDiscard = (trigger: HTMLButtonElement) => {
@@ -177,8 +177,8 @@ export function RemoteConfigSync({ visible, binding, status, onApplied, onLeave,
       {preview.nextCursor && <Button disabled={locked} variant="outline" onClick={() => void work(async () => { const page = await api<{ diffs: Diff[]; nextCursor?: string }>(`${root}/previews/${encodeURIComponent(preview.token)}/diffs?cursor=${encodeURIComponent(preview.nextCursor!)}`); setPreview(old => old?.token === preview.token ? { ...old, diffs: [...old.diffs, ...page.diffs], nextCursor: page.nextCursor } : old); })}>加载剩余差异（全部加载后可确认）</Button>}
       {preview.noChanges ? <p>没有配置变更，无需应用。</p> : <><label><input type="checkbox" checked={confirmed} disabled={locked || !!preview.nextCursor || preview.expiresAt <= clock} onChange={e => setConfirmed(e.target.checked)} /> 已查看差异，确认将远端配置应用到本机</label>{preview.expiresAt <= clock && <p>预览已失效，请重新预览。</p>}<Button disabled={locked || !canApplyRemote(preview, confirmed, mappings, stale, clock)} onClick={() => void work(() => mutate("/restore", { token: preview.token }, "apply"))}>应用到本机</Button></>}
     </>}
-    {result && <section aria-label="同步结果" role="status"><h3>已应用配置快照</h3><p className="field-hint">保留本机独有对象，相关页面重新打开后读取最新配置。Provider 与 Web Bridge 如有需要请重新连接。</p><RestoreOutcome value={result} />{typeof result.recoveryPointId === "string" && <Button variant="outline" disabled={locked} onClick={() => { invalidate(); setRestoreSource({ kind: "recovery-point", id: result.recoveryPointId as string }); setScope(Object.keys(categories) as Category[]); setStale(false); }}>查看同步前配置</Button>}</section>}
-    {points.map(point => <div className="actions" key={point.id}><code>{point.id}</code><span>{new Date(point.createdAt).toLocaleString()}</span><Button variant="outline" disabled={locked} onClick={() => { invalidate(); setRestoreSource({ kind: "recovery-point", id: point.id }); setScope(Object.keys(categories) as Category[]); setMappings({}); setStale(false); }}>选择恢复点</Button></div>)}
+    {result && <section aria-label="同步结果" role="status"><h3>已应用配置快照</h3><p className="field-hint">保留本机独有对象，相关页面重新打开后读取最新配置。Provider 与 Web Bridge 如有需要请重新连接。</p><RestoreOutcome value={result} />{typeof result.recoveryPointId === "string" && <Button variant="outline" disabled={locked} onClick={() => { invalidate(); setRestoreSource({ kind: "recovery-point", id: result.recoveryPointId as string }); setScope(syncCategories(Object.keys(categories) as Category[])); setStale(false); }}>查看同步前配置</Button>}</section>}
+    {points.map(point => <div className="actions" key={point.id}><code>{point.id}</code><span>{new Date(point.createdAt).toLocaleString()}</span><Button variant="outline" disabled={locked} onClick={() => { invalidate(); setRestoreSource({ kind: "recovery-point", id: point.id }); setScope(syncCategories(Object.keys(categories) as Category[])); setMappings({}); setStale(false); }}>选择恢复点</Button></div>)}
     {restoreSource?.kind === "recovery-point" && <p>正在预览恢复点 {restoreSource.id}。恢复保留不可变版本和本机独有对象；请预览差异后确认。</p>}
   </section>;
 }

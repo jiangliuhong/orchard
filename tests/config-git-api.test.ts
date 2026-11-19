@@ -7,7 +7,7 @@ import { createApp } from "../src/server/app.js";
 import { temporary, TestProvider, TestStore } from "./helpers.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
 
-test("HTTP Git workflow binds, commits, restores and delivers browser preferences through durable operations", async t => {
+test("HTTP Git workflow binds, commits, restores through durable operations without browser preferences", async t => {
   const root = temporary(t), bare = join(root, "remote.git");
   execFileSync("git", ["init", "--bare", "--initial-branch=main", bare], { stdio: "ignore" });
   const store = new TestStore(join(root, "data"));
@@ -30,34 +30,27 @@ test("HTTP Git workflow binds, commits, restores and delivers browser preference
   };
   assert.equal((await app.inject("/api/config-git/repository")).json().binding, null);
   await request("/bind", { remoteUrl: "https://fixture.invalid/config.git", branch: "main", identity: { name: "Fixture", email: "fixture@example.invalid" } });
-  const bundle = await request("/export", { theme: "dark" });
-  assert.equal(bundle.snapshot.general.theme, "dark");
-  const preview = await request("/commit-preview", { theme: "dark", message: "First configuration", push: true, clientId: "browser", preferenceRevision: 0 });
+  const bundle = await request("/export");
+  assert.equal(bundle.snapshot.general, undefined);
+  assert.equal(bundle.manifest.formatVersion, 3);
+  const preview = await request("/commit-preview", { message: "First configuration", push: true });
   assert.ok(preview.token); assert.ok(preview.diffs.length);
   const invalidMessageRequest = await app.inject({ method: "POST", url: "/api/config-git/generate-message", payload: {} });
   assert.equal(invalidMessageRequest.statusCode, 400);
   const missingPreview = await app.inject({ method: "POST", url: "/api/config-git/generate-message", payload: { token: "expired-token" } });
   assert.equal(missingPreview.statusCode, 409);
-  const committed = await request("/commit", { token: preview.token, theme: "dark", clientId: "browser", preferenceRevision: 0 });
+  const committed = await request("/commit", { token: preview.token });
   assert.equal(committed.pushed, true);
   const source = await request("/remote-sync-source");
   assert.equal(source.sourceSha, committed.sha); assert.equal(source.snapshotState, "valid");
   assert.ok(source.supportedCategories.includes("dictionaries")); assert.equal(source.commit.subject,"First configuration"); assert.ok(source.bindingId); assert.ok(source.fetchedAt); assert.ok(source.commit.committedAt);
   const history = (await app.inject("/api/config-git/commits?source=remote")).json();
   assert.equal(history.items[0].sha, committed.sha);
-  await request("/export", { theme: "light" });
-  const plan = await request("/restore-preview", { source: { kind: "git", sha: committed.sha }, categories: ["general"], clientId: "browser", preferenceRevision: 1, theme: "light" });
+  const plan = await request("/restore-preview", { source: { kind: "git", sha: committed.sha }, categories: ["webBridge"] });
   const restored = await request("/restore", { token: plan.token });
   assert.equal(restored.phase, "completed");
-  assert.equal((await app.inject("/api/config-git/general/pending?clientId=other")).json().items.length, 0);
-  const pending = (await app.inject("/api/config-git/general/pending?clientId=browser")).json().items[0];
-  assert.equal(pending.theme, "dark");
-  const mismatch = await app.inject({ method: "POST", url: "/api/config-git/general/ack", payload: { clientId: "browser", operationId: pending.operationId, preferenceRevision: 2, decision: "apply" } });
-  assert.equal(mismatch.statusCode, 409);
-  await request("/general/ack", { clientId: "browser", operationId: pending.operationId, preferenceRevision: 2, decision: "keep" });
-  assert.equal((await app.inject("/api/config-git/general/pending?clientId=browser")).json().items.length, 0);
-  const claim = await request("/general/claim", { clientId: "new-browser", preferenceRevision: 0 });
-  assert.equal(claim.requiresConfirmation, true);
+  assert.deepEqual(plan.categories, ["webBridge"]);
+  assert.equal((await app.inject("/api/config-git/general/pending?clientId=browser")).statusCode, 404);
   assert.equal((await app.inject("/api/config-git/recovery-points")).json().items.length, 1);
 });
 
@@ -100,7 +93,7 @@ test("description generation persists its named Agent setting and uses its expli
     assert.fail("operation timed out");
   };
   await operation("bind", { remoteUrl: "https://fixture.invalid/config.git", branch: "main", identity: { name: "Fixture", email: "fixture@example.invalid" } });
-  const preview = await operation("commit-preview", { message: "备份配置", theme: "light", push: true });
+  const preview = await operation("commit-preview", { message: "备份配置", push: true });
   const generated = await app.inject({ method: "POST", url: "/api/config-git/generate-message", payload: { token: preview.token } });
   assert.equal(generated.statusCode, 200, generated.body);
   assert.equal(generated.json().message, "更新配置备份");

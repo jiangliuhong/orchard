@@ -163,13 +163,17 @@ function EntriesEditor({ detail, onOperations, onDirtyChange }: { detail: Dictio
       <Button size="sm" disabled={busy || !hasEdits && !newKey.trim() && !pending} onClick={() => void save()}><Save size={14} />保存修改</Button></div>
     </div>
     <div className="dictionary-search"><Input aria-label="搜索字典键" placeholder="按键名搜索…" value={query} onChange={event => setQuery(event.target.value)} /><span className="field-hint">{entries.length} / {detail.keyCount} 个键</span></div>
-    <WorkspaceError message={error} title="字典条目未保存" />
+    <WorkspaceError message={pending ? undefined : error} title="字典条目未保存" />
     <ToastNotice message={notice} onDismiss={() => setNotice("")} />
-    {pending && <div className="notice error" role="alert">
-      <p>移除以下正在被引用的键需要确认：</p>
-      <ul>{pending.impacts.map(impact => <li key={impact.key}>键 {impact.key} · {impact.workflows} 个工作流 · {impact.scripts} 个脚本{impact.quickLaunches ? ` · ${impact.quickLaunches} 张快速执行卡片` : ""}{impact.browserTools ? ` · ${impact.browserTools} 个浏览器工具` : ""}</li>)}</ul>
-      <Button variant="outline" size="sm" disabled={busy} onClick={() => void submit(pending.operations, pending.label, pending.confirmationToken)}>确认移除并保存</Button>
-    </div>}
+    <Dialog open={!!pending} onOpenChange={open => { if (!open && !busy) { setPending(null); setError(""); } }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>确认移除字典键</DialogTitle><DialogDescription>以下键仍被引用，移除后引用它们的操作可能失败。</DialogDescription></DialogHeader>
+        <ul>{pending?.impacts.map(impact => <li key={impact.key}>键 {impact.key} · {impact.workflows} 个工作流 · {impact.scripts} 个脚本{impact.quickLaunches ? ` · ${impact.quickLaunches} 张快速执行卡片` : ""}{impact.browserTools ? ` · ${impact.browserTools} 个浏览器工具` : ""}</li>)}</ul>
+        <ErrorNotice message={error} />
+        <DialogFooter><Button variant="outline" disabled={busy} onClick={() => { setPending(null); setError(""); }}>取消</Button>
+          <Button variant="destructive" disabled={busy || !pending} onClick={() => { if (pending) void submit(pending.operations, pending.label, pending.confirmationToken); }}>确认移除并保存</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
     <div className="dictionary-table-scroll">
     {entries.length ? <table className="dictionary-entries"><thead><tr><th scope="col">键名</th><th scope="col">{encrypted ? "密钥状态" : "类型"}</th><th scope="col">值与操作</th></tr></thead><tbody>
       {entries.map(([key, entry]) => {

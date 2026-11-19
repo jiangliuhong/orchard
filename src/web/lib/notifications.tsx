@@ -1,3 +1,4 @@
+import { ErrorNotice } from "../components/common";
 import { navigate } from "./navigation";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
@@ -42,7 +43,7 @@ export function NotificationSettings() {
     : permission === "denied" ? "通知权限已被浏览器阻止，请在站点设置中允许通知。"
     : "Agent 回复及工作流执行结束时通知（含失败、取消）。仅对此浏览器生效，需保持平台页面打开。";
   return <section className="panel preferences-list" aria-label="通知设置">
-    <div className="preference-row"><div><h2>浏览器通知</h2><p id="notification-hint">{hint}</p>{error && <p role="alert">{error}</p>}</div>
+    <div className="preference-row"><div><h2>浏览器通知</h2><p id="notification-hint">{hint}</p><ErrorNotice message={error} /></div>
       <label className="provider-toggle" style={{ flexShrink: 0 }}>
         <input type="checkbox" aria-label="启用浏览器通知" aria-describedby="notification-hint" checked={on} disabled={busy || (!on && (permission === "unsupported" || permission === "denied"))} onChange={event => void toggle(event.target.checked)} />
         <span className="switch-track" aria-hidden="true" />

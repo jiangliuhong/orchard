@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { ToastNotice } from "../components/ToastNotice";
-import { AlertTriangle, Download, KeyRound, LockKeyhole, PlusCircle, ShieldCheck, Upload } from "lucide-react";
+import { ToastNotice, WorkspaceMessage } from "../components/ToastNotice";
+import { Download, KeyRound, LockKeyhole, PlusCircle, ShieldCheck, Upload } from "lucide-react";
 import { send, useCommandKey, useResource } from "../lib/api";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -96,7 +96,7 @@ export function SecretKeySettings() {
     </div>
     {status.readOnly && <div className="secret-key-warning" role="status"><LockKeyhole size={16} /><p>密钥存储当前为只读，无法生成、导入或切换密钥。仍可下载备份与验证解密。</p></div>}
     {!status.configured ? <div className="secret-key-empty"><KeyRound size={24} /><strong>尚未配置密钥环</strong><p>生成随机密钥，或从其他设备导入备份文件。</p></div> : <>
-      {status.missingKeyIds.length > 0 && <div className="secret-key-warning" role="alert"><AlertTriangle size={16} /><p>缺少 keyId：{status.missingKeyIds.join("、")}</p></div>}
+      {status.missingKeyIds.length > 0 && <WorkspaceMessage tone="warning" message="缺少解密密钥" details={status.missingKeyIds} />}
       <section className="secret-key-list" aria-label="密钥列表">
       <div className="secret-key-list-heading"><h3>密钥列表</h3><span>历史密钥保留用于解密旧数据</span></div>
       <div className="secret-key-table-scroll"><table className="secret-key-table"><thead><tr><th>密钥标识</th><th>创建时间</th><th>操作</th></tr></thead><tbody>

@@ -4,30 +4,14 @@ import { ToastNotice } from "../components/ToastNotice";
 import { RefreshCw, Sparkles } from "lucide-react";
 import { api, pretty, requestId, send, useResource } from "../lib/api";
 import { ConfigGitMessageAgentSettings, type MessageAgentSetting } from "./ConfigGitMessageAgentSettings";
-import { useTheme, type Theme } from "../lib/theme";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { ErrorNotice, Loading } from "../components/common";
 
-/** API_NOTES: Requests use remoteUrl/branch/configDir/identity; commit-preview uses
- * message,push,regenerate,theme,clientId,preferenceRevision; commit uses token plus
- * theme/clientId/preferenceRevision. restore-preview uses source,categories,mappings,
- * clientId,preferenceRevision; restore uses token. All writes carry requestId.
- * Repository status/history and commit/restore previews accept raw service shapes
- * via adapters below. History query uses source,startSha,offset. Optional normalized
- * diffs support GET previews/:token/diffs?cursor=. Async endpoints return 202
- * {operationId,statusUrl,phase}; operations/:id returns phase/result/error.
- * General pending GET ?clientId returns {items} with raw revision or preferenceRevision.
- * Claim POST {clientId,preferenceRevision,requestId} creates explicit pending snapshot.
- * Ack POST {clientId,operationId,decision,preferenceRevision,force,requestId} uses
- * the PRE-APPLICATION revision, persisted with decision/force for retries.
- * Parent mounts ConfigGitGeneralDelivery globally inside ThemeProvider.
- */
-export const API_NOTES = "Raw repository responses are adapted locally; general delivery uses authoritative ThemeProvider state.";
 export type Category = "general" | "providers" | "webBridge" | "workflows" | "scripts" | "dictionaries";
-export const categories: Record<Category, string> = { general: "常规", providers: "Provider", webBridge: "Web Bridge", workflows: "工作流", scripts: "脚本", dictionaries: "字典" };
+export const categories: Record<Category, string> = { general: "快照元数据", providers: "Provider", webBridge: "Web Bridge", workflows: "工作流", scripts: "脚本", dictionaries: "字典" };
 export interface Binding { id: string; remoteUrl: string; branch: string; configDir: string; remote?: string; snapshotState?: "empty" | "missing" | "valid" | "invalid" | "unsupported" }
 export interface RemoteCheck { branches: string[]; defaultBranch?: string; identity?: { name?: string; email?: string } }
 export interface RepositoryStatus { localSha?: string; remoteSha?: string; ahead: number; behind: number; diverged: boolean; dirtyPaths: string[]; pendingCommits?: string[]; operationId?: string; remoteObservedAt?: string; message?: string }
@@ -35,7 +19,6 @@ export interface Diff { category: Category; objectId?: string; versionId?: strin
 export interface Preview { token: string; expiresAt: number; categories: Category[]; diffs: Diff[]; blockers: string[]; requiredMappings: { key: string; label: string }[]; nextCursor?: string; cumulativeDiffs?: Diff[]; sourceSha?: string; warnings?: string[]; noChanges?: boolean }
 export interface History { items: { sha: string; message: string; author: string; date: string; categories?: Category[]; compatible?: boolean }[]; startSha: string; nextCursor?: string }
 export interface RecoveryPoint { id: string; createdAt: string | number; sourceSha?: string; protected: boolean }
-export interface PendingPreference { clientId: string; operationId: string; preferenceRevision: number; theme: Theme; requiresConfirmation?: boolean }
 export interface Result { message?: string; sha?: string; committed?: boolean; pushed?: boolean; remoteUnknown?: boolean; remoteState?: string; pushError?: string; reconnect?: string[] }
 export interface Operation { operationId: string; phase: string; result?: unknown; error?: string | { code: string; message: string } }
 type Accepted = { operationId: string; statusUrl: string };
@@ -61,76 +44,7 @@ function adaptStatus(raw: RepositoryStatus & { head?: string; dirty?: boolean; d
 }
 const operationError = (error: Operation["error"]) => typeof error === "string" ? error : error ? `${error.code}: ${error.message}` : "操作未完成";
 
-/** Parent mounts this once at application level, inside ThemeProvider. */
-export function ConfigGitGeneralDelivery() {
-  const theme = useTheme();
-  const latest = useRef(theme); latest.current = theme;
-  const [pending, setPending] = useState<PendingPreference>();
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const acknowledge = async (item: PendingPreference, decision: "apply" | "keep", force: boolean) => {
-    const current = latest.current.getPreference();
-    if (item.clientId !== current.clientId) throw new Error("偏好记录不属于当前浏览器");
-    if (!force && !current.consumed[item.operationId] && current.preferenceRevision !== item.preferenceRevision) { setPending(item); return; }
-    const receipt = latest.current.consumePreference(item.operationId, decision, item.theme, force);
-    await send(`${root}/general/ack`, { clientId: current.clientId, operationId: item.operationId, decision: receipt.decision, preferenceRevision: receipt.revision, force: receipt.force, requestId: `${current.clientId}:${item.operationId}:ack` });
-    localStorage.removeItem(`orchard-general-claim:${item.operationId}`);
-    setPending(old => old?.operationId === item.operationId ? undefined : old);
-  };
-  const ackRef = useRef(acknowledge); ackRef.current = acknowledge;
-  const claiming = useRef(false);
-  useEffect(() => {
-    const claim = () => {
-      if (claiming.current) return;
-      claiming.current = true; setBusy(true);
-      const current = latest.current.getPreference();
-      void send<PendingPreference & { revision: number }>(`${root}/general/claim`, { clientId: current.clientId, preferenceRevision: current.preferenceRevision, requestId: requestId() }).then(raw => {
-        localStorage.setItem(`orchard-general-claim:${raw.operationId}`, "pending");
-        setPending({ ...raw, preferenceRevision: raw.preferenceRevision ?? raw.revision, requiresConfirmation: true });
-      }).catch(e => setError(errorText(e))).finally(() => { claiming.current = false; setBusy(false); });
-    };
-    window.addEventListener("orchard:claim-general", claim);
-    return () => window.removeEventListener("orchard:claim-general", claim);
-  }, []);
-  useEffect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        if (claiming.current) return;
-        const current = latest.current.getPreference();
-        const response = await api<{ items: (PendingPreference & { revision?: number })[] } | (PendingPreference & { revision?: number })[]>(`${root}/general/pending?clientId=${encodeURIComponent(current.clientId)}`);
-        if (disposed) return;
-        if (claiming.current) return;
-        for (const raw of Array.isArray(response) ? response : response.items) {
-          if (raw.clientId !== current.clientId) continue;
-          const item = { ...raw, preferenceRevision: raw.preferenceRevision ?? raw.revision ?? -1 };
-          const now = latest.current.getPreference();
-          const receipt = now.consumed[item.operationId];
-          if (receipt) await ackRef.current(item, receipt.decision, receipt.force);
-          else if (item.requiresConfirmation || localStorage.getItem(`orchard-general-claim:${item.operationId}`) || now.preferenceRevision !== item.preferenceRevision) { setPending(item); break; }
-          else await ackRef.current(item, "apply", false);
-        }
-        setError("");
-      } catch (e) { if (!disposed) setError(errorText(e)); }
-      finally { if (!disposed) timer = setTimeout(() => void poll(), 5000); }
-    };
-    void poll(); return () => { disposed = true; clearTimeout(timer); };
-  }, []);
-  const choose = async (decision: "apply" | "keep") => {
-    if (!pending) return;
-    setBusy(true);
-    try { await acknowledge(pending, decision, true); setError(""); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
-  };
-  return <>
-    {error && <ErrorNotice message={`Git 外观交付：${error}`} />}
-    <Dialog open={!!pending} onOpenChange={() => {}}><DialogContent showCloseButton={false}><DialogHeader><DialogTitle>确认恢复浏览器外观</DialogTitle><DialogDescription>外观已在恢复期间改变，或当前记录来自主动领取的快照。恢复值为 {pending?.theme}。</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={busy} onClick={() => void choose("keep")}>保留当前外观</Button><Button disabled={busy} onClick={() => void choose("apply")}>应用恢复外观</Button></DialogFooter></DialogContent></Dialog>
-  </>;
-}
-
 export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
-  const themeState = useTheme();
-  const preferenceRef = useRef(themeState); preferenceRef.current = themeState;
   const [binding, setBinding] = useState<Binding | null>();
   const [status, setStatus] = useState<RepositoryStatus>();
   const [remoteUrl, setRemoteUrl] = useState("");
@@ -232,15 +146,10 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
     return () => { disposed = true; clearTimeout(timer); };
   }, [operation?.operationId, !!activeOperation]);
   const locked = busy || !!activeOperation || operation?.phase === "recovery_required";
-  const general = () => {
-    const { theme, clientId, preferenceRevision } = preferenceRef.current.getPreference();
-    if (!clientId || !Number.isSafeInteger(preferenceRevision)) throw new Error("全局浏览器偏好尚未就绪，请刷新后重试");
-    return { theme, clientId, preferenceRevision };
-  };
   const showPreview = (value: unknown) => { setPreview(adaptPreview(value)); setConfirmed(false); };
   const createPreview = () => run(async () => {
     setPreview(undefined);
-    await mutate("/commit-preview", { message: message.trim(), push: true, ...general() }, showPreview);
+    await mutate("/commit-preview", { message: message.trim(), push: true }, showPreview);
   });
   const invalidate = () => { setPreview(undefined); setConfirmed(false); };
   const switchToRemote = () => { invalidate(); setDirection("remote"); };
@@ -310,13 +219,13 @@ export function ConfigGitSettings({ sync = false }: { sync?: boolean }) {
         <Button size="icon-sm" variant="ghost" aria-label="用 Agent 生成描述" title={busy ? "处理中…" : "用 Agent 生成描述"} disabled={locked || !messageAgent.data?.available || !preview || !!preview.nextCursor || preview.noChanges || preview.expiresAt <= Date.now() || preview.blockers.length > 0} onClick={() => void run(async () => {
           const result = await send<{ message: string }>(`${root}/generate-message`, { token: preview!.token });
           setMessage(result.message); setPreview(undefined);
-          await mutate("/commit-preview", { message: result.message, push: true, ...general() }, showPreview);
+          await mutate("/commit-preview", { message: result.message, push: true }, showPreview);
         })}><Sparkles size={14} className={busy ? "animate-pulse" : ""} /></Button>
       </div>
       <Textarea id="config-git-commit-message" value={message} maxLength={4000} placeholder="填写提交信息…" onChange={e => { setMessage(e.target.value); invalidate(); }} />
       <p className="field-hint">{messageAgent.data?.available ? `使用「${messageAgent.data.name}」生成描述。` : messageAgent.data?.agentConfigId ? messageAgent.data.unavailableReason ?? "生成描述的 Agent 暂不可用。" : "尚未配置生成描述的 Agent，可手动填写。"} <a href="/settings?section=config-git">前往设置</a></p>
       {preview && !preview.noChanges && <label className="config-git-confirm"><input type="checkbox" disabled={locked} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />我已查看完整变更，确认备份到远端仓库。</label>}
-      <div className="config-git-commit-actions"><span className="field-hint">提交并推送到远端</span><div className="actions"><Button size="sm" variant="outline" disabled={locked || !message.trim() || snapshotBlocked} onClick={() => void createPreview()}>生成提交预览</Button><Button size="sm" aria-label="进行备份（commit + push）" disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate("/commit", { token: preview!.token, ...general() }))}>提交并推送</Button></div></div>
+      <div className="config-git-commit-actions"><span className="field-hint">提交并推送到远端</span><div className="actions"><Button size="sm" variant="outline" disabled={locked || !message.trim() || snapshotBlocked} onClick={() => void createPreview()}>生成提交预览</Button><Button size="sm" aria-label="进行备份（commit + push）" disabled={locked || !!cannotConfirm} onClick={() => void run(() => mutate("/commit", { token: preview!.token }))}>提交并推送</Button></div></div>
     </fieldset></section>}
     </div>
     <Dialog open={!!confirmation} onOpenChange={open => { if (!open && !locked) setConfirmation(undefined); }}><DialogContent><DialogHeader><DialogTitle>{confirmation?.title}</DialogTitle><DialogDescription>{confirmation?.description}</DialogDescription></DialogHeader><ErrorNotice message={error} /><DialogFooter><Button variant="outline" disabled={locked} onClick={() => setConfirmation(undefined)}>取消</Button><Button variant="destructive" disabled={locked} onClick={() => void run(async () => { await confirmation?.action(); setConfirmation(undefined); })}>确认</Button></DialogFooter></DialogContent></Dialog>

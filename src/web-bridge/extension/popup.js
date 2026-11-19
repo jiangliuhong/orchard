@@ -162,7 +162,6 @@ async function refreshBridgeTabs(selectedId) {
     status.dataset.state = result.state === "ready" ? "success" : "";
     status.textContent = {
       ready: "主桥接页签已绑定，已防止浏览器自动回收。",
-      select: result.tabs.length ? "请选择已登录所需账号的主桥接页签。" : "请打开站点并重新选择主桥接页签。",
       missing: result.tabs.length ? "请先切换到业务页签使其恢复运行。" : "请打开业务页签。",
       discarded: "主桥接页签已被回收，请切换到该页签恢复，或手动选择其他页签。",
       frozen: "主桥接页签已冻结，请切换到该页签恢复，或手动选择其他页签。",

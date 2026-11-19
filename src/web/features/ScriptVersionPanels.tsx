@@ -4,6 +4,7 @@ import { pretty, send, useCommandKey, useResource } from "../lib/api";
 import { ErrorNotice, Loading } from "../components/common";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import type { ScriptDetail } from "./ScriptPages";
 import { ToastNotice } from "../components/ToastNotice";
 
@@ -51,6 +52,15 @@ export function ScriptCleanup({ scriptId, onCleaned }: { scriptId: string; onCle
   };
   return <details className="panel script-secondary-panel"><summary>测试数据保留与清理</summary><p className="field-hint">默认保留所有数据，不自动删除。手动清理只处理此脚本的历史测试及无引用产物，每批最多 1000 条；执行中的测试及仍被引用的源码、产物会保留。</p>
     <div className="script-filters"><label>保留天数<Input type="number" min={1} max={3650} value={keepDays} onChange={event => { setKeepDays(Number(event.target.value)); setPreview(undefined); }} /></label><label>至少保留最新记录数<Input type="number" min={1} max={10000} value={keepLatest} onChange={event => { setKeepLatest(Number(event.target.value)); setPreview(undefined); }} /></label><Button variant="outline" disabled={busy} onClick={() => void action(false)}>预览清理范围</Button></div>
-    {preview && <div className="notice warning">将永久删除 {preview.count} 条已完成测试及其无引用产物。<Button variant="destructive" disabled={busy || !preview.count} onClick={() => void action(true)}>确认永久清理</Button></div>}<ErrorNotice message={error} /><ToastNotice message={message} onDismiss={() => setMessage("")} />
+    <ErrorNotice message={preview ? undefined : error} />
+    <ToastNotice message={message} onDismiss={() => setMessage("")} />
+    <Dialog open={!!preview} onOpenChange={open => { if (!open && !busy) { setPreview(undefined); setError(""); } }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>确认清理测试数据</DialogTitle><DialogDescription>将永久删除 {preview?.count} 条已完成测试及其无引用产物。</DialogDescription></DialogHeader>
+        <ErrorNotice message={error} />
+        <DialogFooter><Button variant="outline" disabled={busy} onClick={() => { setPreview(undefined); setError(""); }}>取消</Button>
+          <Button variant="destructive" disabled={busy || !preview?.count} onClick={() => void action(true)}>确认永久清理</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
   </details>;
 }

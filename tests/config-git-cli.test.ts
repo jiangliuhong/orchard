@@ -99,16 +99,16 @@ test("validation resolves only explicit directory or bound managed repository", 
 test("API CLI forwards preview and confirmation separately and preserves explicit request IDs", async () => {
   const calls: { path: string; body: any; method?: string }[] = [];
   const context = { dataDir: "/unused", output: () => {}, request: async (path: string, init?: RequestInit) => { calls.push({ path, method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined }); } };
-  await runConfigGitCli(["commit-preview", "--message", "backup", "--push", "--theme", "dark"], context);
-  assert.deepEqual(calls[0], { path: "/api/config-git/commit-preview", method: "POST", body: { message: "backup", push: true, regenerate: false, theme: "dark" } });
+  await runConfigGitCli(["commit-preview", "--message", "backup", "--push"], context);
+  assert.deepEqual(calls[0], { path: "/api/config-git/commit-preview", method: "POST", body: { message: "backup", push: true, regenerate: false } });
   await runConfigGitCli(["commit", "--token", "preview", "--request-id", "retry-id"], context);
   assert.deepEqual(calls[1].body, { token: "preview", requestId: "retry-id" });
-  await runConfigGitCli(["restore-preview", "--sha", "abc", "--categories", "general,webBridge"], context);
-  assert.deepEqual(calls[2].body, { source: { kind: "git", sha: "abc" }, categories: ["general", "webBridge"], mappings: {} });
+  await runConfigGitCli(["restore-preview", "--sha", "abc", "--categories", "scripts,webBridge"], context);
+  assert.deepEqual(calls[2].body, { source: { kind: "git", sha: "abc" }, categories: ["scripts", "webBridge"], mappings: {} });
   await runConfigGitCli(["restore", "--token", "restore-token", "--request-id", "restore-id"], context);
   assert.deepEqual(calls[3].body, { token: "restore-token", requestId: "restore-id" });
-  await runConfigGitCli(["export", "--theme", "light"], context);
-  assert.deepEqual(calls[4].body, { theme: "light" });
+  await runConfigGitCli(["export"], context);
+  assert.deepEqual(calls[4].body, {});
   await runConfigGitCli(["history", "--cursor", "a/b?c"], context);
   assert.equal(calls[5].path, "/api/config-git/commits?cursor=a%2Fb%3Fc");
   await assert.rejects(runConfigGitCli(["restore-preview", "--sha", "abc", "--recovery-point", "id", "--categories", "general"], context));

@@ -24,7 +24,7 @@ export function BridgeNodeCredentials({ node, disabled, onChange }: {
   const names = [...new Set([...Object.keys(properties), ...Object.keys(bindings)])];
   return <div className="detail-stack"><ErrorNotice message={tools.error} />
     {!tools.data && !tools.error && <Loading />}
-    {tools.data && !tool && <p role="alert">引用的浏览器工具不存在，请检查应用与工具配置。</p>}
+    {tools.data && !tool && <ErrorNotice message="引用的浏览器工具不存在，请检查应用与工具配置。" />}
     {!!names.length && <fieldset disabled={disabled} className="bridge-credential-inputs"><legend>节点调用凭据</legend>
       <p className="field-hint">选择普通或加密字典的字符串键。显式引用在运行入队时固定版本；未配置的项使用工具默认凭据。</p>
       {names.map(name => {
@@ -42,7 +42,7 @@ export function BridgeNodeCredentials({ node, disabled, onChange }: {
               const next = { ...bindings }; delete next[name]; onChange(Object.keys(next).length ? next : undefined);
             }}><Unlink size={14} /></Button>}
           </div>
-          {!Object.hasOwn(properties, name) && <p role="alert">工具已不再声明此凭据，请移除引用。</p>}
+          {!Object.hasOwn(properties, name) && <ErrorNotice message={`工具已不再声明凭据 ${name}，请移除引用。`} />}
           {required.includes(name) && !reference && <p role="status">请选择凭据字典后运行。</p>}
         </div>;
       })}

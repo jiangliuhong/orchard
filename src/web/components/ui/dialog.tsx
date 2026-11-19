@@ -6,6 +6,7 @@ import { XIcon } from "lucide-react"
 import { Dialog as DialogPrimitive } from "radix-ui"
 
 import { Button } from "@/components/ui/button"
+import { MessageLayer } from "@/components/ToastNotice"
 
 function Dialog({
   ...props
@@ -66,7 +67,7 @@ function DialogContent({
         )}
         {...props}
       >
-        {children}
+        <MessageLayer inDialog>{children}</MessageLayer>
         {showCloseButton && (
           <DialogPrimitive.Close
             data-slot="dialog-close"

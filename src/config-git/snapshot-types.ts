@@ -28,14 +28,14 @@ export interface PortableWorkflow {
 export interface PortableDictionary { id: string; kind: "plain" | "encrypted"; currentVersionId: string; versions: ({ id: string; dictionaryId: string } & DictionaryVersionContent)[] }
 export interface PortableSnapshot {
   dictionaries?: PortableDictionary[];
-  general: { theme: SnapshotTheme }; providers: PortableProvider[]; webBridge: PortableBridge;
+  general?: { theme: SnapshotTheme }; providers: PortableProvider[]; webBridge: PortableBridge;
   scripts: PortableScript[]; workflows: PortableWorkflow[];
 }
 export type SnapshotCategory = "general" | "providers" | "webBridge" | "scripts" | "workflows" | "dictionaries";
 export type SnapshotDependency = { category: "scripts"; id: string; versionId: string; digest: string } | { category: "dictionaries"; id: string; kind: "plain" | "encrypted"; keys: string[] };
 export interface SnapshotObject { category: SnapshotCategory; id: string; path: string; digest: string; dependencies: SnapshotDependency[]; versions: { id: string; digest: string }[] }
 export interface SnapshotManifest {
-  formatVersion: 1 | 2; minOrchardVersion: string; categories: SnapshotCategory[];
+  formatVersion: 1 | 2 | 3; minOrchardVersion: string; categories: SnapshotCategory[];
   objects: SnapshotObject[]; files: { path: string; bytes: number; sha256: string }[];
 }
 export interface SnapshotBundle { files: SourceFiles; manifest: SnapshotManifest; digest: string; snapshot: PortableSnapshot }

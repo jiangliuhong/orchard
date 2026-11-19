@@ -5,8 +5,8 @@ import { JSDOM } from "jsdom";
 import type { JsonSchema } from "../src/domain/types.js";
 import { assertSchema } from "../src/domain/validation.js";
 
-const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/web-bridge" });
-for (const key of ["window", "document", "Event", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Node", "navigator"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/web-bridge", pretendToBeVisual: true });
+for (const key of ["window", "document", "Event", "CustomEvent", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Node", "navigator", "getComputedStyle"] as const) Object.defineProperty(globalThis, key, { configurable: true, value: dom.window[key] });
 const { render, screen, fireEvent, cleanup, waitFor } = await import("@testing-library/react");
 const { BridgeParameterInputs } = await import("../src/web/features/BridgeParameterInputs.js");
 afterEach(cleanup);

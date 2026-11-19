@@ -1,12 +1,12 @@
 # 配置 Git 备份与恢复
 
-适用范围：支持配置快照 v2 的 Orchard（兼容读取 v1）。最后更新：2026-11-10。实现及验证见 [远端配置同步](../../features/2026-11-10-remote-config-sync/implementation.md)。
+适用范围：支持配置快照 v3 的 Orchard（兼容读取 v1、v2）。最后更新：2026-11-18。实现及验证见 [远端配置同步](../../features/2026-11-10-remote-config-sync/implementation.md)。
 
 ## 前置条件
 
 在运行 Orchard 的主机安装 Git，准备 SSH 或 HTTPS 仓库访问凭据。SSH 必须预先确认主机密钥；HTTPS 使用主机上的凭据管理器。URL 不能携带口令。设置页面不会接收私钥或 token。首次绑定时填写分支、配置子目录和提交身份。
 
-Git 备份包含常规外观、Provider（含 Agent 模型配置）、Web Bridge、工作流、脚本及固定版本依赖、普通／加密字典。加密字典只导出密文，密钥必须通过独立安全渠道迁移；仓库不保存密钥材料。运行记录、对话、认证信息和浏览器在线状态不导出。Provider 可执行文件路径使用本机映射，跨设备恢复时需要提供目标值。Web Bridge 只同步环境 UUID、环境标识、Origin 和启用状态；浏览器资料 ID、扩展 ID 及其本机映射不进入 Git。
+Git 备份包含 Provider（含 Agent 模型配置）、Web Bridge、工作流、脚本及固定版本依赖、普通／加密字典。加密字典只导出密文，密钥必须通过独立安全渠道迁移；仓库不保存密钥材料。运行记录、对话、认证信息和浏览器在线状态不导出。Provider 可执行文件路径使用本机映射，跨设备恢复时需要提供目标值。Web Bridge 只同步环境 UUID、环境标识、Origin 和启用状态；浏览器资料 ID、扩展 ID 及其本机映射不进入 Git。
 
 ## 设置页面操作
 
@@ -19,7 +19,7 @@ Git 备份包含常规外观、Provider（含 Agent 模型配置）、Web Bridge
 
 同步保留本机独有对象；同 ID 字典使用远端完整键集，键的移除也会显示在差异中。同名不同 ID、字典类型冲突、不可变版本内容冲突会阻止相关应用。缺少解密密钥时先前往“设置 → 加密字典密钥”独立导入，不支持只导入不可用密文。
 
-同步不移动本地 HEAD、不丢弃未推送提交，也不提交或推送；分叉本身不会阻止读取远端快照。应用的是获取时展示的 SHA，不会悄悄切换到后来新增的远端提交。首次备份升级为 v2 时有明确提示，旧版程序不能读取新版快照，历史 v1 仍可恢复且不清空本机字典。
+同步不移动本地 HEAD、不丢弃未推送提交，也不提交或推送；分叉本身不会阻止读取远端快照。应用的是获取时展示的 SHA，不会悄悄切换到后来新增的远端提交。首次备份升级为 v3 时有明确提示。旧版 Orchard 无法读取 v3，历史 v1、v2 仍可恢复，旧快照的外观字段会被忽略。
 
 补齐密钥、Provider 登录、运行时安装及浏览器接入后，恢复的工作流和脚本无需重新编辑字典依赖即可执行。同步本身不会自动执行任何任务。仅本地提交、完整历史和分叉重生成等高级操作可通过 CLI/API 使用。
 
@@ -31,19 +31,19 @@ Git 备份包含常规外观、Provider（含 Agent 模型配置）、Web Bridge
 
 ```sh
 orchard config-git status --pretty
-orchard config-git export --theme system --pretty
-orchard config-git commit-preview --message "更新配置" --theme system --push
+orchard config-git export --pretty
+orchard config-git commit-preview --message "更新配置" --push
 orchard config-git operation --id <operation-id> --pretty
-orchard config-git commit --token <preview-token> --request-id <stable-request-id> --theme system
+orchard config-git commit --token <preview-token> --request-id <stable-request-id>
 orchard config-git fetch
 orchard config-git history --limit 20
-orchard config-git restore-preview --sha <full-sha> --categories general,providers,webBridge,scripts,workflows,dictionaries --mappings-json '{}'
+orchard config-git restore-preview --sha <full-sha> --categories providers,webBridge,scripts,workflows,dictionaries --mappings-json '{}'
 orchard config-git restore --token <preview-token> --request-id <stable-request-id>
 ```
 
 长操作返回 `operationId` 和 `statusUrl`，查询完成结果后再使用其中的预览 token。网络中断重试时沿用同一个 `request-id`。同一标识不得用于不同参数。
 
-导出首次必须显式提供外观；已有服务端常规快照时 CLI 可以省略 `--theme`。CLI 恢复外观不会直接改变任意浏览器，可在设置页面明确领取快照。
+外观由当前浏览器保存，可在「设置 → 常规」调整。
 
 ## 手工编辑快照
 
@@ -67,5 +67,3 @@ orchard config-git validate --directory /path/to/repository/orchard
 - `AUTH_FAILED`：在 Orchard 主机修复凭据或 SSH 主机密钥。
 - `PUSH_REJECTED`：检查远端写入策略；本地提交仍在，可以稍后推送。
 - `RECOVERY_REQUIRED`：查询操作状态并重试恢复；启动时会先补齐已提交事务的文件阶段，再启动业务服务。不要用旧数据库副本覆盖新事务。
-
-浏览器外观恢复绑定到发起客户端及其偏好版本。如果等待期间用户修改过外观，页面要求选择“应用恢复外观”或“保留当前外观”。其他浏览器不会自动接收该客户端的恢复。

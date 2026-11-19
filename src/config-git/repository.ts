@@ -129,7 +129,7 @@ export class GitRepositoryService {
     const entries = await this.tree(b,sha);
     if (entries.some(e=>e.path===b.configDir || b.configDir.startsWith(e.path+'/'))) fail('INVALID_PATH','Configuration directory is occupied by a file');
     const files = await this.files(b, sha); if (!Object.keys(files).length) return 'empty';
-    try { const manifest = JSON.parse(files['manifest.json'] ?? '{}'); if (manifest.formatVersion > 2) return 'unsupported'; } catch { fail('INVALID_SNAPSHOT','Existing configuration directory has an invalid manifest'); }
+    try { const manifest = JSON.parse(files['manifest.json'] ?? '{}'); if (manifest.formatVersion > 3) return 'unsupported'; } catch { fail('INVALID_SNAPSHOT','Existing configuration directory has an invalid manifest'); }
     if (!this.options.validateSnapshot) fail('INVALID_SNAPSHOT','Snapshot validator is required for nonempty configuration directory');
     this.options.validateSnapshot(files); return 'valid';
   }
@@ -247,7 +247,7 @@ export class GitRepositoryService {
     const fetchedAt = new Date().toISOString();
     const snapshotState = await this.inspect(b, sourceSha);
     const files = snapshotState === 'valid' ? await this.files(b, sourceSha) : {};
-    const supportedCategories: string[] = snapshotState === 'valid' ? JSON.parse(files['manifest.json']).categories : [];
+    const supportedCategories: string[] = snapshotState === 'valid' ? JSON.parse(files['manifest.json']).categories.filter((category: string) => category !== 'general') : [];
     const metadata = (await this.git(b.repositoryPath, ['show', '-s', '--format=%s%x00%an%x00%cI', sourceSha])).trimEnd().split('\0');
     return { bindingId: b.id, branch: b.branch, sourceSha, fetchedAt, commit: { subject: metadata[0], author: metadata[1], committedAt: metadata[2] }, snapshotState, supportedCategories };
   }); }

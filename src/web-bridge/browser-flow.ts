@@ -90,7 +90,3 @@ export function validateBrowserFlow(flow: BrowserFlow) {
     }
   }
 }
-
-export function browserFlowRequiresApproval(method: string, flow: BrowserFlow) {
-  return [method, ...flow.steps.map(step => step.method)].some(value => value !== "GET" && value !== "HEAD");
-}

@@ -6,14 +6,14 @@ import type { WebBridgeConfig } from "../web-bridge/config.js";
 import type { ScriptDefinition } from "../domain/scripts.js";
 import type { SourceFiles } from "../domain/types.js";
 import { check } from "../domain/errors.js";
-import type { PortableSnapshot, PortableWorkflow, PortableScript, PortableBridge, SnapshotBundle, SnapshotManifest, SnapshotObject, SnapshotTheme } from "./snapshot-types.js";
+import type { PortableSnapshot, PortableWorkflow, PortableScript, PortableBridge, SnapshotBundle, SnapshotManifest, SnapshotObject } from "./snapshot-types.js";
 import { array, canonicalSnapshotJson, compareCodePoints, declarativeConfig, encodeSnapshotId, localReference, normalizeSnapshotText, object, parseDeclarativeConfig, parseSnapshotJson, snapshotDigest, snapshotPath, string } from "./snapshot-primitives.js";
 import { fixedDependencies, normalizedScript, normalizedSource, portableScriptHash, portableWorkflowHash, validatePortableSnapshot, workflowDependencies, workflowIdentity } from "./snapshot-validation.js";
 export * from "./snapshot-types.js";
 export { canonicalSnapshotJson, parseDeclarativeConfig, snapshotDigest, encodeSnapshotId, localReference } from "./snapshot-primitives.js";
 export { portableScriptHash, portableWorkflowHash, validatePortableSnapshot } from "./snapshot-validation.js";
 
-const CATEGORIES = ["general", "providers", "webBridge", "scripts", "workflows"] as const;
+const CATEGORIES = ["providers", "webBridge", "scripts", "workflows"] as const;
 const sorted = <T extends { id: string }>(items: T[]) => [...items].sort((a, b) => compareCodePoints(a.id, b.id));
 const workflowRoot = (id: string) => `workflows/${encodeSnapshotId(id)}`;
 const scriptRoot = (id: string) => `scripts/${encodeSnapshotId(id)}`;
@@ -22,8 +22,8 @@ const versionPath = (root: string, id: string) => `${root}/versions/${encodeSnap
 function normalizedSnapshot(value: PortableSnapshot): PortableSnapshot {
   validatePortableSnapshot(value);
   return {
-    ...(value.dictionaries !== undefined ? { dictionaries: sorted(value.dictionaries).map(d => ({ ...d, versions: sorted(d.versions) })) } : {}),
-    general: { ...value.general },
+    ...(value.dictionaries !== undefined || !value.general ? { dictionaries: sorted(value.dictionaries ?? []).map(d => ({ ...d, versions: sorted(d.versions) })) } : {}),
+    ...(value.general ? { general: { ...value.general } } : {}),
     providers: sorted(value.providers).map(p => ({ ...p, models: sorted(p.models), ...(p.agentModelConfigs ? { agentModelConfigs: sorted(p.agentModelConfigs) } : {}) })),
     webBridge: { ...value.webBridge, environments: Object.fromEntries(Object.entries(value.webBridge.environments).map(([id, envs]) => [id, sorted(envs)])) },
     scripts: sorted(value.scripts).map(s => ({ ...s, draft: s.draft ? normalizedScript(s.draft) : null, versions: sorted(s.versions).map(v => ({ id: v.id, definition: normalizedScript(v.definition) })) })),
@@ -35,14 +35,14 @@ function manifestFor(snapshot: PortableSnapshot, files: SourceFiles): SnapshotMa
   const add = (category: SnapshotObject["category"], id: string, path: string, value: unknown, versions: SnapshotObject["versions"] = [], dependencies: SnapshotObject["dependencies"] = []) => {
     objects.push({ category, id, path, digest: snapshotDigest(canonicalSnapshotJson(value)), versions, dependencies });
   };
-  add("general", "general", "settings/general.config.ts", snapshot.general);
+  if (snapshot.general) add("general", "general", "settings/general.config.ts", snapshot.general);
   add("webBridge", "webBridge", "settings/web-bridge.config.ts", snapshot.webBridge);
   for (const p of snapshot.providers) add("providers", p.id, `settings/providers/${encodeSnapshotId(p.id)}.config.ts`, p);
   for (const d of snapshot.dictionaries ?? []) add("dictionaries", d.id, `dictionaries/${encodeSnapshotId(d.id)}/dictionary.json`, d, d.versions.map(v => ({ id: v.id, digest: snapshotDigest(canonicalSnapshotJson(v)) })));
   for (const s of snapshot.scripts) add("scripts", s.id, `${scriptRoot(s.id)}/script.config.ts`, s, s.versions.map(v => ({ id: v.id, digest: portableScriptHash(v.id, v.definition) })), dictionaryDependencies(snapshot, s));
   for (const w of snapshot.workflows) add("workflows", w.id, `${workflowRoot(w.id)}/workflow.config.ts`, w, w.versions.map(v => ({ id: v.id, digest: portableWorkflowHash(w.id, v.id, v.files) })), [...fixedDependencies(snapshot, [...w.versions.map(v => v.files), ...(w.draft ? [w.draft.files] : [])]), ...dictionaryDependencies(snapshot, w)]);
   objects.sort((a, b) => compareCodePoints(a.category, b.category) || compareCodePoints(a.id, b.id));
-  return { formatVersion: snapshot.dictionaries === undefined ? 1 : 2, minOrchardVersion: "0.1.0", categories: [...CATEGORIES, ...(snapshot.dictionaries === undefined ? [] : ["dictionaries" as const])], objects, files: Object.keys(files).filter(p => p !== "manifest.json").sort(compareCodePoints).map(path => ({ path, bytes: Buffer.byteLength(files[path]!, "utf8"), sha256: snapshotDigest(files[path]!) })) };
+  return { formatVersion: snapshot.general ? (snapshot.dictionaries === undefined ? 1 : 2) : 3, minOrchardVersion: "0.1.0", categories: [...(snapshot.general ? ["general" as const] : []), ...CATEGORIES, ...(snapshot.dictionaries === undefined ? [] : ["dictionaries" as const])], objects, files: Object.keys(files).filter(p => p !== "manifest.json").sort(compareCodePoints).map(path => ({ path, bytes: Buffer.byteLength(files[path]!, "utf8"), sha256: snapshotDigest(files[path]!) })) };
 }
 function finish(snapshot: PortableSnapshot, files: SourceFiles): SnapshotBundle {
   const manifest = manifestFor(snapshot, files);
@@ -54,7 +54,7 @@ function finish(snapshot: PortableSnapshot, files: SourceFiles): SnapshotBundle 
 /** Pure, deterministic data-to-file conversion. No filesystem or database writes. */
 export function serializeSnapshot(value: PortableSnapshot): SnapshotBundle {
   const snapshot = normalizedSnapshot(value), files: SourceFiles = Object.create(null);
-  files["settings/general.config.ts"] = declarativeConfig(snapshot.general);
+  if (snapshot.general) files["settings/general.config.ts"] = declarativeConfig(snapshot.general);
   files["settings/web-bridge.config.ts"] = declarativeConfig(snapshot.webBridge);
   for (const d of snapshot.dictionaries ?? []) {
     const root = `dictionaries/${encodeSnapshotId(d.id)}`;
@@ -92,7 +92,8 @@ function checkFileSet(files: SourceFiles) {
   }
   check(total <= 64 * 1024 * 1024, "SNAPSHOT_LIMIT", "Snapshot exceeds 64 MiB");
 }
-function decode(files: SourceFiles, v2 = false): PortableSnapshot {
+function decode(files: SourceFiles, version: SnapshotManifest["formatVersion"]): PortableSnapshot {
+  const hasDictionaries = version >= 2;
   checkFileSet(files);
   const used = new Set<string>(["manifest.json"]);
   const config = (path: string) => {
@@ -107,8 +108,8 @@ function decode(files: SourceFiles, v2 = false): PortableSnapshot {
       check(Object.hasOwn(files, path) && !used.has(path), "INVALID_FILES", "Missing or multiply referenced source file"); used.add(path); return [name, files[path]!];
     }));
   };
-  const snapshot: PortableSnapshot = { general: config("settings/general.config.ts") as PortableSnapshot["general"], providers: [], webBridge: config("settings/web-bridge.config.ts") as PortableBridge, scripts: [], workflows: [] };
-  if (v2) {
+  const snapshot: PortableSnapshot = { ...(version < 3 ? { general: config("settings/general.config.ts") as PortableSnapshot["general"] } : {}), providers: [], webBridge: config("settings/web-bridge.config.ts") as PortableBridge, scripts: [], workflows: [] };
+  if (hasDictionaries) {
     snapshot.dictionaries = [];
     for (const path of Object.keys(files).filter(p => /^dictionaries\/[^/]+\/dictionary.json$/.test(p))) {
       used.add(path); const d = object(parseSnapshotJson(files[path]!), ["id", "kind", "currentVersionId"]); string(d.id);
@@ -124,7 +125,7 @@ function decode(files: SourceFiles, v2 = false): PortableSnapshot {
       const s = object(config(path), ["id", "name", "description", "runtime", "archived", "currentPublishedVersionId", "draft", "versions"]); string(s.id);
       const root = scriptRoot(s.id); check(path === `${root}/script.config.ts`, "INVALID_ID", "Script path identity mismatch"); array(s.versions);
       const definition = (at: string, versionId: string | null): ScriptDefinition => {
-        const d = object(config(`${at}/definition.config.ts`), ["id", "versionId", "name", "description", "runtime", "entryFile", "inputSchema", "outputSchema", "timeoutMs", "resultMode", "sourceFiles"], v2 ? ["dictionaryBindings"] : []);
+        const d = object(config(`${at}/definition.config.ts`), ["id", "versionId", "name", "description", "runtime", "entryFile", "inputSchema", "outputSchema", "timeoutMs", "resultMode", "sourceFiles"], hasDictionaries ? ["dictionaryBindings"] : []);
         check(d.id === s.id && d.versionId === versionId, "INVALID_ID", "Script definition identity mismatch"); array(d.sourceFiles); d.sourceFiles.forEach(string);
         const { sourceFiles, versionId: ignored, ...metadata } = d;
         return { ...metadata, files: readSources(at, sourceFiles as string[]) } as unknown as ScriptDefinition;
@@ -147,17 +148,17 @@ function decode(files: SourceFiles, v2 = false): PortableSnapshot {
 }
 function validateManifestHeader(value: unknown): SnapshotManifest {
   const m = object(value, ["formatVersion", "minOrchardVersion", "categories", "objects", "files"]);
-  check(m.formatVersion === 1 || m.formatVersion === 2, "FORMAT_UNSUPPORTED", "Unsupported configuration snapshot version");
+  check(m.formatVersion === 1 || m.formatVersion === 2 || m.formatVersion === 3, "FORMAT_UNSUPPORTED", "Unsupported configuration snapshot version");
   check(typeof m.minOrchardVersion === "string" && /^\d+\.\d+\.\d+$/.test(m.minOrchardVersion), "FORMAT_UNSUPPORTED", "Invalid minimum Orchard version");
   const parts = m.minOrchardVersion.split(".").map(Number); check(parts[0] === 0 && parts[1] === 1 && parts[2] === 0 || parts[0] === 0 && parts[1] === 0, "FORMAT_UNSUPPORTED", "Snapshot requires a newer Orchard version");
-  array(m.categories); check(canonicalSnapshotJson([...m.categories].sort()) === canonicalSnapshotJson([...CATEGORIES, ...(m.formatVersion === 2 ? ["dictionaries"] : [])].sort()), "INVALID_SNAPSHOT", "All snapshot categories must be declared exactly once"); array(m.objects); array(m.files);
+  array(m.categories); check(canonicalSnapshotJson([...m.categories].sort()) === canonicalSnapshotJson([...CATEGORIES, ...(m.formatVersion < 3 ? ["general"] : []), ...(m.formatVersion >= 2 ? ["dictionaries"] : [])].sort()), "INVALID_SNAPSHOT", "All snapshot categories must be declared exactly once"); array(m.objects); array(m.files);
   return m as unknown as SnapshotManifest;
 }
 /** Validates the complete tree and all authoritative digests before returning restore DTOs. */
 export function parseSnapshot(files: SourceFiles): PortableSnapshot {
   checkFileSet(files); check(Object.hasOwn(files, "manifest.json"), "INVALID_FILES", "Missing manifest.json");
   const manifest = validateManifestHeader(parseSnapshotJson(files["manifest.json"]!));
-  const snapshot = decode(files, manifest.formatVersion === 2), expected = manifestFor(snapshot, files);
+  const snapshot = decode(files, manifest.formatVersion), expected = manifestFor(snapshot, files);
   check(canonicalSnapshotJson(manifest.files) === canonicalSnapshotJson(expected.files), "DIGEST_MISMATCH", "Manifest file set, size or digest mismatch");
   check(canonicalSnapshotJson(manifest.objects) === canonicalSnapshotJson(expected.objects), "DIGEST_MISMATCH", "Manifest object identity, dependency or definition digest mismatch");
   return snapshot;
@@ -166,12 +167,11 @@ export function parseSnapshot(files: SourceFiles): PortableSnapshot {
 export function refreshManifest(files: SourceFiles): SnapshotBundle {
   checkFileSet(files);
   const header = Object.hasOwn(files, "manifest.json") ? validateManifestHeader(parseSnapshotJson(files["manifest.json"]!)) : undefined;
-  return finish(decode(files, header?.formatVersion === 2), files);
+  return finish(decode(files, header?.formatVersion ?? (Object.hasOwn(files, "settings/general.config.ts") ? 1 : 3)), files);
 }
 
 /** Caller holds the configuration read window while this synchronous copy runs. */
-export function exportSnapshot(store: Store, bridge: WebBridgeConfig | Record<string, unknown>, theme: SnapshotTheme): SnapshotBundle {
-  check(["light", "dark", "system"].includes(theme), "GENERAL_REQUIRED", "Export requires an explicit theme");
+export function exportSnapshot(store: Store, bridge: WebBridgeConfig | Record<string, unknown>): SnapshotBundle {
   const raw = workspaceSchemaInstalled(store) || typeof bridge.applications === "function" ? readConfiguredBridge(store) : bridge;
   const b = object(raw), applications = object(b.applications), environments = object(b.environments);
   const portableBridge: PortableBridge = {
@@ -214,7 +214,7 @@ export function exportSnapshot(store: Store, bridge: WebBridgeConfig | Record<st
     };
     return { id: s.id, name: s.name, description: s.description, runtime: s.runtime, archived: s.status === "archived", currentPublishedVersionId: s.currentPublishedVersionId, draft: s.currentDraftVersionId ? read(s.currentDraftVersionId, false) : null, versions: [...ids].map(id => ({ id, definition: read(id, true) })) };
   });
-  return serializeSnapshot({ dictionaries: exportDictionaries(store), general: { theme }, providers, webBridge: portableBridge, scripts, workflows: [...workflows.values()] });
+  return serializeSnapshot({ dictionaries: exportDictionaries(store), providers, webBridge: portableBridge, scripts, workflows: [...workflows.values()] });
 }
 export class ConfigSnapshotService {
   export = exportSnapshot;

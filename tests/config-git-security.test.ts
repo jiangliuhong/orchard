@@ -52,9 +52,9 @@ test("historical removed keys and pointers preserve immutable versions and do no
   await restore.apply("initial", (await restore.preview(parsed)).token);
   assert.equal(store.versions("review-workflow").length, 2);
   assert.equal(store.scriptVersions("helper").length, 2);
-  const captured = captureSnapshot(store, "dark").snapshot;
+  const captured = captureSnapshot(store).snapshot;
   assert.equal((await restore.preview(captured, { categories: ["dictionaries"] })).changes[0]!.changeType, "same");
-  assert.doesNotThrow(() => exportSnapshot(store, { ...s.webBridge }, "dark"));
+  assert.doesNotThrow(() => exportSnapshot(store, { ...s.webBridge }));
   const next = snapshot({ ...d, currentVersionId: "new-dictionary-version", versions: [{ ...d.versions[0]!, id: "new-dictionary-version", description: "changed" }] });
   const applied = await restore.apply("change", (await restore.preview(next, { categories: ["dictionaries"] })).token);
   const undo = await restore.previewRecoveryPoint(applied.recoveryPointId);
@@ -78,7 +78,7 @@ test("current workflow resolves historical fixed script dependencies even when c
   await assert.rejects(restore.preview(missing, { categories: ["workflows"] }), { code: "DEPENDENCY_MISSING" });
   assert.throws(() => serializeSnapshot(missing), { code: "DICTIONARY_KEY_MISSING" });
   await restore.apply("fixed", (await restore.preview(parsed)).token);
-  const exported = exportSnapshot(store, { ...s.webBridge }, "dark");
+  const exported = exportSnapshot(store, { ...s.webBridge });
   assert.ok(exported.snapshot.scripts[0]!.versions.some(v => v.id === "helper-old"));
   assert.ok(exported.snapshot.scripts[0]!.versions.some(v => v.id === "helper-new"));
 });
@@ -111,7 +111,7 @@ for (const boundary of ["prepared", "transaction"]) test(`key change at ${bounda
   assert.equal(guarded.operations().find(o => o.requestId === "race")!.phase, "failed");
 });
 
-test("v1 repository backup preview explicitly warns about v2 upgrade before confirmation", async t => {
+test("v1 repository backup preview explicitly warns about v3 upgrade before confirmation", async t => {
   const { root, store, restore } = setup(t), remote = join(root, "remote.git"); mkdirSync(remote);
   execFileSync("git", ["init", "--bare", "--initial-branch=main"], { cwd: remote, stdio: "ignore" });
   const service = new ConfigGitService(store, new WebBridgeConfig(store.root), restore, { testTransport: () => remote });
@@ -121,8 +121,8 @@ test("v1 repository backup preview explicitly warns about v2 upgrade before conf
   const seed = await service.repository.previewCommit({ files: serializeSnapshot(legacy).files, revision: "seed", message: "v1" });
   const original = await service.repository.confirmCommit({ token: seed.token, revision: "seed", requestId: "seed" });
   const before = (await service.repository.status()).head;
-  const preview = await service.commitPreview({ message: "v2", theme: "dark" });
-  assert.ok(preview.warnings?.some(w => w.includes("v1") && w.includes("v2") && w.includes("旧版")));
+  const preview = await service.commitPreview({ message: "v2" });
+  assert.ok(preview.warnings?.some(w => w.includes("v1") && w.includes("v3") && w.includes("旧版")));
   assert.equal((await service.repository.status()).head, before);
   assert.equal(parseSnapshot(await service.repository.readSnapshot(original.sha!)).dictionaries, undefined);
 });

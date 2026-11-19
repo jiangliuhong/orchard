@@ -115,9 +115,9 @@ orchard config-git status|repository|history|recovery-points
 orchard config-git remote-check --remote-url <ssh-or-https-url>
 orchard config-git bind --remote-url <url> --branch <branch> [--config-dir <path>] [--name <name> --email <email>]
 orchard config-git unbind [--request-id <id>]
-orchard config-git export [--theme light|dark|system]
-orchard config-git commit-preview --message <text> [--push] [--regenerate] [--theme <theme>]
-orchard config-git commit --token <preview-token> [--request-id <id>] [--theme <theme>]
+orchard config-git export
+orchard config-git commit-preview --message <text> [--push] [--regenerate]
+orchard config-git commit --token <preview-token> [--request-id <id>]
 orchard config-git fetch|push [--request-id <id>]
 orchard config-git restore-preview (--sha <sha> | --recovery-point <id>) --categories <comma-separated> [--mappings-json <json>]
 orchard config-git restore --token <preview-token> [--request-id <id>]
@@ -130,8 +130,8 @@ export async function runConfigGitCli(args: string[], context: Context) {
   const commandOptions: Record<string, string[]> = {
     validate: ["directory", "refresh-manifest"], status: [], repository: [], "recovery-points": [],
     history: ["cursor", "limit", "start-sha"], commits: ["cursor", "limit", "start-sha"], operation: ["id"],
-    export: ["theme"], "commit-preview": ["message", "push", "regenerate", "theme"],
-    commit: ["token", "request-id", "theme"], confirm: ["token", "request-id", "theme"],
+    export: [], "commit-preview": ["message", "push", "regenerate"],
+    commit: ["token", "request-id"], confirm: ["token", "request-id"],
     "remote-sync-source": ["request-id"], fetch: ["request-id"], push: ["request-id"], unbind: ["request-id"], recover: ["id", "request-id"],
     "remote-check": ["remote-url"], bind: ["remote-url", "branch", "config-dir", "name", "email", "request-id"],
     "restore-preview": ["sha", "recovery-point", "categories", "mappings-json"], restore: ["token", "request-id"],
@@ -155,8 +155,6 @@ export async function runConfigGitCli(args: string[], context: Context) {
     if (!args[index + 1] || args[index + 1].startsWith("--")) fail(`Missing value for ${name}`);
     return args[index + 1];
   }
-  const theme = option("--theme");
-  if (theme && !["light", "dark", "system"].includes(theme)) fail("Invalid theme");
   const requestId = () => option("--request-id") ?? randomUUID();
   const post = (path: string, body: unknown) => context.request(`/api/config-git/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (command === "validate") return context.output(validateSnapshotDirectory(snapshotDirectory(context.dataDir, option("--directory")), args.includes("--refresh-manifest")));
@@ -175,15 +173,15 @@ export async function runConfigGitCli(args: string[], context: Context) {
   }
   if (command === "unbind") return post(command, { requestId: requestId() });
   if (command === "recover") return post(`operations/${encodeURIComponent(option("--id", true)!)}/recover`, { requestId: requestId() });
-  if (command === "export") return post("export", { theme });
+  if (command === "export") return post("export", {});
   if (command === "remote-sync-source" || command === "fetch" || command === "push") return post(command, { requestId: requestId() });
-  if (command === "commit-preview") return post(command, { message: option("--message", true), push: args.includes("--push"), regenerate: args.includes("--regenerate"), theme });
-  if (command === "commit" || command === "confirm" || command === "restore") return post(command === "confirm" ? "commit" : command, { token: option("--token", true), requestId: requestId(), ...(command === "restore" ? {} : { theme }) });
+  if (command === "commit-preview") return post(command, { message: option("--message", true), push: args.includes("--push"), regenerate: args.includes("--regenerate") });
+  if (command === "commit" || command === "confirm" || command === "restore") return post(command === "confirm" ? "commit" : command, { token: option("--token", true), requestId: requestId() });
   if (command === "restore-preview") {
     const sha = option("--sha"), recoveryPoint = option("--recovery-point");
     if (Boolean(sha) === Boolean(recoveryPoint)) fail("Specify exactly one of --sha and --recovery-point");
     const categories = option("--categories", true)!.split(",");
-    if (!categories.length || categories.some(c => !["general", "providers", "webBridge", "workflows", "scripts", "dictionaries"].includes(c)) || new Set(categories).size !== categories.length) fail("Invalid restore categories");
+    if (!categories.length || categories.some(c => !["providers", "webBridge", "workflows", "scripts", "dictionaries"].includes(c)) || new Set(categories).size !== categories.length) fail("Invalid restore categories");
     let mappings: unknown;
     try { mappings = JSON.parse(option("--mappings-json") ?? "{}"); } catch { fail("Invalid mappings JSON"); }
     if (!mappings || typeof mappings !== "object" || Array.isArray(mappings) || Object.values(mappings).some(v => typeof v !== "string")) fail("Mappings must be a JSON object of strings");

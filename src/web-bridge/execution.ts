@@ -1,4 +1,4 @@
-import { browserFlowRequiresApproval, validateBrowserFlow } from "./browser-flow.js";
+import { validateBrowserFlow } from "./browser-flow.js";
 import { credentialSchema, credentialProperties, credentialRequired } from "./credential-schema.js";
 import { allowsRequestBody, type BridgeHttpMethod } from "./http-methods.js";
 import { BROWSER_EXECUTION_SCHEMA, type BrowserExecution } from "./browser-execution.js";
@@ -84,13 +84,10 @@ export function validateHttpDefinition(path: string, method: string, execution: 
   }
 }
 
-export function validateStoredHttpTool(tool: { path: string; method: string; parameters: JsonSchema; execution?: BridgeExecution; risk?: string; approval?: string }) {
+export function validateStoredHttpTool(tool: { path: string; method: string; parameters: JsonSchema; execution?: BridgeExecution }) {
   if (!tool.execution) return;
   assertSchema(tool.execution, BRIDGE_HTTP_SCHEMA, "HTTP 执行配置");
   validateHttpDefinition(tool.path, tool.method, tool.execution, tool.parameters);
-  if (tool.execution.transport === "browser" && tool.execution.flow && browserFlowRequiresApproval(tool.method, tool.execution.flow)) {
-    check(tool.risk && tool.risk !== "read" && tool.approval === "user", "INVALID_BROWSER_FLOW", "包含非 GET/HEAD 步骤的浏览器请求链必须声明操作风险并要求用户确认");
-  }
 }
 
 export interface HttpTool { path: string; method: BridgeHttpMethod; fields: string[]; execution: BridgeHttpExecution }
