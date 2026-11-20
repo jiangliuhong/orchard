@@ -74,7 +74,7 @@ export class QuickLaunchGroups {
           input.destinationGroupId, now, group.id);
         this.store.exec("DELETE FROM quick_launch_groups WHERE id=?", group.id);
       }
-      return { deletedGroups: state.groups.length, movedCards: state.cards.length };
+      return { deletedGroups: state.groups.length, deletedGroupIds: state.groups.map(group => group.id), movedCards: state.cards.length };
     });
   }
 

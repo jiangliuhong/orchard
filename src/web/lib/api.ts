@@ -51,7 +51,7 @@ export function useCommandKey() {
   };
 }
 export const pretty = (value: unknown) => JSON.stringify(value, null, 2) ?? "—";
-export function useResource<T>(path: string | undefined) {
+export function useResource<T>(path: string | undefined, refresh = 0) {
   const [data, setData] = useState<T>(), [error, setError] = useState(""), [revision, setRevision] = useState(0);
   const lastLoadedPath = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -75,8 +75,8 @@ export function useResource<T>(path: string | undefined) {
       setError(error.message);
     });
     return () => { controller.abort(); window.removeEventListener(serviceRecoveredEvent, refreshAfterRecovery); };
-  }, [path, revision]);
-  return { data, error, reload: () => setRevision(r => r + 1) };
+  }, [path, revision, refresh]);
+  return { data, error, setData, reload: () => setRevision(r => r + 1) };
 }
 export function useStream(resource: "runs" | "turns", id: string | undefined, callback: (event: StreamEvent) => void) {
   const handler = useRef(callback); handler.current = callback;

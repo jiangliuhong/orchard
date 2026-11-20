@@ -4,6 +4,57 @@ import { test } from "node:test";
 import { createApp } from "../src/server/app.js";
 import { publishExample, setup, until } from "./helpers.js";
 
+test("group routes create, move, and delete a subtree while migrating its cards", async t => {
+  const { store, providers, authoring } = setup(t);
+  const { app } = createApp(store, providers);
+  t.after(() => app.close());
+  await app.ready();
+  const version = await publishExample(authoring);
+  const url = "/api/quick-launch-groups";
+  async function request(status: number, method: "GET" | "POST" | "PATCH" | "DELETE", path: string, payload?: object) {
+    const response = await app.inject({ method, url: path, headers: { host: "localhost" }, payload });
+    assert.equal(response.statusCode, status, response.body);
+    return response.json();
+  }
+  const create = (name: string, parentId: string | null = null) =>
+    request(201, "POST", url, { name, parentId, requestId: randomUUID() });
+  const root = await create("巡检");
+  const destination = await create("归档");
+  const child = await create("生产", root.id);
+  const moved = await request(200, "PATCH", `${url}/${child.id}`, {
+    name: "生产巡检", parentId: destination.id, revision: child.revision, requestId: randomUUID(),
+  });
+  assert.deepEqual(moved, { ...child, name: "生产巡检", parentId: destination.id, revision: 2 });
+  const conflict = await request(409, "PATCH", `${url}/${child.id}`, {
+    name: "过期修改", parentId: root.id, revision: child.revision, requestId: randomUUID(),
+  });
+  assert.equal(conflict.code, "REVISION_CONFLICT");
+  const card = await request(201, "POST", "/api/quick-launches", {
+    name: "迁移卡片", note: "", groupId: child.id, target: { kind: "workflow", versionId: version.id, workflowId: version.workflowId },
+    fixedInput: {}, inputSources: {}, requestId: randomUUID(),
+  });
+  const previewPath = `${url}/${destination.id}/deletion-preview`;
+  const preview = await request(200, "POST", previewPath);
+  assert.equal(preview.descendantCount, 1);
+  assert.equal(preview.cardCount, 1);
+  assert.deepEqual(preview.destinations, [root]);
+
+  const anotherRoot = await create("其他分组");
+  const path = `${url}/${destination.id}`;
+  const deletion = { destinationGroupId: root.id, requestId: randomUUID() };
+  const stale = await request(409, "DELETE", path, { ...deletion, previewToken: preview.previewToken });
+  assert.equal(stale.code, "PREVIEW_STALE");
+  const freshPreview = await request(200, "POST", previewPath);
+  const input = { ...deletion, previewToken: freshPreview.previewToken };
+  const deleted = await request(200, "DELETE", path, input);
+  assert.deepEqual(deleted, { deletedGroups: 2, deletedGroupIds: [child.id, destination.id], movedCards: 1 });
+  assert.deepEqual(await request(200, "DELETE", path, input), deleted);
+  assert.deepEqual(new Set((await request(200, "GET", url)).items.map((group: { id: string }) => group.id)), new Set([root.id, anotherRoot.id]));
+  const saved = await request(200, "GET", `/api/quick-launches/${card.id}`);
+  assert.equal(saved.groupId, root.id);
+  assert.equal(saved.revision, card.revision + 1);
+});
+
 test("quick launch routes save a pinned workflow and dispatch once across retries", async t => {
   const { store, providers, authoring } = setup(t);
   const { app } = createApp(store, providers);
